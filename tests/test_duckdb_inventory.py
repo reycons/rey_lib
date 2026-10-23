@@ -74,13 +74,13 @@ def test_the_database_asked_for_is_the_one_listed(duck) -> None:
 
 def test_the_export_validates_with_no_duplicates(duck) -> None:
     """The original symptom: duplicate object definitions schemas:main.main."""
-    found = DatabaseDdlExport.validate(duck, adapter=DBAdapter())
+    found = DatabaseDdlExport.validate(duck, connection="rey", adapter=DBAdapter())
 
     assert found["errors"] == [] and found["duplicates"] == []
 
 
 def test_a_full_export_succeeds(duck, tmp_path: Path) -> None:
-    result = DatabaseDdlExport.export(duck, output_root=str(tmp_path), adapter=DBAdapter())
+    result = DatabaseDdlExport.export(duck, connection="rey", output_root=str(tmp_path), adapter=DBAdapter())
 
     assert sorted(result["objects"]) == [
         "schemas:main.main", "schemas:s.s", "sequences:s.q", "tables:s.t", "views:s.v",

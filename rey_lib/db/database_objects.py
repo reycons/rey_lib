@@ -384,10 +384,10 @@ class DatabasePrimaryKey:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabasePrimaryKey", ...]:
         """Every primary key the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -404,9 +404,12 @@ class DatabasePrimaryKey:
         )
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabasePrimaryKey":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabasePrimaryKey":
         """One primary key this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+        return cls(name=_row_name(row), table=_row_table(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -466,10 +469,10 @@ class DatabaseForeignKey:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseForeignKey", ...]:
         """Every foreign key the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -483,9 +486,12 @@ class DatabaseForeignKey:
         return _table_child(cls, conn, table, name, adapter, lambda read: read.foreign_keys)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseForeignKey":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseForeignKey":
         """One foreign key this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+        return cls(name=_row_name(row), table=_row_table(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -539,10 +545,10 @@ class DatabaseIndex:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseIndex", ...]:
         """Every index the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -556,9 +562,12 @@ class DatabaseIndex:
         return _table_child(cls, conn, table, name, adapter, lambda read: read.indexes)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseIndex":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseIndex":
         """One index this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+        return cls(name=_row_name(row), table=_row_table(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -641,10 +650,10 @@ class DatabaseConstraint:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseConstraint", ...]:
         """Every unique or check constraint the database holds, unread (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -658,11 +667,13 @@ class DatabaseConstraint:
         return _table_child(cls, conn, table, name, adapter, lambda read: read.constraints)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseConstraint":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseConstraint":
         """One constraint this type claimed, addressed as its ``read_ddl`` addresses it."""
         return cls(
             name=_row_name(row), kind=str(row.get("kind") or ""),
-            table=_row_table(row), depends_on=_depends_on(row),
+            table=_row_table(row, connection, catalog), depends_on=_depends_on(row),
         )
 
     @_ReadDdl
@@ -715,10 +726,10 @@ class DatabaseSequence:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseSequence", ...]:
         """Every sequence the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -732,9 +743,11 @@ class DatabaseSequence:
         return cls(identity=identity, ddl=cls.read_ddl(conn, identity, adapter))
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseSequence":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseSequence":
         """One sequence this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_identity(row, connection, catalog), depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -805,10 +818,10 @@ class DatabaseUserDefinedType:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseUserDefinedType", ...]:
         """Every user-defined type the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -826,9 +839,11 @@ class DatabaseUserDefinedType:
         return cls(identity=identity, kind=str(catalog["kind"]), ddl=ddl)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseUserDefinedType":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseUserDefinedType":
         """One user-defined type this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_identity(row, connection, catalog), depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -896,10 +911,10 @@ class DatabaseTrigger:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseTrigger", ...]:
         """Every trigger the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -913,9 +928,12 @@ class DatabaseTrigger:
         return cls(name=name, table=table, ddl=cls.read_ddl(conn, table, name, adapter))
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseTrigger":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseTrigger":
         """One trigger this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+        return cls(name=_row_name(row), table=_row_table(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -971,15 +989,17 @@ class DatabaseTable:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseTable", ...]:
         """Every table the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseTable":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseTable":
         """One table this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_identity(row, connection, catalog), depends_on=_depends_on(row))
 
     @classmethod
     def exists(
@@ -1601,10 +1621,10 @@ class DatabaseView:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseView", ...]:
         """Every view the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -1631,9 +1651,11 @@ class DatabaseView:
         raise DatabaseError(f"view not found: {_named(identity)}")
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseView":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseView":
         """One view this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_identity(row, connection, catalog), depends_on=_depends_on(row))
 
     @_ReadDdl
     def read_ddl(
@@ -1709,15 +1731,18 @@ class DatabaseProcedure:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseProcedure", ...]:
         """Every procedure the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseProcedure":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseProcedure":
         """One procedure this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_routine_identity(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @classmethod
     def resolve(
@@ -1830,15 +1855,18 @@ class DatabaseFunction:
 
     @classmethod
     def list(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> tuple["DatabaseFunction", ...]:
         """Every function the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, database, adapter)
+        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseFunction":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseFunction":
         """One function this type claimed, addressed as its ``read_ddl`` addresses it."""
-        return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
+        return cls(identity=_row_routine_identity(row, connection, catalog),
+                   depends_on=_depends_on(row))
 
     @classmethod
     def resolve(
@@ -1950,10 +1978,13 @@ class DatabaseSchema:
     reference = property(_reference)
 
     @classmethod
-    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseSchema":
+    def _from_inventory(
+        cls, row: dict[str, Any], connection: str, catalog: str,
+    ) -> "DatabaseSchema":
         """One schema this type claimed, unread, addressed by its name."""
         return cls(
-            connection="", catalog="", schema=_row_schema(row), depends_on=_depends_on(row),
+            connection=connection, catalog=catalog, schema=_row_schema(row),
+            depends_on=_depends_on(row),
         )
 
     @classmethod
@@ -2107,9 +2138,14 @@ class DatabaseObjectListing:
 
     @classmethod
     def read(
-        cls, conn: Any, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
     ) -> "DatabaseObjectListing":
         """List the database, every entry owned exactly once.
+
+        ``connection`` is the governed name of the connection ``conn`` is a
+        handle of, carried from the caller that holds it; with the catalog this
+        listing resolves, every listed object is built with its whole identity
+        (#1141). Neither is looked up or made up here.
 
         Raises:
             DatabaseError: When an entry is claimed by no type -- naming its
@@ -2120,6 +2156,7 @@ class DatabaseObjectListing:
         adapter = adapter or _adapter()
         provider = adapter.provider(conn)
         rows = _inventory(adapter, conn, database, provider)
+        catalog = _listed_catalog(rows, database, conn)
         objects: list[Any] = []
         for row in rows:
             owners = [owner for owner in _LISTED if _claims(owner, row)]
@@ -2133,7 +2170,7 @@ class DatabaseObjectListing:
                     f"'{kind}' {where} is claimed by {named}; exactly one database "
                     f"object owns each."
                 )
-            objects.append(owners[0]._from_inventory(row))
+            objects.append(owners[0]._from_inventory(row, connection, catalog))
         listed = next(
             (str(row.get("database")).strip() for row in rows
              if str(row.get("database") or "").strip()),
@@ -2222,12 +2259,20 @@ def _claims(owner: type, row: dict[str, Any]) -> bool:
     return owns is None or owns(str(row.get("kind") or ""))
 
 
-def _listed(owner: type, conn: Any, database: str | None, adapter: Any) -> tuple[Any, ...]:
-    """One type's objects, by the same claim and build the listing uses."""
+def _listed(
+    owner: type, conn: Any, connection: str, database: str | None, adapter: Any,
+) -> tuple[Any, ...]:
+    """One type's objects, by the same claim and build the listing uses.
+
+    ``connection`` is the governed name of the connection ``conn`` is a handle
+    of, as its caller holds it; the catalog is the one the listing resolves.
+    """
     adapter = adapter or _adapter()
+    rows = _inventory(adapter, conn, database)
+    catalog = _listed_catalog(rows, database, conn)
     return tuple(
-        owner._from_inventory(row)
-        for row in _inventory(adapter, conn, database)
+        owner._from_inventory(row, connection, catalog)
+        for row in rows
         if _claims(owner, row)
     )
 
@@ -2240,23 +2285,27 @@ def _row_name(row: dict[str, Any]) -> str:
     return str(row.get("name") or "").strip()
 
 
-def _row_identity(row: dict[str, Any]) -> DatabaseObjectIdentity:
+def _row_identity(row: dict[str, Any], connection: str, catalog: str) -> DatabaseObjectIdentity:
+    """The entry's identity, in the connection and catalog it was listed from (#1141)."""
     return DatabaseObjectIdentity(
-        connection="", catalog="", schema=_row_schema(row), name=_row_name(row),
+        connection=connection, catalog=catalog, schema=_row_schema(row), name=_row_name(row),
     )
 
 
-def _row_routine_identity(row: dict[str, Any]) -> DatabaseRoutineIdentity:
+def _row_routine_identity(
+    row: dict[str, Any], connection: str, catalog: str,
+) -> DatabaseRoutineIdentity:
+    """The routine entry's identity, in the connection and catalog it was listed from."""
     return DatabaseRoutineIdentity(
-        connection="", catalog="", schema=_row_schema(row), name=_row_name(row),
+        connection=connection, catalog=catalog, schema=_row_schema(row), name=_row_name(row),
         signature=str(row.get("signature") or ""),
     )
 
 
-def _row_table(row: dict[str, Any]) -> DatabaseObjectIdentity:
-    """The table a child entry belongs to."""
+def _row_table(row: dict[str, Any], connection: str, catalog: str) -> DatabaseObjectIdentity:
+    """The table a child entry belongs to, in the connection and catalog it was listed from."""
     return DatabaseObjectIdentity(
-        connection="", catalog="", schema=_row_schema(row),
+        connection=connection, catalog=catalog, schema=_row_schema(row),
         name=str(row.get("table") or "").strip(),
     )
 
@@ -2287,14 +2336,30 @@ def _dependency(dep: Any) -> DatabaseObjectReference:
     return unstated
 
 
-def _connection_database(conn: Any) -> str:
-    """The database a connection names, where the inventory named none."""
+def _listed_catalog(rows: Iterable[Mapping[str, Any]], database: str | None, conn: Any) -> str:
+    """The catalog listed objects are identified in: the inventory's, else the caller's,
+    else the one the handle names -- or none. Never the listing's display fallback."""
+    listed = next(
+        (str(row.get("database")).strip() for row in rows
+         if str(row.get("database") or "").strip()),
+        "",
+    )
+    return listed or str(database or "").strip() or _handle_database(conn)
+
+
+def _handle_database(conn: Any) -> str:
+    """The database the handle itself names, or empty when it names none."""
     candidate = (
         getattr(conn, "database", None)
         or getattr(getattr(conn, "info", None), "dbname", None)
         or getattr(getattr(conn, "info", None), "database", None)
     )
-    return str(candidate).strip() if candidate else "database"
+    return str(candidate).strip() if candidate else ""
+
+
+def _connection_database(conn: Any) -> str:
+    """The database a connection names, where the inventory named none."""
+    return _handle_database(conn) or "database"
 
 
 def _adapter() -> Any:

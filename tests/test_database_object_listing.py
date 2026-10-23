@@ -67,7 +67,7 @@ class _Adapter:
 def test_each_entry_becomes_the_object_of_its_one_owner() -> None:
     adapter = _Adapter(_INVENTORY)
 
-    listing = DatabaseObjectListing.read(object(), None, adapter)
+    listing = DatabaseObjectListing.read(object(), "rey", None, adapter)
 
     assert [type(obj).__name__ for obj in listing.objects] == [
         "DatabaseSchema", "DatabaseTable", "DatabasePrimaryKey", "DatabaseForeignKey",
@@ -79,7 +79,7 @@ def test_each_entry_becomes_the_object_of_its_one_owner() -> None:
 
 def test_the_constraint_partition_is_the_constraint_types_own() -> None:
     """No owner map: each type claims its own kinds, the same partition its DDL uses."""
-    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+    listing = DatabaseObjectListing.read(object(), "rey", None, _Adapter(_INVENTORY))
     constraints = [
         obj for obj in listing.objects
         if isinstance(obj, (DatabasePrimaryKey, DatabaseForeignKey, DatabaseConstraint))
@@ -97,7 +97,7 @@ def test_an_unowned_kind_is_refused_naming_it_never_dropped() -> None:
     adapter = _Adapter([*_INVENTORY, {"object_type": "rule", "schema": "control", "name": "r"}])
 
     with pytest.raises(DatabaseError, match="No database object owns the DDL of a 'rule'"):
-        DatabaseObjectListing.read(object(), None, adapter)
+        DatabaseObjectListing.read(object(), "rey", None, adapter)
 
 
 def test_an_entry_several_types_claim_is_refused_naming_them(
@@ -106,18 +106,18 @@ def test_an_entry_several_types_claim_is_refused_naming_them(
     monkeypatch.setattr(database_objects, "_LISTED", (DatabaseTable, DatabaseTable))
 
     with pytest.raises(DatabaseError, match="claimed by DatabaseTable, DatabaseTable"):
-        DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY[1:2]))
+        DatabaseObjectListing.read(object(), "rey", None, _Adapter(_INVENTORY[1:2]))
 
 
 def test_a_malformed_inventory_is_refused() -> None:
     with pytest.raises(DatabaseError, match=r"must return list\[dict\]"):
-        DatabaseObjectListing.read(object(), None, _Adapter("not a list"))
+        DatabaseObjectListing.read(object(), "rey", None, _Adapter("not a list"))
     with pytest.raises(DatabaseError, match="empty name"):
-        DatabaseObjectListing.read(object(), None, _Adapter([{"object_type": "table"}]))
+        DatabaseObjectListing.read(object(), "rey", None, _Adapter([{"object_type": "table"}]))
 
 
 def test_references_keep_a_child_s_table_and_a_routine_s_signature() -> None:
-    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+    listing = DatabaseObjectListing.read(object(), "rey", None, _Adapter(_INVENTORY))
     by_name = {obj.reference.name: obj for obj in listing.objects}
 
     assert by_name["run_ix"].reference == DatabaseObjectReference(
@@ -137,22 +137,50 @@ def test_references_keep_a_child_s_table_and_a_routine_s_signature() -> None:
 def test_each_type_s_list_uses_the_same_claim_and_build() -> None:
     adapter = _Adapter(_INVENTORY)
 
-    assert [obj.identity.name for obj in DatabaseTable.list(object(), None, adapter)] == ["run"]
-    assert [obj.name for obj in DatabasePrimaryKey.list(object(), None, adapter)] == ["run_pk"]
-    assert [obj.name for obj in DatabaseConstraint.list(object(), None, adapter)] == ["run_ck"]
-    (procedure,) = DatabaseProcedure.list(object(), None, adapter)
+    tables = DatabaseTable.list(object(), "rey", None, adapter)
+    assert [obj.identity.name for obj in tables] == ["run"]
+    keys = DatabasePrimaryKey.list(object(), "rey", None, adapter)
+    assert [obj.name for obj in keys] == ["run_pk"]
+    constraints = DatabaseConstraint.list(object(), "rey", None, adapter)
+    assert [obj.name for obj in constraints] == ["run_ck"]
+    (procedure,) = DatabaseProcedure.list(object(), "rey", None, adapter)
     assert procedure.identity.signature == "integer"
 
 
 def test_the_database_is_the_inventory_s_then_the_caller_s_then_the_connection_s() -> None:
     nameless = [{"object_type": "schema", "schema": "s", "name": "s"}]
 
-    assert DatabaseObjectListing.read(object(), "asked", _Adapter(nameless)).database == "asked"
+    asked = DatabaseObjectListing.read(object(), "rey", "asked", _Adapter(nameless))
+    assert asked.database == "asked"
 
     class _Conn:
         database = "attached"
 
-    assert DatabaseObjectListing.read(_Conn(), None, _Adapter(nameless)).database == "attached"
+    attached = DatabaseObjectListing.read(_Conn(), "rey", None, _Adapter(nameless))
+    assert attached.database == "attached"
+
+
+def test_listed_objects_carry_their_whole_identity() -> None:
+    """#1141: the governed connection the caller holds, and the catalog the listing resolves."""
+    listing = DatabaseObjectListing.read(object(), "control_db", None, _Adapter(_INVENTORY))
+    table = next(obj for obj in listing.objects if isinstance(obj, DatabaseTable))
+    key = next(obj for obj in listing.objects if isinstance(obj, DatabasePrimaryKey))
+
+    assert (table.identity.connection, table.identity.catalog) == ("control_db", "rey")
+    assert (key.table.connection, key.table.catalog) == ("control_db", "rey")
+    (procedure,) = DatabaseProcedure.list(object(), "control_db", None, _Adapter(_INVENTORY))
+    assert (procedure.identity.connection, procedure.identity.catalog) == ("control_db", "rey")
+
+
+def test_no_catalog_is_made_up_for_an_identity() -> None:
+    """Where nothing names a catalog, an identity has none -- not the listing's fallback."""
+    nameless = [{"object_type": "table", "schema": "s", "name": "t"}]
+
+    listing = DatabaseObjectListing.read(object(), "control_db", None, _Adapter(nameless))
+
+    (table,) = listing.objects
+    assert table.identity.catalog == ""
+    assert listing.database == "database"
 
 
 class TestReadDdlIsOneContract:
@@ -161,7 +189,7 @@ class TestReadDdlIsOneContract:
     def test_a_listed_object_addresses_its_own_ddl(self) -> None:
         adapter = _Adapter(_INVENTORY)
         (schema,) = [
-            obj for obj in DatabaseObjectListing.read(object(), None, adapter).objects
+            obj for obj in DatabaseObjectListing.read(object(), "rey", None, adapter).objects
             if isinstance(obj, DatabaseSchema)
         ]
 
@@ -194,7 +222,7 @@ class TestReadDdlIsOneContract:
 
 def test_keys_and_other_constraints_carry_their_own_canonical_kinds() -> None:
     """One provider word, three canonical kinds (backlog 1102)."""
-    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+    listing = DatabaseObjectListing.read(object(), "rey", None, _Adapter(_INVENTORY))
 
     kinds = {type(obj).__name__: obj.reference.kind for obj in listing.objects}
 

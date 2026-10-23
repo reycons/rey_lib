@@ -146,7 +146,7 @@ def test_the_ddl_export_asks_the_trigger_by_its_table(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     conn = types.SimpleNamespace(provider="postgres")
 
-    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, connection="rey", output_root=str(tmp_path))
 
     assert asked == [("control", "run_log", "run_log_audit")]
     (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "run_log_audit" in p.name]

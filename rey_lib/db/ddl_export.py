@@ -64,6 +64,7 @@ class DatabaseDdlExport:
         cls,
         conn: Any,
         *,
+        connection: str,
         output_root: str,
         database: str | None = None,
         validate_only: bool = False,
@@ -78,12 +79,15 @@ class DatabaseDdlExport:
         stale-file cleanup are skipped so unselected objects are left untouched.
         With ``object_filter=None`` the whole database is exported.
 
+        ``connection`` is the governed name of the connection ``conn`` is a
+        handle of, carried to the listing so each object has its whole identity.
+
         Raises:
             DatabaseError: When an inventory entry has no single owner, the
                 export is incoherent (duplicates, missing or invalid
                 dependencies, a cycle), or an object answers with no DDL.
         """
-        listing = DatabaseObjectListing.read(conn, database, adapter)
+        listing = DatabaseObjectListing.read(conn, connection, database, adapter)
         entries = _entries(listing)
         # What a table's creation statement already creates is not emitted again
         # as an object of its own: the table states it, this export decides
@@ -165,7 +169,7 @@ class DatabaseDdlExport:
 
     @classmethod
     def validate(
-        cls, conn: Any, *, database: str | None = None, adapter: Any = None,
+        cls, conn: Any, *, connection: str, database: str | None = None, adapter: Any = None,
     ) -> dict[str, Any]:
         """Validate the export and its dependency graph without writing files.
 
@@ -173,7 +177,7 @@ class DatabaseDdlExport:
         makes the export invalid, and is refused by the listing before any
         finding is collected (backlog 723).
         """
-        listing = DatabaseObjectListing.read(conn, database, adapter)
+        listing = DatabaseObjectListing.read(conn, connection, database, adapter)
         entries = _entries(listing)
         validation = _validate(entries)
         if not validation["errors"]:

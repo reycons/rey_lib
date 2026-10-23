@@ -541,7 +541,7 @@ class TestTheCatalogPrimitives:
              "dependencies": []},
         ])
 
-        DatabaseDdlExport.export(conn, output_root=str(tmp_path))
+        DatabaseDdlExport.export(conn, connection="rey", output_root=str(tmp_path))
 
         (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "trade" in p.name]
         assert written.read_text(encoding="utf-8") == "CREATE TABLE trade(symbol VARCHAR);\n"

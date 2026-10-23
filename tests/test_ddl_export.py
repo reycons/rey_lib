@@ -46,7 +46,7 @@ _INVENTORY = [
 
 def test_it_writes_each_object_s_own_ddl_dependencies_first(tmp_path: Path) -> None:
     result = DatabaseDdlExport.export(
-        object(), output_root=str(tmp_path), adapter=_Adapter(_INVENTORY),
+        object(), connection="rey", output_root=str(tmp_path), adapter=_Adapter(_INVENTORY),
     )
 
     assert result["objects"] == ["schemas:control.control", "tables:control.run"]
@@ -63,7 +63,7 @@ def test_validate_refuses_an_entry_no_object_owns() -> None:
     adapter = _Adapter([*_INVENTORY, {"object_type": "rule", "schema": "control", "name": "r"}])
 
     with pytest.raises(DatabaseError, match="No database object owns the DDL of a 'rule'"):
-        DatabaseDdlExport.validate(object(), adapter=adapter)
+        DatabaseDdlExport.validate(object(), connection="rey", adapter=adapter)
 
 
 def test_validate_reports_what_is_incoherent() -> None:
@@ -72,7 +72,7 @@ def test_validate_reports_what_is_incoherent() -> None:
          "dependencies": ["tables:control.gone", "not a reference"]},
     ])
 
-    found = DatabaseDdlExport.validate(object(), adapter=adapter)
+    found = DatabaseDdlExport.validate(object(), connection="rey", adapter=adapter)
 
     assert found["provider"] == "postgres" and found["database"] == "rey"
     assert found["missing_dependencies"] == ["tables:control.run -> tables:control.gone"]
@@ -86,7 +86,7 @@ def test_a_cycle_is_named() -> None:
     ])
 
     with pytest.raises(DatabaseError, match="Circular dependencies detected"):
-        DatabaseDdlExport.validate(object(), adapter=adapter)
+        DatabaseDdlExport.validate(object(), connection="rey", adapter=adapter)
 
 
 def test_the_export_reaches_no_adapter_or_provider() -> None:

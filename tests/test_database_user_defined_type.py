@@ -139,7 +139,7 @@ def test_the_ddl_export_asks_the_type_by_its_identity(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
 
     DatabaseDdlExport.export(
-        types.SimpleNamespace(provider="postgres"), output_root=str(tmp_path),
+        types.SimpleNamespace(provider="postgres"), connection="rey", output_root=str(tmp_path),
     )
 
     assert asked == [("control", "mood")]

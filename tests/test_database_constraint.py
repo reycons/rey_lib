@@ -164,7 +164,7 @@ def _export(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, provider: str, **bac
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: namespace)
     DatabaseDdlExport.export(
-        types.SimpleNamespace(provider=provider), output_root=str(tmp_path),
+        types.SimpleNamespace(provider=provider), connection="rey", output_root=str(tmp_path),
     )
 
 

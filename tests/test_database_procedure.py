@@ -145,7 +145,7 @@ def test_the_ddl_export_asks_the_procedure_by_identity(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     conn = types.SimpleNamespace(provider="postgres")
 
-    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, connection="rey", output_root=str(tmp_path))
 
     assert asked == [("control", "load_runs", "integer", "procedure")]
     (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "load_runs" in p.name]

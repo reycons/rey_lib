@@ -177,7 +177,7 @@ def test_the_ddl_export_writes_a_view_s_own_ddl(
          "dependencies": []},
     ])
 
-    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, connection="rey", output_root=str(tmp_path))
 
     (written,) = [
         path for path in tmp_path.rglob("*") if path.is_file() and "trade_vw" in path.name

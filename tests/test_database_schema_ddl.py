@@ -77,7 +77,7 @@ def _export(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, listed: list[dict]) 
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     DatabaseDdlExport.export(
-        types.SimpleNamespace(provider="postgres"), output_root=str(tmp_path),
+        types.SimpleNamespace(provider="postgres"), connection="rey", output_root=str(tmp_path),
     )
 
 
