@@ -498,11 +498,6 @@ class DatabasePrimaryKey:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseChildIdentity:
-        """Its identity: its table's and its own name, always whole (#1141)."""
-        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -592,11 +587,6 @@ class DatabaseForeignKey:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseChildIdentity:
-        """Its identity: its table's and its own name, always whole (#1141)."""
-        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -682,11 +672,6 @@ class DatabaseIndex:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseChildIdentity:
-        """Its identity: its table's and its own name, always whole (#1141)."""
-        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -791,11 +776,6 @@ class DatabaseConstraint:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseChildIdentity:
-        """Its identity: its table's and its own name, always whole (#1141)."""
-        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -1074,11 +1054,6 @@ class DatabaseTrigger:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseChildIdentity:
-        """Its identity: its table's and its own name, always whole (#1141)."""
-        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -2167,12 +2142,6 @@ class DatabaseSchema:
     IDENTITY: ClassVar[type] = DatabaseSchemaIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-
-    @property
-    def identity(self) -> DatabaseSchemaIdentity:
-        """Its identity: the connection and catalog it is in, and its name (#1141)."""
-        return DatabaseSchemaIdentity(connection=self.connection, catalog=self.catalog,
-                                      schema=self.schema)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"

@@ -220,14 +220,6 @@ class TestTheWorkflowOwnsItsGovernedIdentity:
         with pytest.raises(AppError, match="more than one workflow"):
             _hydrate(rows)
 
-    def test_an_int_or_an_ascii_digit_string_identifies_it_and_nothing_else_does(self) -> None:
-        workflow, _ = _hydrate(_rows())
-
-        assert workflow.identifies(1) and workflow.identifies("1")
-        for other in (2, "2", True, 1.0, "1.0", "one", "", " 1 ", "+1", "\u0661", None,
-                      {"workflow_id": 1}):
-            assert not workflow.identifies(other), other
-
     def test_a_workflow_without_its_governed_id_is_refused(self) -> None:
         rows = [{**row, "workflow_id": None} for row in _rows()]
 

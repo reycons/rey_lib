@@ -377,16 +377,6 @@ class Workflow:
             )
         return workflow
 
-    def identifies(self, workflow_id: Any) -> bool:
-        """Whether ``workflow_id`` is this Workflow's governed identity (#1141).
-
-        The canonical equality: equal control.workflow ids, as integers. An int or
-        a string of ASCII digits 0-9 denotes one; nothing else -- a bool, a float, any
-        other string, a mapping -- identifies a Workflow. It takes a governed id,
-        never a reference: what a host's reference names is the host's to say.
-        """
-        return _governed_id(workflow_id) == self.workflow_id
-
     def focus(self, *, workflow_process_id: Any = None, workflow_step_id: Any = None) -> None:
         """Open this Workflow at one of its own processes or steps (backlog 1126).
 

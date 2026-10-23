@@ -370,13 +370,6 @@ class TestEachTypeOwnsItsIdentity:
         with pytest.raises(ConfigError, match=refusal):
             owner.identify(**{**self.PARTS, **parts})
 
-    def test_a_child_and_a_schema_always_have_their_whole_identity(self) -> None:
-        index = DatabaseIndex(name="ix", table=IDENTITY)
-        schema = DatabaseSchema(connection="rey_apps", catalog="rey", schema="control")
-
-        assert index.identity == DatabaseIndex.identify(**self.PARTS, table="run_log", name="ix")
-        assert schema.identity == DatabaseSchema.identify(**self.PARTS)
-
     def test_read_identified_asks_the_types_own_read_with_that_identity(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
