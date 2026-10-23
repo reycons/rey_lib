@@ -13,6 +13,7 @@ import json
 import pytest
 
 from rey_lib.db.database_objects import (
+    DatabaseChildIdentity,
     DatabaseColumn,
     DatabaseFunction,
     DatabaseConstraint,
@@ -24,9 +25,11 @@ from rey_lib.db.database_objects import (
     DatabaseProcedure,
     DatabaseRoutineIdentity,
     DatabaseSchema,
+    DatabaseSchemaIdentity,
     DatabaseTable,
     DatabaseView,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 IDENTITY = DatabaseObjectIdentity(
     connection="rey_apps", catalog="rey", schema="control", name="run_log",
@@ -334,3 +337,63 @@ def test_every_listed_database_object_states_its_presentation_type() -> None:
     assert len(_LISTED) == 12
     assert {owner.__name__: owner.PANEL_TYPE for owner in _LISTED} == {
         owner.__name__: "dataobject" for owner in _LISTED}
+
+
+class TestEachTypeOwnsItsIdentity:
+    """#1141: a canonical type builds, reads by and compares its own typed identity."""
+
+    PARTS = {"connection": "rey_apps", "catalog": "rey", "schema": "control"}
+
+    def test_each_shape_is_built_from_the_parts_it_is_identified_by(self) -> None:
+        assert DatabaseView.identify(**self.PARTS, name="run_vw") == DatabaseObjectIdentity(
+            "rey_apps", "rey", "control", "run_vw")
+        assert DatabaseProcedure.identify(**self.PARTS, name="p", signature="integer") == (
+            DatabaseRoutineIdentity("rey_apps", "rey", "control", "p", "integer"))
+        assert DatabaseIndex.identify(**self.PARTS, table="run_log", name="ix") == (
+            DatabaseChildIdentity(IDENTITY, "ix"))
+        assert DatabaseSchema.identify(**self.PARTS) == DatabaseSchemaIdentity(
+            "rey_apps", "rey", "control")
+
+    @pytest.mark.parametrize(("owner", "parts", "refusal"), [
+        (DatabaseView, {"name": "v", "signature": "x"}, "not identified by its signature"),
+        (DatabaseProcedure, {"name": "p", "table": "t"}, "not identified by its table"),
+        (DatabaseIndex, {"table": "t", "name": "ix", "signature": "x"},
+         "not identified by its signature"),
+        (DatabaseIndex, {"table": "t"}, "identified by its name"),
+        (DatabaseSchema, {"name": "x"}, "not identified by its name"),
+        (DatabaseView, {"name": ""}, "names its name"),
+    ], ids=["a view's signature", "a routine's table", "a child's signature",
+            "a child without its name", "a schema's name", "a partial identity"])
+    def test_a_part_it_is_not_identified_by_or_a_partial_identity_is_refused(
+        self, owner: type, parts: dict, refusal: str,
+    ) -> None:
+        with pytest.raises(ConfigError, match=refusal):
+            owner.identify(**{**self.PARTS, **parts})
+
+    def test_a_child_and_a_schema_always_have_their_whole_identity(self) -> None:
+        index = DatabaseIndex(name="ix", table=IDENTITY)
+        schema = DatabaseSchema(connection="rey_apps", catalog="rey", schema="control")
+
+        assert index.identity == DatabaseIndex.identify(**self.PARTS, table="run_log", name="ix")
+        assert schema.identity == DatabaseSchema.identify(**self.PARTS)
+
+    def test_read_identified_asks_the_types_own_read_with_that_identity(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked: list[tuple] = []
+        for owner in (DatabaseView, DatabaseIndex, DatabaseSchema):
+            monkeypatch.setattr(owner, "read", classmethod(
+                lambda cls, conn, *address: asked.append((cls.KIND, address[:-1]))))
+
+        DatabaseView.read_identified(object(), IDENTITY)
+        DatabaseIndex.read_identified(object(), DatabaseChildIdentity(IDENTITY, "ix"))
+        DatabaseSchema.read_identified(
+            object(), DatabaseSchemaIdentity("rey_apps", "rey", "control"))
+
+        assert asked == [("views", (IDENTITY,)), ("indexes", (IDENTITY, "ix")),
+                         ("schemas", ("rey_apps", "rey", "control"))]
+
+    def test_another_types_identity_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="identified by a DatabaseChildIdentity"):
+            DatabaseIndex.read_identified(object(), IDENTITY)
+

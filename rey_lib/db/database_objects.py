@@ -40,6 +40,7 @@ from rey_lib.logs import AppLogger
 _logger = AppLogger(__name__)
 
 __all__ = [
+    "DatabaseChildIdentity",
     "DatabaseColumn",
     "DatabaseFunction",
     "DatabaseConstraint",
@@ -53,6 +54,7 @@ __all__ = [
     "DatabaseProcedure",
     "DatabaseRoutineIdentity",
     "DatabaseSchema",
+    "DatabaseSchemaIdentity",
     "DatabaseSequence",
     "DatabaseTable",
     "DatabaseTrigger",
@@ -83,6 +85,18 @@ class DatabaseObjectIdentity:
             "schema": self.schema,
             "name": self.name,
         }
+
+    @classmethod
+    def from_parts(cls, of: str, **parts: Any) -> "DatabaseObjectIdentity":
+        """The identity of a ``of`` object from its named parts (#1141).
+
+        Takes connection, catalog, schema and name; any other part given is
+        refused, and a partial identity is refused as :meth:`from_dict` refuses it.
+
+        Raises:
+            ConfigError: When a part it is not identified by is given, or it is partial.
+        """
+        return cls.from_dict(_parts(parts, ("connection", "catalog", "schema", "name"), of))
 
     @classmethod
     def from_dict(cls, stored: Mapping[str, Any]) -> "DatabaseObjectIdentity":
@@ -135,6 +149,115 @@ class DatabaseRoutineIdentity:
             "name": self.name,
             "signature": self.signature,
         }
+
+    @classmethod
+    def from_parts(cls, of: str, **parts: Any) -> "DatabaseRoutineIdentity":
+        """The identity of a ``of`` routine from its named parts (#1141).
+
+        Its object identity -- connection, catalog, schema, name, whole as
+        :meth:`DatabaseObjectIdentity.from_dict` requires -- and its signature,
+        as given. A table is not one of its parts.
+
+        Raises:
+            ConfigError: When a part it is not identified by is given, or it is partial.
+        """
+        given = _parts(parts, ("connection", "catalog", "schema", "name", "signature"), of)
+        base = DatabaseObjectIdentity.from_dict(given)
+        return cls(connection=base.connection, catalog=base.catalog, schema=base.schema,
+                   name=base.name, signature=given["signature"])
+
+
+@dataclass(frozen=True)
+class DatabaseChildIdentity:
+    """Which child of a table: the table's identity and the child's own name (#1141).
+
+    A key, index, constraint or trigger is identified within its table, so its
+    identity is both -- never its name alone.
+    """
+
+    table: DatabaseObjectIdentity
+    name: str
+
+    @classmethod
+    def from_parts(cls, of: str, **parts: Any) -> "DatabaseChildIdentity":
+        """The identity of a ``of`` child from its named parts.
+
+        Its table's identity -- connection, catalog, schema and the table's
+        name, whole -- and its own name. A signature is not one of its parts.
+
+        Raises:
+            ConfigError: When a part it is not identified by is given, or it is partial.
+        """
+        given = _parts(parts, ("connection", "catalog", "schema", "table", "name"), of)
+        if not given["name"]:
+            raise ConfigError(f"A '{of}' is identified by its name.")
+        table = DatabaseObjectIdentity.from_dict({**given, "name": given["table"]})
+        return cls(table=table, name=given["name"])
+
+
+@dataclass(frozen=True)
+class DatabaseSchemaIdentity:
+    """Which schema: the connection and catalog it is in, and its name (#1141)."""
+
+    connection: str
+    catalog: str
+    schema: str
+
+    @classmethod
+    def from_parts(cls, of: str, **parts: Any) -> "DatabaseSchemaIdentity":
+        """The identity of a ``of`` from its named parts: connection, catalog, schema.
+
+        Raises:
+            ConfigError: When a part it is not identified by is given, or the
+                connection or schema is absent.
+        """
+        given = _parts(parts, ("connection", "catalog", "schema"), of)
+        if not (given["connection"] and given["schema"]):
+            raise ConfigError(f"A '{of}' is identified by its connection and schema.")
+        return cls(**given)
+
+
+def _parts(given: Mapping[str, Any], takes: tuple[str, ...], of: str) -> dict[str, str]:
+    """The named parts an identity takes; a part it does not take, given, is refused.
+
+    Raises:
+        ConfigError: When a part outside ``takes`` carries a value.
+    """
+    for part, value in given.items():
+        if part not in takes and str(value or "").strip():
+            raise ConfigError(f"A '{of}' is not identified by its {part}.")
+    return {part: str(given.get(part) or "").strip() for part in takes}
+
+
+def _identify(cls: type, **parts: Any) -> Any:
+    """This type's own identity, from the named parts it is identified by (#1141).
+
+    Its ``IDENTITY`` states which identity that is; the identity constructs
+    itself and refuses any part it does not take.
+
+    Raises:
+        ConfigError: When a part it is not identified by is given, or it is partial.
+    """
+    return cls.IDENTITY.from_parts(cls.KIND, **parts)
+
+
+def _read_identified(cls: type, conn: Any, identity: Any, adapter: Any = None) -> Any:
+    """This type's object the identity names, read as its own ``read`` reads it (#1141).
+
+    Raises:
+        ConfigError: When ``identity`` is not this type's kind of identity.
+        DatabaseError: When the database holds no such object.
+    """
+    if not isinstance(identity, cls.IDENTITY):
+        raise ConfigError(
+            f"A '{cls.KIND}' is identified by a {cls.IDENTITY.__name__}, "
+            f"not a {type(identity).__name__}."
+        )
+    if cls.IDENTITY is DatabaseChildIdentity:
+        return cls.read(conn, identity.table, identity.name, adapter)
+    if cls.IDENTITY is DatabaseSchemaIdentity:
+        return cls.read(conn, identity.connection, identity.catalog, identity.schema, adapter)
+    return cls.read(conn, identity, adapter)
 
 
 @dataclass(frozen=True)
@@ -229,10 +352,9 @@ def _address(obj: Any) -> tuple[Any, ...]:
     """How an object addresses its own DDL: what its ``read_ddl`` is asked with."""
     if isinstance(obj, DatabaseSchema):
         return (obj.schema,)
-    identity = getattr(obj, "identity", None)
-    if identity is not None:
-        return (identity,)
-    return (obj.table, obj.name)
+    if type(obj).IDENTITY is DatabaseChildIdentity:
+        return (obj.table, obj.name)
+    return (obj.identity,)
 
 
 def _reference(obj: Any) -> DatabaseObjectReference:
@@ -240,14 +362,14 @@ def _reference(obj: Any) -> DatabaseObjectReference:
     kind = type(obj).KIND
     if isinstance(obj, DatabaseSchema):
         return DatabaseObjectReference(kind=kind, schema=obj.schema, name=obj.schema)
-    identity = getattr(obj, "identity", None)
-    if identity is not None:
+    if type(obj).IDENTITY is DatabaseChildIdentity:
         return DatabaseObjectReference(
-            kind=kind, schema=identity.schema, name=identity.name,
-            signature=str(getattr(identity, "signature", "") or ""),
+            kind=kind, schema=obj.table.schema, name=obj.name, table=obj.table.name,
         )
+    identity = obj.identity
     return DatabaseObjectReference(
-        kind=kind, schema=obj.table.schema, name=obj.name, table=obj.table.name,
+        kind=kind, schema=identity.schema, name=identity.name,
+        signature=str(getattr(identity, "signature", "") or ""),
     )
 
 
@@ -372,6 +494,15 @@ class DatabasePrimaryKey:
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
     #: the provider's shared word for every constraint.
     KIND: ClassVar[str] = "primary_keys"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseChildIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseChildIdentity:
+        """Its identity: its table's and its own name, always whole (#1141)."""
+        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -457,6 +588,15 @@ class DatabaseForeignKey:
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
     #: the provider's shared word for every constraint.
     KIND: ClassVar[str] = "foreign_keys"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseChildIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseChildIdentity:
+        """Its identity: its table's and its own name, always whole (#1141)."""
+        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -538,6 +678,15 @@ class DatabaseIndex:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "indexes"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseChildIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseChildIdentity:
+        """Its identity: its table's and its own name, always whole (#1141)."""
+        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -638,6 +787,15 @@ class DatabaseConstraint:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "constraints"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseChildIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseChildIdentity:
+        """Its identity: its table's and its own name, always whole (#1141)."""
+        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -719,6 +877,10 @@ class DatabaseSequence:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "sequences"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseObjectIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -811,6 +973,10 @@ class DatabaseUserDefinedType:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "types"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseObjectIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -904,6 +1070,15 @@ class DatabaseTrigger:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "triggers"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseChildIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseChildIdentity:
+        """Its identity: its table's and its own name, always whole (#1141)."""
+        return DatabaseChildIdentity(table=self.table, name=self.name)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -982,6 +1157,10 @@ class DatabaseTable:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "tables"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseObjectIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -1614,6 +1793,10 @@ class DatabaseView:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "views"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseObjectIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -1724,6 +1907,10 @@ class DatabaseProcedure:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "procedures"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -1848,6 +2035,10 @@ class DatabaseFunction:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "functions"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
@@ -1972,6 +2163,16 @@ class DatabaseSchema:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "schemas"
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type] = DatabaseSchemaIdentity
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+
+    @property
+    def identity(self) -> DatabaseSchemaIdentity:
+        """Its identity: the connection and catalog it is in, and its name (#1141)."""
+        return DatabaseSchemaIdentity(connection=self.connection, catalog=self.catalog,
+                                      schema=self.schema)
     #: What kind of presentation this object requires (#1140): a semantic type;
     #: which Console panel implements it is the Console's, never this object's.
     PANEL_TYPE: ClassVar[str] = "dataobject"
