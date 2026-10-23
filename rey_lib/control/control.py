@@ -1430,6 +1430,23 @@ class Control:
             }, required=required) or [])
         ]
 
+    def subject_panel(self, subject_key: str,
+                      required: bool = True) -> Optional[dict[str, Any]]:
+        """The governed presentation one resolved subject declares, or None (backlog 1215).
+
+        The governed read boundary and nothing more: ``subject_key`` is the
+        subject as already resolved (e.g. ``file.yaml``); the row is its
+        tree.subject_panel declaration -- ``panel`` and ``panel_settings`` --
+        carried unread. None is the answer "nothing is declared for this
+        subject", never a default. Estate-wide, so no installation is passed.
+        Nothing here resolves a subject, chooses a panel or knows a subject
+        family: Projection.for_subject is the only reader.
+        """
+        rows = self._call_rows("get_subject_panel", {
+            "subject_key": str(subject_key),
+        }, required=required) or []
+        return dict(rows[0]) if rows else None
+
     def data_profile_for_key(self, data_profile_key: str,
                              required: bool = True) -> Optional[int]:
         """The profile this group already has, or None.

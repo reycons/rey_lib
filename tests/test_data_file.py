@@ -231,6 +231,76 @@ class TestTheSuffixMapCannotDrift:
         assert File.type_for_suffix(".nope") == ""
 
 
+class TestTheFormat:
+    """What format a file is identified as, distinct from file_type (#1215)."""
+
+    @pytest.mark.parametrize("name, declared, expected", [
+        ("module.py", "", "python"),
+        ("config.yaml", "", "yaml"),
+        ("notes.txt", "", "text"),
+        ("rows.csv", "", "csv"),
+        ("rows.anything", "DELIMITED_HEADER", "csv"),
+        ("rows.anything", "DELIMITED_NO_HEADER", "delimited_no_header"),
+        ("book.xlsx", "", "xlsx"),
+        ("book.xls", "", "xls"),
+        ("doc.json", "", "json"),
+        ("lines.jsonl", "", "jsonl"),
+        ("lines.ndjson", "", "jsonl"),
+    ])
+    def test_a_registered_format_is_its_format(
+        self, tmp_path: Path, name: str, declared: str, expected: str,
+    ) -> None:
+        """A registered token names the format; alias tokens converge on one."""
+        assert File.for_path(tmp_path / name, file_type=declared).format == expected
+
+    @pytest.mark.parametrize("name, expected", [
+        ("query.sql", "sql"),
+        ("README.md", "md"),
+        ("run.log", "log"),
+        ("QUERY.SQL", "sql"),
+    ])
+    def test_an_established_format_with_no_subclass_is_a_plain_file_with_a_format(
+        self, tmp_path: Path, name: str, expected: str,
+    ) -> None:
+        """Unregistered is not unformatted: still a plain File, file_type still empty."""
+        resolved = File.for_path(tmp_path / name)
+
+        assert type(resolved) is File
+        assert resolved.file_type == ""
+        assert resolved.format == expected
+
+    @pytest.mark.parametrize("name, declared", [
+        ("mystery.dat", ""),
+        ("book.parquet", "PARQUET"),
+        ("no_suffix", ""),
+    ])
+    def test_an_unidentified_format_is_empty(
+        self, tmp_path: Path, name: str, declared: str,
+    ) -> None:
+        """Nothing identifies the format, so there is none -- never a guess."""
+        assert File.for_path(tmp_path / name, file_type=declared).format == ""
+
+    def test_the_declared_type_beats_the_suffix_for_the_format_too(
+        self, tmp_path: Path,
+    ) -> None:
+        """The same rule as file_type: configuration knows what the name does not."""
+        assert File.for_path(tmp_path / "misnamed.sql", file_type="CSV").format == "csv"
+
+    def test_a_directly_constructed_file_resolves_its_format_the_same_way(
+        self, tmp_path: Path,
+    ) -> None:
+        """Built without for_path, a File still answers its format by the same rule."""
+        assert File(tmp_path / "query.sql").format == "sql"
+        assert File(tmp_path / "mystery.dat").format == ""
+        assert JsonFile(tmp_path / "doc.json").format == "json"
+
+    def test_the_new_formats_leave_the_suffix_map_and_file_type_alone(self) -> None:
+        """file_type keeps its meaning: sql, md and log claim no registered token."""
+        assert File.type_for_suffix(".sql") == ""
+        assert File.type_for_suffix(".md") == ""
+        assert File.type_for_suffix(".log") == ""
+
+
 class TestDelimitedHeaderFile:
     """Columns named once, in order, before any row is read."""
 
@@ -636,21 +706,15 @@ class TestText:
         assert shown["blocked_reason"] == "Binary file preview is not supported."
 
 
-def test_a_file_presents_as_a_file_and_a_data_file_as_a_dataobject() -> None:
-    """#1129: the canonical object states its semantic presentation type.
+def test_no_file_states_its_own_presentation() -> None:
+    """#1215: a file's presentation is its governed subject's, never the object's.
 
-    File states "file"; DataFile overrides it with "dataobject"; every format
-    inherits from whichever it is. Which Console panel implements each is the
-    Console's.
+    Neither File, DataFile nor any registered format states a presentation type:
+    Projection.for_subject resolves it from tree.subject_panel.
     """
-    formats = File.formats()
+    classes = {File, DataFile, *File.formats().values()}
 
-    assert (File.PANEL_TYPE, DataFile.PANEL_TYPE) == ("file", "dataobject")
-    assert {token: subtype.PANEL_TYPE for token, subtype in formats.items()} == {
-        token: "dataobject" if issubclass(subtype, DataFile) else "file"
-        for token, subtype in formats.items()}
-    assert formats["PYTHON"].PANEL_TYPE == "file"
-    assert formats["CSV"].PANEL_TYPE == "dataobject"
+    assert [cls.__name__ for cls in classes if hasattr(cls, "PANEL_TYPE")] == []
 
 
 @pytest.mark.parametrize("name, body, language", [

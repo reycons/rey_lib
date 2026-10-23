@@ -30,7 +30,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file import DEFAULT_ENCODING, File
 
@@ -76,11 +76,6 @@ class DataFile(File, ABC):
     ``DataFile.for_path`` is the same resolution, refusing a file that is not
     a data file.
     """
-
-    #: What kind of presentation a data file requires (#1129): a semantic type,
-    #: overriding File's -- records are read in the Workbench's readings. Which
-    #: Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
 
     @classmethod
     def for_path(cls, path: Path | str, *, file_type: str = "", **facts: Any) -> DataFile:

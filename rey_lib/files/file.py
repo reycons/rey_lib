@@ -26,7 +26,7 @@ import re
 
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Final, Mapping
+from typing import Any, Callable, Final, Mapping
 
 from rey_lib.files import primitive_file_io
 from rey_lib.files.file_utils import bounded_text_preview
@@ -67,6 +67,23 @@ _SUFFIX_FILE_TYPES: dict[str, str] = {
     ".yml":   "YAML",
     ".txt":   "TEXT",
     ".text":  "TEXT",
+}
+
+#: Filename suffix -> the format it names where no registered File subclass
+#: claims that format (#1215). The file is a plain File -- its ``file_type`` stays
+#: empty -- and its format is still a fact about it. Added only where the format
+#: is established, never as a guess.
+_SUFFIX_FORMATS: dict[str, str] = {
+    ".sql": "sql",
+    ".md":  "md",
+    ".log": "log",
+}
+
+#: Registered tokens that are another name for one format (#1215): the format
+#: they share. Every other registered token is its own format, in lower case.
+_TOKEN_FORMATS: dict[str, str] = {
+    "DELIMITED_HEADER": "csv",
+    "NDJSON": "jsonl",
 }
 
 #: Format token -> the File subclass that is that format.
@@ -122,11 +139,6 @@ class File:
     are None for a file nothing governs. They are facts handed in, never
     looked up: which state a file is opened at is the caller's selection.
     """
-
-    #: What kind of presentation a file requires (#1129): a semantic type. A
-    #: file is read as a file; DataFile states its own. Which Console panel
-    #: implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "file"
 
     def __init__(
         self,
@@ -190,6 +202,9 @@ class File:
         self.conversion = dict(conversion) if conversion is not None else None
         self.data_profile_key = data_profile_key
         self.settings = settings
+        # The format ``for_path`` resolved this file as; None when it was
+        # constructed directly, and then ``format`` resolves it the same way.
+        self._format: str | None = None
 
     # -- what kind of file ------------------------------------------------------
 
@@ -212,7 +227,9 @@ class File:
         _discover()
         source = Path(path)
         token = (file_type or File.type_for_suffix(source.suffix)).strip().upper()
-        return _FORMATS.get(token, File)(source, **facts)
+        resolved = _FORMATS.get(token, File)(source, **facts)
+        resolved._format = File._format_of(token, source.suffix)
+        return resolved
 
     @staticmethod
     def type_for_suffix(suffix: str) -> str:
@@ -245,6 +262,37 @@ class File:
     def file_type(self) -> str:
         """This file's format token: empty for a file no format claims."""
         return ""
+
+    @property
+    def format(self) -> str:
+        """The format this file is identified as (#1215), in lower case.
+
+        A fact about the file, whether or not a registered subclass implements
+        that format: a registered token is its format (aliases converge --
+        DELIMITED_HEADER is csv, NDJSON is jsonl); otherwise a suffix that names
+        an established format (sql, md, log) answers. Empty when nothing
+        identifies the format. Distinct from ``file_type``, which stays the
+        token a registered File subclass claims.
+        """
+        if self._format is not None:
+            return self._format
+        return File._format_of(self.file_type.strip().upper(), self.path.suffix)
+
+    @staticmethod
+    def _format_of(token: str, suffix: str) -> str:
+        """The format a resolved token, else the suffix, identifies; "" for none.
+
+        Args:
+            token: The format token resolution settled on, upper case; "" for none.
+            suffix: The file's suffix, with or without its dot, any case.
+        """
+        _discover()
+        if token in _FORMATS:
+            return _TOKEN_FORMATS.get(token, token.lower())
+        key = str(suffix or "").strip().lower()
+        if key and not key.startswith("."):
+            key = f".{key}"
+        return _SUFFIX_FORMATS.get(key, "")
 
     # -- what every file has ----------------------------------------------------
 
