@@ -478,9 +478,9 @@ def test_a_request_still_waiting_when_the_channel_closes_is_refused() -> None:
 
 # -- a destination-free subject request (#1141 S3) ------------------------------
 
-#: A child that asks for an operation on its bound subject when told to -- naming
-#: no destination -- and keeps answering its own commands meanwhile.
-SUBJECT_ASKER = textwrap.dedent("""
+#: A child that sends a bound request when told to -- naming no destination --
+#: and keeps answering its own commands meanwhile.
+BOUND_ASKER = textwrap.dedent("""
     import threading
     from rey_lib.errors.error_utils import AppError
     from rey_lib.run.app_channel import AttachedApp
@@ -490,7 +490,7 @@ SUBJECT_ASKER = textwrap.dedent("""
 
     def ask(timeout):
         try:
-            answer = channel.subject_request(
+            answer = channel.bound_request(
                 {"capability": "file.facts", "inputs": {}}, timeout=timeout)
             channel.emit({"event": "asked", "answer": answer})
         except AppError as refused:
@@ -513,26 +513,26 @@ SUBJECT_ASKER = textwrap.dedent("""
 """)
 
 
-def _subject_requested(events) -> dict:
-    """The next message the application emitted as a subject request."""
-    while "subject_request" not in (message := next(events)):
+def _bound_requested(events) -> dict:
+    """The next message the application emitted as a bound request."""
+    while "bound_request" not in (message := next(events)):
         pass
     return message
 
 
-def test_a_subject_request_names_no_destination_and_its_answer_comes_back() -> None:
-    app = _launch(SUBJECT_ASKER)
+def test_a_bound_request_names_no_destination_and_its_answer_comes_back() -> None:
+    app = _launch(BOUND_ASKER)
     try:
         assert app.connected(timeout=WAIT)
         events = app.events(timeout=WAIT)
         assert next(events) == {"event": "ready"}
         app.send({"command": "ask"})
 
-        asked = _subject_requested(events)
+        asked = _bound_requested(events)
         # The payload as given, a request_id minted by the asker, and nothing that
         # addresses another application.
-        assert asked["subject_request"] == {"capability": "file.facts", "inputs": {}}
-        assert set(asked) == {"subject_request", "request_id"} and asked["request_id"]
+        assert asked["bound_request"] == {"capability": "file.facts", "inputs": {}}
+        assert set(asked) == {"bound_request", "request_id"} and asked["request_id"]
 
         app.send({"command": "echo", "value": "meanwhile"})
         assert next(events) == {"event": "echoed", "value": "meanwhile"}
@@ -547,35 +547,35 @@ def test_a_subject_request_names_no_destination_and_its_answer_comes_back() -> N
         app.close()
 
 
-def test_a_subject_request_with_no_answer_in_time_is_refused() -> None:
-    app = _launch(SUBJECT_ASKER)
+def test_a_bound_request_with_no_answer_in_time_is_refused() -> None:
+    app = _launch(BOUND_ASKER)
     try:
         assert app.connected(timeout=WAIT)
         events = app.events(timeout=WAIT)
         assert next(events) == {"event": "ready"}
         app.send({"command": "ask", "timeout": 0.5})
-        _subject_requested(events)
+        _bound_requested(events)
 
         refused = next(events)
         assert refused["event"] == "refused"
-        assert "bound subject" in refused["error"] and "0.5 s" in refused["error"]
+        assert "bound request" in refused["error"] and "0.5 s" in refused["error"]
         app.send({"command": "finish"})
         assert app.wait(timeout=WAIT) == 0
     finally:
         app.close()
 
 
-def test_a_subject_request_still_waiting_when_the_channel_closes_is_refused() -> None:
-    app = _launch(SUBJECT_ASKER)
+def test_a_bound_request_still_waiting_when_the_channel_closes_is_refused() -> None:
+    app = _launch(BOUND_ASKER)
     try:
         assert app.connected(timeout=WAIT)
         events = app.events(timeout=WAIT)
         assert next(events) == {"event": "ready"}
         app.send({"command": "ask"})
-        _subject_requested(events)
+        _bound_requested(events)
 
         app.close()
-        assert "refused: The channel closed before the bound subject answered." in "".join(
+        assert "refused: The channel closed before the bound request was answered." in "".join(
             app.output(timeout=WAIT))
     finally:
         app.close()
