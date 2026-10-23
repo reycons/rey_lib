@@ -430,6 +430,51 @@ class AITask:
             },
         }
 
+    def definition(self) -> dict[str, Any]:
+        """What this unit of work is and where it stands (#1199 S6).
+
+        Its domain read, independent of how it is displayed: its identity and
+        where it belongs, the settings that apply and the caller's choices, what
+        was asked and the output it requires, the subject facts as the caller gave
+        them, its lifecycle and its answer as AI stated it. No interaction fact
+        (``composed_first``) and no engine or execution machinery -- model,
+        mechanism, endpoint, credential, timeout, access policy, contract, output
+        schema, tools. Read as the task holds it: the facts are fixed, and the
+        lifecycle is whatever its transitions last wrote.
+        """
+        answer = self.answer
+        return {
+            "id": self.id,
+            "task_key": self.task_key,
+            "label": self.label,
+            "installation": self.installation,
+            "profile_key": self.profile_key,
+            "instruction_key": self.instruction_key,
+            "temperature": self.temperature,
+            "representation": self.representation,
+            "connection": self.connection,
+            # A chosen output is stated by what it means -- its media type.
+            "choices": {
+                name: (value.media_type if name == "output" else value)
+                for name, value in self.choices.items()
+            },
+            "prompt": "\n\n".join(
+                str(part.value) for part in self.input.content
+                if part.kind is AIContentKind.TEXT
+            ),
+            "media_type": self.output.media_type,
+            "subject": self.subject,
+            "subject_id": self.subject_id,
+            "subject_kind": self.subject_kind,
+            "origin_id": self.origin_id,
+            "status": self.status,
+            "error": self.error,
+            "run_id": self.run_id,
+            "answer": None if answer is None else {
+                "text": answer.text, "value": answer.value, "media_type": answer.media_type,
+            },
+        }
+
     # -- the lifecycle -----------------------------------------------------
 
     def started(self, run_id: str = "") -> None:

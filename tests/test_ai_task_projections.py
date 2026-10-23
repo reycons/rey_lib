@@ -122,3 +122,48 @@ class TestEventProjection:
                                           "media_type": "application/json"}
         assert projected[5]["error"] == "down"
         assert projected[0]["result"] is projected[0]["tool_call"] is None
+
+
+class TestTaskDefinition:
+    """AITask.definition (#1199 S6): its domain read, independent of display."""
+
+    def test_it_states_what_the_task_is_and_where_it_stands(self) -> None:
+        task = _task(installation="admin", subject_kind="file",
+                     choices={"profile_key": "anthropic", "output": AIOutputSpec.markdown()})
+
+        definition = task.definition()
+
+        assert json.loads(json.dumps(definition)) == definition
+        assert definition == {
+            "id": task.id, "task_key": "explain", "label": "Explain", "installation": "admin",
+            "profile_key": "anthropic", "instruction_key": "", "temperature": None,
+            "representation": "", "connection": "",
+            "choices": {"profile_key": "anthropic", "output": "text/markdown"},
+            "prompt": "What is this?", "media_type": "text/markdown",
+            "subject": "SELECT 1", "subject_id": "node-7", "subject_kind": "file",
+            "origin_id": "node-7", "status": AITask.IDLE, "error": "", "run_id": "",
+            "answer": None,
+        }
+
+    def test_no_engine_execution_or_interaction_fact_is_carried(self) -> None:
+        definition = _task(composed_first=True).definition()
+        shown = json.dumps(definition)
+
+        assert not {"composed_first", "model_identifier", "execution_mechanism", "base_url",
+                    "credential_ref", "timeout_seconds", "access_allowed", "access_default",
+                    "contract_key", "contract_body", "output_schema", "tools"} & set(definition)
+        assert "ANTHROPIC_API_KEY" not in shown
+        assert "Secret contract text." not in shown
+
+    def test_it_follows_the_lifecycle_the_task_owns(self) -> None:
+        task = _task()
+        task.failed("The engine refused.")
+
+        assert (task.definition()["status"], task.definition()["error"]) == (
+            AITask.FAILED, "The engine refused.")
+
+    def test_projection_is_unchanged_beside_it(self) -> None:
+        task = _task(composed_first=True)
+
+        assert task.projection()["composed_first"] is True
+        assert "installation" not in task.projection()

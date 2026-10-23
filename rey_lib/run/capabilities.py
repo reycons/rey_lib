@@ -64,7 +64,10 @@ class HostedCapabilities:
             control: The application's Control, the governed read boundary.
             catalogue: The owner's catalogue -- capability key -> a callable of
                 validated inputs over the object the application holds.
-            hosted_kind: The identity kind the application is hosting.
+            hosted_kind: The kind of canonical object the application exposes --
+                its opening identity kind where it holds one object (a File, a
+                Workflow), the held objects' own kind where it holds several (an
+                AI session's AITasks).
 
         A disagreement leaves that key not invocable and is logged once; the
         application still hosts and presents its object. A failed governed read
