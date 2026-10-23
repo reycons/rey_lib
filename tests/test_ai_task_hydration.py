@@ -143,14 +143,15 @@ class TestFacts:
     def test_the_callers_unit_of_work_is_carried(self) -> None:
         task = _hydrate(
             task_key="search_index", input=AIInput.prompt("Where is AITask?"),
-            output=AIOutputSpec.markdown(), subject="rey_lib.ai", subject_id="node:1",
-            subject_kind="package", origin_id="node:0",
+            output=AIOutputSpec.markdown(), subject="rey_lib.ai",
+            subject_reference={"subject_kind": "table", "connection": "rey", "catalog": "", "schema": "code", "name": "symbol"}, origin_id="node:0",
         )
 
         assert task.input.is_empty() is False
         assert task.output.media_type == "text/markdown"
-        assert (task.subject, task.subject_id, task.subject_kind, task.origin_id) == (
-            "rey_lib.ai", "node:1", "package", "node:0",
+        # A composite reference stays composite, copied as given (#1141).
+        assert (task.subject, dict(task.subject_reference), task.origin_id) == (
+            "rey_lib.ai", {"subject_kind": "table", "connection": "rey", "catalog": "", "schema": "code", "name": "symbol"}, "node:0",
         )
         assert task.status == AITask.IDLE
 

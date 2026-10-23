@@ -70,9 +70,11 @@ class AITask:
         input: What is sent.
         output: The output this unit of work requires.
         subject: What is being asked about, already resolved by the caller.
-        subject_id, subject_kind, origin_id: How the caller addresses this
-            unit of work's subject and where it began. Opaque: carried and
-            preserved, never interpreted.
+        subject_reference: The governed reference to this unit of work's
+            subject, as its opening named it (#1141, S4 identity): one mapping
+            whose vocabulary is the subject host's. Carried and preserved, never
+            interpreted here; empty for a free-form task.
+        origin_id: Where the caller began. Opaque: carried, never interpreted.
         tools: The governed tools this task offers (backlog 1023) -- facts
             only. What carries each out is bound by the runtime at execution,
             never by hydration.
@@ -133,8 +135,8 @@ class AITask:
     output: AIOutputSpec = field(default_factory=AIOutputSpec)
 
     subject: str = ""
-    subject_id: str = ""
-    subject_kind: str = ""
+    subject_reference: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}))
     origin_id: str = ""
 
     tools: tuple[AITool, ...] = ()
@@ -173,8 +175,7 @@ class AITask:
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
         subject: str = "",
-        subject_id: str = "",
-        subject_kind: str = "",
+        subject_reference: Mapping[str, Any] | None = None,
         origin_id: str = "",
         task_id: str = "",
     ) -> "AITask":
@@ -198,7 +199,7 @@ class AITask:
             profile_key=profile_key, instruction_key=instruction_key,
             temperature=temperature, representation=representation,
             connection=connection, input=input, output=output,
-            subject=subject, subject_id=subject_id, subject_kind=subject_kind,
+            subject=subject, subject_reference=subject_reference,
             origin_id=origin_id, task_id=task_id,
         )
 
@@ -219,8 +220,7 @@ class AITask:
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
         subject: str = "",
-        subject_id: str = "",
-        subject_kind: str = "",
+        subject_reference: Mapping[str, Any] | None = None,
         origin_id: str = "",
         task_id: str = "",
     ) -> "AITask":
@@ -324,8 +324,10 @@ class AITask:
             connection=chosen(connection, "connection_name"),
             input=input if input is not None else AIInput(),
             output=required,
-            subject=subject, subject_id=subject_id,
-            subject_kind=subject_kind, origin_id=origin_id,
+            subject=subject,
+            # Copied as given and held read-only; its meaning is the host's.
+            subject_reference=MappingProxyType(dict(subject_reference or {})),
+            origin_id=origin_id,
             # The task's own row only: tools are offered per task, and the
             # group row and an unconfigured task offer none.
             tools=tuple(
@@ -450,8 +452,7 @@ class AITask:
             ),
             "media_type": self.output.media_type,
             "subject": self.subject,
-            "subject_id": self.subject_id,
-            "subject_kind": self.subject_kind,
+            "subject_reference": dict(self.subject_reference),
             "origin_id": self.origin_id,
             "status": self.status,
             "error": self.error,
@@ -495,8 +496,7 @@ class AITask:
             ),
             "media_type": self.output.media_type,
             "subject": self.subject,
-            "subject_id": self.subject_id,
-            "subject_kind": self.subject_kind,
+            "subject_reference": dict(self.subject_reference),
             "origin_id": self.origin_id,
             "status": self.status,
             "error": self.error,

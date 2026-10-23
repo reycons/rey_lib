@@ -152,14 +152,15 @@ class TestRehydration:
         ai, control = _ai(), _Control()
         first = ai.hydrate_task(control, "local", task_key="search_index",
                                 input=AIInput.prompt("first"), subject="SELECT 1",
-                                subject_id="node-7", origin_id="node-7")
+                                subject_reference={"workflow_id": "7"}, origin_id="node-7")
 
         second = ai.rehydrate_task(control, first.id,
-                                   {"subject": "SELECT 2", "subject_id": "node-8"})
+                                   {"subject": "SELECT 2",
+                                    "subject_reference": {"workflow_id": "8"}})
 
         assert second.input is first.input
-        assert (second.subject, second.subject_id, second.origin_id) == (
-            "SELECT 2", "node-8", "node-7")
+        assert (second.subject, dict(second.subject_reference), second.origin_id) == (
+            "SELECT 2", {"workflow_id": "8"}, "node-7")
         assert second.task_key == "search_index"
 
     def test_an_edit_may_choose_another_task(self) -> None:

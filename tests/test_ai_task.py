@@ -30,7 +30,7 @@ def _task(**facts: object) -> AITask:
         "contract_key": "explain", "contract_version": "1", "contract_body": "Explain it.",
         "temperature": 0.0, "representation": "redacted", "connection": "code_index",
         "input": AIInput.prompt("What is this?"), "output": AIOutputSpec.markdown(),
-        "subject": "SELECT 1", "subject_id": "node:42", "subject_kind": "sql",
+        "subject": "SELECT 1", "subject_reference": {"workflow_id": "42"},
         "origin_id": "node:41",
     }
     given.update(facts)
@@ -51,8 +51,8 @@ class TestTheFacts:
     def test_caller_identity_is_preserved_as_given(self) -> None:
         task = _task()
 
-        assert (task.subject_id, task.subject_kind, task.origin_id) == (
-            "node:42", "sql", "node:41",
+        assert (dict(task.subject_reference), task.origin_id) == (
+            {"workflow_id": "42"}, "node:41",
         )
 
     def test_a_fact_cannot_be_assigned(self) -> None:

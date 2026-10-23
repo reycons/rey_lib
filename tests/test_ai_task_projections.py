@@ -30,7 +30,8 @@ def _task(**facts: object) -> AITask:
         "model_identifier": "anthropic:claude-sonnet-4-6",
         "credential_ref": "env.ANTHROPIC_API_KEY", "contract_body": "Secret contract text.",
         "input": AIInput.prompt("What is this?"), "output": AIOutputSpec.markdown(),
-        "subject": "SELECT 1", "subject_id": "node-7", "origin_id": "node-7",
+        "subject": "SELECT 1", "subject_reference": {"workflow_id": "7"},
+        "origin_id": "node-7",
     }
     given.update(facts)
     return AITask(**given)  # type: ignore[arg-type]
@@ -48,8 +49,8 @@ class TestTaskProjection:
         assert projection["prompt"] == "What is this?"
         assert projection["media_type"] == "text/markdown"
         assert projection["choices"] == {"profile_key": "anthropic", "output": "text/markdown"}
-        assert (projection["subject"], projection["subject_id"], projection["origin_id"]) == (
-            "SELECT 1", "node-7", "node-7")
+        assert (projection["subject"], projection["subject_reference"],
+                projection["origin_id"]) == ("SELECT 1", {"workflow_id": "7"}, "node-7")
         assert (projection["status"], projection["answer"], projection["error"]) == (
             AITask.IDLE, None, "")
 
@@ -128,7 +129,7 @@ class TestTaskDefinition:
     """AITask.definition (#1199 S6): its domain read, independent of display."""
 
     def test_it_states_what_the_task_is_and_where_it_stands(self) -> None:
-        task = _task(installation="admin", subject_kind="file",
+        task = _task(installation="admin",
                      choices={"profile_key": "anthropic", "output": AIOutputSpec.markdown()})
 
         definition = task.definition()
@@ -140,7 +141,7 @@ class TestTaskDefinition:
             "representation": "", "connection": "",
             "choices": {"profile_key": "anthropic", "output": "text/markdown"},
             "prompt": "What is this?", "media_type": "text/markdown",
-            "subject": "SELECT 1", "subject_id": "node-7", "subject_kind": "file",
+            "subject": "SELECT 1", "subject_reference": {"workflow_id": "7"},
             "origin_id": "node-7", "status": AITask.IDLE, "error": "", "run_id": "",
             "answer": None,
         }

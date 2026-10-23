@@ -1034,7 +1034,7 @@ class AI:
     #: caller sends and addresses. Never the identity, which an edit carries,
     #: and never the output requirement, which is a choice (backlog 1047, D4).
     _TASK_FACTS = (
-        "task_key", "input", "subject", "subject_id", "subject_kind", "origin_id",
+        "task_key", "input", "subject", "subject_reference", "origin_id",
     )
 
     def hydrate_task(self, control: Any, installation: str, **facts: Any) -> AITask:
