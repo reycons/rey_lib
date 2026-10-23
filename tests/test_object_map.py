@@ -338,13 +338,17 @@ def test_a_schema_map_has_no_claims_to_open() -> None:
 
 
 @pytest.mark.parametrize("held, screen", [(_architecture, "object"), (_schema, "schema")])
-def test_every_map_requires_the_map_presentation_whichever_screen_it_shows(
+def test_a_map_states_no_presentation_and_carries_its_own_subject_and_screen(
     held: Callable[[], ObjectMap], screen: str,
 ) -> None:
-    """#1139: one presentation type, map; object or schema is the map's own screen state."""
-    projected = held().projection()
+    """#1215: presentation is the governed subject's; the map's screen is its own state."""
+    held_map = held()
+    projected = held_map.projection()
 
-    assert (projected["panel_type"], projected["projection"]) == ("map", screen)
+    assert "panel_type" not in projected
+    assert not hasattr(ObjectMap, "PANEL_TYPE")
+    assert projected["projection"] == screen
+    assert projected["subject"] == held_map.subject
 
 
 def test_a_schema_map_selects_a_table_and_never_opens() -> None:

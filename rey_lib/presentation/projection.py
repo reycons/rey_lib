@@ -21,21 +21,25 @@ from rey_lib.errors.error_utils import ConfigError
 __all__ = ["Projection"]
 
 #: The keys the Projection itself carries; projected content may not name them.
-_DECLARATION_KEYS = frozenset({"subject", "panel", "panel_settings"})
+#: ``subject_key`` is the governed presentation lookup key -- never an identity.
+#: The canonical object's own ``subject`` (its subject identity) is content.
+_DECLARATION_KEYS = frozenset({"subject_key", "panel", "panel_settings"})
 
 
 @dataclass(frozen=True)
 class Projection:
-    """One resolved subject, its declared presentation, and its projected content.
+    """One resolved subject's declared presentation, beside its projected content.
 
     Attributes:
-        subject: The resolved subject key (e.g. ``file.yaml``).
+        subject_key: The governed presentation lookup key the host resolved
+            (e.g. ``file.yaml``). Not an identity: the object's own subject
+            identity, where it has one, travels in its content.
         panel: The Panel its governed declaration names.
         panel_settings: The settings that declaration gives the Panel.
         content: The subject's projected state, as its owner projected it.
     """
 
-    subject: str
+    subject_key: str
     panel: str
     panel_settings: Mapping[str, Any]
     content: Mapping[str, Any]
@@ -67,7 +71,8 @@ class Projection:
         settings = declared.get("panel_settings")
         if not panel or not isinstance(settings, Mapping):
             raise ConfigError(f"The governed presentation of '{key}' is malformed: {declared!r}.")
-        return cls(subject=key, panel=panel, panel_settings=dict(settings), content=dict(content))
+        return cls(subject_key=key, panel=panel, panel_settings=dict(settings),
+                   content=dict(content))
 
     def projecting(self, content: Mapping[str, Any]) -> Projection:
         """The same governed declaration over new projected content.
@@ -78,21 +83,21 @@ class Projection:
         Raises:
             ConfigError: When the content names a key the Projection itself carries.
         """
-        _refuse_clashing(self.subject, content)
-        return Projection(subject=self.subject, panel=self.panel,
+        _refuse_clashing(self.subject_key, content)
+        return Projection(subject_key=self.subject_key, panel=self.panel,
                           panel_settings=dict(self.panel_settings), content=dict(content))
 
     def to_dict(self) -> dict[str, Any]:
         """The Projection as it travels: its declaration beside its content."""
         return {
-            "subject": self.subject,
+            "subject_key": self.subject_key,
             "panel": self.panel,
             "panel_settings": dict(self.panel_settings),
             **dict(self.content),
         }
 
 
-def _refuse_clashing(subject: str, content: Mapping[str, Any]) -> None:
+def _refuse_clashing(subject_key: str, content: Mapping[str, Any]) -> None:
     """Refuse projected content that names a key the Projection itself carries.
 
     Raises:
@@ -101,6 +106,6 @@ def _refuse_clashing(subject: str, content: Mapping[str, Any]) -> None:
     clashing = sorted(_DECLARATION_KEYS & set(content))
     if clashing:
         raise ConfigError(
-            f"The projected content of '{subject}' names {clashing}, which the "
+            f"The projected content of '{subject_key}' names {clashing}, which the "
             "Projection itself carries."
         )

@@ -38,7 +38,7 @@ def test_a_declared_subject_projects_its_panel_settings_and_content() -> None:
 
     projection = Projection.for_subject(control, "file.yaml", content)
 
-    assert projection.subject == "file.yaml"
+    assert projection.subject_key == "file.yaml"
     assert projection.panel == "shared_file_viewer"
     assert projection.panel_settings == {"language": "yaml"}
     assert projection.content == content
@@ -51,10 +51,24 @@ def test_it_travels_as_its_declaration_beside_its_content() -> None:
     )
 
     assert projection.to_dict() == {
-        "subject": "file.yaml",
+        "subject_key": "file.yaml",
         "panel": "shared_file_viewer",
         "panel_settings": {"language": "yaml"},
         "file": {"content": "a: 1\n"},
+    }
+
+
+def test_the_objects_own_subject_identity_is_content_not_the_key() -> None:
+    """subject_key is the presentation lookup key; the object's subject is its identity."""
+    identity = {"kind": "database_schema", "connection": "rey_apps", "schema": "code"}
+    projection = Projection.for_subject(
+        _Control({"subject_key": "schema.map", "panel": "map", "panel_settings": {}}),
+        "schema.map", {"subject": identity, "projection": "schema"},
+    )
+
+    assert projection.to_dict() == {
+        "subject_key": "schema.map", "panel": "map", "panel_settings": {},
+        "subject": identity, "projection": "schema",
     }
 
 
@@ -97,7 +111,7 @@ def test_projecting_carries_the_same_declaration_over_new_content() -> None:
     projected = declared.projecting({"file": {"content": "b: 2\n"}})
 
     assert projected.to_dict() == {
-        "subject": "file.yaml", "panel": "shared_file_viewer",
+        "subject_key": "file.yaml", "panel": "shared_file_viewer",
         "panel_settings": {"language": "yaml"}, "file": {"content": "b: 2\n"},
     }
     assert control.asked == ["file.yaml"]

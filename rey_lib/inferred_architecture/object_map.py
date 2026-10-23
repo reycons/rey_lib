@@ -29,7 +29,7 @@ the map's.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Final
+from typing import Any, Callable, Final
 
 from rey_lib.db.database_objects import DatabaseSchema
 from rey_lib.db.database_query import DatabaseQuery
@@ -67,12 +67,11 @@ def _statement(name: str) -> str:
 
 
 class ObjectMap:
-    """One map subject, read, held live, focused and projected."""
+    """One map subject, read, held live, focused and projected.
 
-    #: The presentation a map requires (#1139): what the Console's registry
-    #: presents it with. Which screen it shows -- object or schema -- is its own
-    #: projection state, never a second presentation type.
-    PANEL_TYPE: ClassVar[str] = "map"
+    It states no presentation (#1215): its governed subject's presentation is
+    resolved by Projection.for_subject.
+    """
 
     def __init__(self, subject: dict[str, Any], projection_kind: str,
                  read: dict[str, Any]) -> None:
@@ -219,14 +218,12 @@ class ObjectMap:
 
     def projection(self) -> dict[str, Any]:
         """The focused screen: nodes, edges, the path back, the details, and the
-        selected node with the connections it highlights -- with the
-        presentation the map requires (``panel_type``) beside which screen it
-        is (``projection``)."""
+        selected node with the connections it highlights -- beside its subject
+        identity (``subject``) and which screen it is (``projection``)."""
         screen = self._project[self.projection_kind]()
         selected = self._marked(screen["nodes"], screen["edges"])
         return {
             "subject": dict(self.subject),
-            "panel_type": self.PANEL_TYPE,
             "projection": self.projection_kind,
             "focus": dict(self._focus),
             "selected": selected,
