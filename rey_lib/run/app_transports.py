@@ -4,19 +4,18 @@ An execution context -- the Console's PageRuntime is one, a scheduler or other
 runtime may be another -- holds one AppTransports. It launches applications
 from their semantic inputs, holds each one's AppTransport under an opaque ref,
 carries commands to them and what they emit back, correlates requests with
-their answers, carries one application's request to another (the ``route``
-envelope, #1196; the ``bound_request`` envelope, #1141 S3), and ends them with
-the context (recipe app.serve_a_live_object_to_a_panel, APPLICATION
-COMMUNICATION MODEL; recipe console.hosted_presentation_model C10):
+their answers, and ends them with the context (rule
+application_communication_is_common_infrastructure_only):
 
-    application <-> AppTransport <-> AppTransports <-> AppTransport <-> application
+    execution context <-> AppTransports <-> AppTransport (by ref) <-> application
+
+The pre-existing ``route`` envelope (#1196) is still carried, unchanged.
 
 Communication only. It hydrates, directs, watches and executes nothing, holds no
 state model of any application's objects, and reads no payload: an opaque ref
-names an application transport -- never a subject, an identity or a panel --
-and a bound request is transport-to-transport. What a message means is the
-applications'. How a consumer presents it -- a browser, a log, a test -- is the
-consumer's.
+names an application transport -- never a subject, an identity or a panel. What
+a message means is the applications'. How a consumer presents it -- a browser,
+a log, a test -- is the consumer's.
 """
 
 from __future__ import annotations
@@ -43,11 +42,6 @@ _logger = AppLogger(__name__)
 #: token>, "payload": {...}}, "request_id": ...}. IO_REQUEST_SECONDS, the one bound for
 #: every request the IO layer carries (#1127), is rey_lib.run.app_channel's.
 _ROUTE_KEY = "route"
-#: The envelope an application emits to have a request delivered to whatever its own
-#: transport is bound to (#1141 S3): {"bound_request": {...}, "request_id": ...}. The
-#: application names no destination; the payload is opaque here and is delivered
-#: unchanged to the bound transport as {"command": "bound_request", "request": {...}}.
-_BOUND_KEY = "bound_request"
 #: How often a waiting request looks to see whether the application has ended.
 _REQUEST_POLL_SECONDS = 0.2
 #: The most of an ended application's last output line a failure carries.
@@ -75,32 +69,19 @@ class AppTransport:
 
     A message its application emits asking to be routed to another application
     (the ``route`` envelope, #1196) is handed to ``route`` -- its AppTransports'
-    routing -- instead of being pushed to subscribers. A ``bound_request`` its
-    application emits is handed to ``deliver`` -- its AppTransports' delivery to
-    the transport ``bound`` names (#1141 S3). An answer to one of this
+    routing -- instead of being pushed to subscribers. An answer to one of this
     transport's own requests goes to that request alone.
     """
 
     def __init__(self, app: Any,
-                 route: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None,
-                 deliver: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None,
-                 bound: str = "") -> None:
+                 route: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None) -> None:
         self._listeners: list[Listener] = []
         self._guard = threading.Lock()
         self._app: Any = app
         self._pumps: list[threading.Thread] = []
         self._route = route
-        self._deliver = deliver
-        # The opaque ref of the transport in the same context this one is bound to,
-        # or "": reachability only, never identity (#1141 S3).
-        self._bound = str(bound or "")
         # This transport's own outstanding requests, by request_id.
         self._pending: dict[str, queue.Queue[dict[str, Any]]] = {}
-
-    @property
-    def bound(self) -> str:
-        """The opaque ref of the transport this one is bound to, or "" when none."""
-        return self._bound
 
     @property
     def run_id(self) -> Optional[int]:
@@ -206,15 +187,12 @@ class AppTransport:
             self._push(wrap(item))
 
     def _push(self, message: dict[str, Any]) -> None:
-        """Deliver, route or answer one message, or tell every subscriber.
+        """Route or answer one message, or tell every subscriber.
 
-        In order: a ``bound_request`` goes to this transport's delivery; a
-        ``route`` envelope to its routing; an answer to one of its own pending
-        requests to that request alone; anything else to every subscriber.
+        In order: a ``route`` envelope goes to this transport's routing; an answer
+        to one of its own pending requests to that request alone; anything else to
+        every subscriber.
         """
-        if self._deliver is not None and isinstance(message.get(_BOUND_KEY), dict):
-            self._deliver(self, message)
-            return
         if self._route is not None and isinstance(message.get(_ROUTE_KEY), dict):
             self._route(self, message)
             return
@@ -245,24 +223,19 @@ class AppTransports:
     It also routes one application's request to another application it holds
     (#1196): a request one transport's application emits is sent, under the
     asker's own request_id, to the transport its ``destination`` token names, and
-    the answer is sent back to the asker. And it delivers an application's
-    ``bound_request`` to the transport that application's transport is bound to
-    (#1141 S3). Both read only envelopes, request_ids and refs; what the request
-    and its answer mean is the applications'.
+    the answer is sent back to the asker. Routing reads only the envelope, the
+    request_id and the ref; what the request and its answer mean is the
+    applications'.
     """
 
     def __init__(self) -> None:
         self._held: dict[str, AppTransport] = {}
         self._guard = threading.Lock()
 
-    def open(self, app: Any, bound: str = "") -> tuple[str, AppTransport]:
-        """Hold a new transport for the launched ``app``, not yet started; answer its ref.
-
-        ``bound`` is the ref of a transport this context holds that the new one's
-        ``bound_request`` messages are delivered to (#1141 S3), or "" for none.
-        """
+    def open(self, app: Any) -> tuple[str, AppTransport]:
+        """Hold a new transport for the launched ``app``, not yet started; answer its ref."""
         ref = uuid.uuid4().hex
-        transport = AppTransport(app, route=self._route, deliver=self._deliver, bound=bound)
+        transport = AppTransport(app, route=self._route)
         with self._guard:
             self._held[ref] = transport
         return ref, transport
@@ -281,7 +254,7 @@ class AppTransports:
 
     def launch(
         self, runtime: Any, application: str, operation: str, inputs: Mapping[str, Any],
-        listener: Listener, bound: str = "",
+        listener: Listener,
     ) -> tuple[str, AppTransport, Callable[[], None]]:
         """Launch one application operation and hold its transport, started (#1138).
 
@@ -289,30 +262,22 @@ class AppTransports:
         (``LaunchedApp.launch_operation``), this context holds the transport,
         ``listener`` is subscribed before anything is pushed, and the pumps start.
 
-        ``bound`` (#1141 S3) is the opaque ref of a transport this context already
-        holds: checked before anything launches, kept on the new transport alone,
-        and never given to the launched application.
-
         Returns:
             The transport's ref, the transport, and the call that unsubscribes
             ``listener``.
 
         Raises:
-            TransportNotHeld: When ``bound`` names no transport this context holds.
             AppError: When the application cannot be launched.
         """
-        if bound:
-            # Reachability, checked before anything launches: a ref this context holds.
-            self.get(bound)
         launched = LaunchedApp.launch_operation(runtime, application, operation, dict(inputs))
-        ref, transport = self.open(launched, bound=bound)
+        ref, transport = self.open(launched)
         release = transport.subscribe(listener)
         transport.start()
         return ref, transport, release
 
     def establish(
         self, runtime: Any, application: str, operation: str, inputs: Mapping[str, Any],
-        *, timeout: float = IO_REQUEST_SECONDS, bound: str = "",
+        *, timeout: float = IO_REQUEST_SECONDS,
     ) -> dict[str, Any]:
         """Launch one application operation and await its first projection (#1138).
 
@@ -324,13 +289,12 @@ class AppTransports:
             ``{"token": <transport ref>, "projection": <the first projection>}``.
 
         Raises:
-            TransportNotHeld: When ``bound`` names no transport this context holds.
             AppError: When the application cannot be launched, ends before sending a
                 projection, or sends none within ``timeout``; it is closed then.
         """
         pushed: queue.Queue[dict[str, Any]] = queue.Queue()
         ref, transport, release = self.launch(
-            runtime, application, operation, inputs, pushed.put, bound)
+            runtime, application, operation, inputs, pushed.put)
         # The last line the application wrote, kept only to say why it ended (#1171).
         last_line = ""
         try:
@@ -418,42 +382,6 @@ class AppTransports:
                       "request_id": request_id}
         except TransportNotHeld:
             answer = {"error": "No application with that transport is held here.",
-                      "request_id": request_id}
-        except AppError as refused:
-            answer = {"error": str(refused), "request_id": request_id}
-        _answer(source, answer)
-
-    def _deliver(self, source: AppTransport, message: dict[str, Any]) -> None:
-        """Deliver one bound request on its own worker, so the asker's pump never waits."""
-        threading.Thread(target=self._deliver_bound, args=(source, message),
-                         name="app-transport-deliver", daemon=True).start()
-
-    def _deliver_bound(self, source: AppTransport, message: dict[str, Any]) -> None:
-        """Deliver a bound request to the transport ``source`` is bound to (#1141 S3).
-
-        The payload goes, unread, as ``{"command": "bound_request", "request":
-        payload}`` through that transport's own request, under a request_id of its
-        own; its answer comes back to the asker unchanged, as ``{"answer": ...,
-        "request_id": <the asker's>}``. An asker bound to nothing this context
-        holds, a payload that is not a mapping, a target that does not answer
-        within IO_REQUEST_SECONDS or ends first -- each is answered ``{"error":
-        ..., "request_id": ...}``. An asker that has ended is not answered.
-        Reads only the envelope, the request_ids and ``source``'s own bound ref.
-        """
-        request_id = message.get("request_id")
-        if not request_id:
-            # Nothing could carry an answer back; the request is malformed at its source.
-            _logger.warning("A bound request arrived without a request_id and was not delivered.")
-            return
-        payload = message.get(_BOUND_KEY)
-        try:
-            if not isinstance(payload, dict):
-                raise ConfigError("A bound request carries one mapping as its payload.")
-            target = self.get(source.bound)
-            answer = {"answer": target.request({"command": _BOUND_KEY, "request": payload}),
-                      "request_id": request_id}
-        except TransportNotHeld:
-            answer = {"error": "This application is bound to no transport held here.",
                       "request_id": request_id}
         except AppError as refused:
             answer = {"error": str(refused), "request_id": request_id}

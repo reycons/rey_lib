@@ -1,10 +1,10 @@
 """AppTransport / AppTransports: the common fabric applications communicate through (#1141).
 
 A real child application is launched and carried by a transport; stand-in
-applications show the fabric's own rules -- lifetime, request correlation, one
-application's request routed to another (#1196) and a bound request delivered to
-the transport its asker is bound to (#1141 S3). Moved from rey_console with the
-fabric itself; nothing here knows a Console, a browser or a subject.
+applications show the fabric's own rules -- lifetime, request correlation and the
+pre-existing route of one application's request to another (#1196). Moved from
+rey_console with the fabric itself; nothing here knows a Console, a browser or a
+subject.
 """
 
 from __future__ import annotations
@@ -406,69 +406,6 @@ def test_an_asker_that_has_ended_is_not_answered() -> None:
     b.end()
 
 
-def _result_answer(command: dict[str, Any]) -> dict[str, Any]:
-    return {"result": {"steps": 3}, "request_id": command.get("request_id")}
-
-
-def _bound_pair(answer_b=_result_answer):
-    """B, and A bound to B's transport, in one runtime (#1141 S3)."""
-    transports = AppTransports()
-    a, b = _Peer(), _Peer(answer_b)
-    ref_b, transport_b = transports.open(b)
-    ref_a, transport_a = transports.open(a, bound=ref_b)
-    return transports, (a, ref_a, transport_a), (b, ref_b, transport_b)
-
-
-def test_a_bound_request_is_delivered_unread_and_its_answer_returns_unchanged() -> None:
-    _, (a, _, transport_a), (b, _, transport_b) = _bound_pair()
-    pushed_a, pushed_b = _pushed(transport_a), _pushed(transport_b)
-    transport_a.start()
-    transport_b.start()
-    # Whatever the payload is, it is carried as it is: nothing here reads it.
-    payload = {"subject": {"workflow_id": "42"}, "anything": [1, {"x": None}]}
-
-    a.emit({"bound_request": payload, "request_id": "A-1"})
-
-    _until(lambda: a.sent)
-    (delivered,) = b.sent
-    assert delivered["command"] == "bound_request" and delivered["request"] == payload
-    # The target leg has a request_id of its own.
-    assert delivered["request_id"] and delivered["request_id"] != "A-1"
-    assert a.sent == [{"answer": {"result": {"steps": 3}, "request_id": delivered["request_id"]},
-                       "request_id": "A-1"}]
-    # Neither panel stream saw the request or its answer.
-    assert pushed_a.empty() and pushed_b.empty()
-    a.end()
-    b.end()
-
-
-def test_a_transport_bound_to_nothing_is_answered_as_an_error() -> None:
-    transports = AppTransports()
-    a = _Peer()
-    _, transport_a = transports.open(a)
-    transport_a.start()
-
-    a.emit({"bound_request": {"x": 1}, "request_id": "A-2"})
-
-    _until(lambda: a.sent)
-    assert a.sent == [{"error": "This application is bound to no transport held here.",
-                       "request_id": "A-2"}]
-    a.end()
-
-
-def test_a_bound_transport_that_has_closed_is_answered_as_an_error() -> None:
-    transports, (a, _, transport_a), (_, ref_b, _) = _bound_pair()
-    transports.close(ref_b)
-    transport_a.start()
-
-    a.emit({"bound_request": {"x": 1}, "request_id": "A-3"})
-
-    _until(lambda: a.sent)
-    assert a.sent == [{"error": "This application is bound to no transport held here.",
-                       "request_id": "A-3"}]
-    a.end()
-
-
 #: Two real applications in one runtime: B serves its projection; A asks B for it.
 SERVER = textwrap.dedent("""
     from rey_lib.run.app_channel import AttachedApp
@@ -518,38 +455,3 @@ def test_one_running_application_asks_another_through_their_runtime() -> None:
         assert asked["answer"]["request_id"] == asked["request_id"]
     finally:
         transports.close_all()
-
-
-# -- launching, bound to a transport the context holds (#1141 S3) ---------------
-
-
-def test_a_launch_bound_to_a_ref_not_held_launches_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launched: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(LaunchedApp, "launch_operation", classmethod(
-        lambda cls, _ctx, *request: launched.append(request)))
-    transports = AppTransports()
-
-    with pytest.raises(TransportNotHeld):
-        transports.launch(SimpleNamespace(), "ai_app", "serve", {"task_key": "t"},
-                          lambda message: None, "no-such-ref")
-    assert launched == [] and transports._held == {}
-
-
-def test_a_launch_keeps_its_bound_ref_on_the_new_transport_and_not_in_the_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launched: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(LaunchedApp, "launch_operation", classmethod(
-        lambda cls, _ctx, *request: launched.append(request) or _Peer()))
-    transports = AppTransports()
-    subject_ref, _ = transports.open(_Peer())
-
-    ref, transport, release = transports.launch(
-        SimpleNamespace(), "ai_app", "serve", {"task_key": "t"}, lambda message: None, subject_ref)
-    release()
-
-    assert transport.bound == subject_ref and ref != subject_ref
-    assert launched == [("ai_app", "serve", {"task_key": "t"})]
-    transports.close_all()

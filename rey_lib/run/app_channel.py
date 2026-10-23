@@ -444,52 +444,6 @@ class AttachedApp:
             with self._waiting:
                 self._pending.pop(request_id, None)
 
-    def bound_request(
-        self,
-        payload: Mapping[str, Any],
-        timeout: float = IO_REQUEST_SECONDS,
-    ) -> dict[str, Any]:
-        """Send one request to whatever this application's transport is bound to (#1141 S3).
-
-        Destination-free: the application names no host, transport, token or
-        ref -- delivering it is the communication layer's, never the
-        application's (recipes #42 step 5, #45 step 10). ``payload`` is opaque
-        here and below: it travels as ``{"bound_request": payload,
-        "request_id": ...}`` on this application's own channel, under a
-        request_id minted here, and the answer is returned exactly as it
-        arrived; what either means is the caller's and the receiving host's.
-
-        The answer is read by :meth:`commands`, so this must be called from a
-        thread other than the one iterating it.
-
-        Raises:
-            AppError: When no answer arrives within ``timeout`` seconds, or the
-                channel closes first.
-        """
-        request_id = uuid.uuid4().hex
-        answered: queue.Queue[Optional[dict[str, Any]]] = queue.Queue(maxsize=1)
-        with self._waiting:
-            self._pending[request_id] = answered
-        try:
-            self.emit({"bound_request": dict(payload), "request_id": request_id})
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise AppError(
-                        f"No answer to the bound request within {timeout:g} s."
-                    )
-                try:
-                    message = answered.get(timeout=min(_REQUEST_POLL_SECONDS, remaining))
-                except queue.Empty:
-                    continue
-                if message is None:
-                    raise AppError("The channel closed before the bound request was answered.")
-                return message
-        finally:
-            with self._waiting:
-                self._pending.pop(request_id, None)
-
     def _waiter(self, message: Any) -> Optional[queue.Queue[Optional[dict[str, Any]]]]:
         """The request waiting for this message, or None when it is a command."""
         if not isinstance(message, dict):
