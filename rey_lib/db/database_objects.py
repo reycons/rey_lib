@@ -498,9 +498,6 @@ class DatabasePrimaryKey:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -587,9 +584,6 @@ class DatabaseForeignKey:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -672,9 +666,6 @@ class DatabaseIndex:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -776,9 +767,6 @@ class DatabaseConstraint:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -861,9 +849,6 @@ class DatabaseSequence:
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -957,9 +942,6 @@ class DatabaseUserDefinedType:
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1054,9 +1036,6 @@ class DatabaseTrigger:
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1136,9 +1115,6 @@ class DatabaseTable:
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1772,9 +1748,6 @@ class DatabaseView:
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1886,9 +1859,6 @@ class DatabaseProcedure:
     IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -2014,9 +1984,6 @@ class DatabaseFunction:
     IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -2142,9 +2109,6 @@ class DatabaseSchema:
     IDENTITY: ClassVar[type] = DatabaseSchemaIdentity
     identify = classmethod(_identify)
     read_identified = classmethod(_read_identified)
-    #: What kind of presentation this object requires (#1140): a semantic type;
-    #: which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod

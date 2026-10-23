@@ -325,18 +325,12 @@ class TestObjectsReadThemselvesByIdentity:
         assert trigger.ddl.startswith("CREATE TRIGGER t AFTER INSERT ON control.run")
 
 
-def test_every_listed_database_object_states_its_presentation_type() -> None:
-    """#1140: each canonical Database* type owns its semantic presentation type.
-
-    One contract -- an inspectable database object with its canonical definition
-    and, where it has one, a queryable representation -- named "dataobject". Which
-    Console panel implements it is the Console's registry, never the object's.
-    """
+def test_no_listed_database_object_states_its_own_presentation() -> None:
+    """#1215: a database object's presentation is its governed subject's, never its own."""
     from rey_lib.db.database_objects import _LISTED
 
     assert len(_LISTED) == 12
-    assert {owner.__name__: owner.PANEL_TYPE for owner in _LISTED} == {
-        owner.__name__: "dataobject" for owner in _LISTED}
+    assert [owner.__name__ for owner in _LISTED if hasattr(owner, "PANEL_TYPE")] == []
 
 
 class TestEachTypeOwnsItsIdentity:
