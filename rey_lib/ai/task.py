@@ -80,9 +80,17 @@ class AITask:
             and unresolved (backlog 1037): what a rehydration keeps, so a
             governed value nobody chose is never carried forward as though it
             had been.
+        offers: What each of this task's choices may be (#1141 S2), from the
+            governed rows its hydration read and checked its choices against:
+            the enabled engines, the instructions, and the representations its
+            engine may receive. Read once, with everything else.
         status, answer, error, run_id: The lifecycle. Read-only to callers and
             changed only by this task's transitions.
     """
+
+    #: What kind of presentation a task requires (#1141 S2, R5): a semantic type.
+    #: Which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "ai_task"
 
     IDLE: ClassVar[str] = "idle"
     RUNNING: ClassVar[str] = "running"
@@ -136,6 +144,9 @@ class AITask:
     tools: tuple[AITool, ...] = ()
 
     choices: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+    offers: Mapping[str, tuple[Mapping[str, str], ...]] = field(
+        default_factory=lambda: MappingProxyType({}))
 
     status: str = field(default=IDLE, init=False)
     answer: Any = field(default=None, init=False)
@@ -339,6 +350,24 @@ class AITask:
                 name: value for name, value in given.items()
                 if value is not None and not (isinstance(value, str) and not value.strip())
             }),
+            # WHAT EACH CHOICE MAY BE, from the rows this hydration checked its
+            # choices against -- in their own order, nothing read again.
+            offers=MappingProxyType({
+                "profile_key": tuple(
+                    MappingProxyType({"value": str(one.get("profile_key") or ""),
+                                      "label": str(one.get("model_identifier") or "")})
+                    for one in engines if one.get("is_enabled") is not False
+                ),
+                "instruction_key": tuple(
+                    MappingProxyType({"value": str(one.get("instruction_key") or ""),
+                                      "label": str(one.get("instruction_key") or "")})
+                    for one in instructions
+                ),
+                "representation": tuple(
+                    MappingProxyType({"value": str(one), "label": str(one)})
+                    for one in (engine.get("access_allowed") or ())
+                ),
+            }),
         )
 
     @staticmethod
@@ -395,9 +424,13 @@ class AITask:
         was asked, its lifecycle, and its answer as AI stated it -- text or
         value with the media type, never rendered. Engine credentials and the
         contract body stay out: they are execution facts, not display.
+
+        With them, how it is presented (#1141 S2): its semantic panel_type, never
+        a Console panel; and what each of its choices may be (``offers``).
         """
         answer = self.answer
         return {
+            "panel_type": self.PANEL_TYPE,
             "id": self.id,
             "task_key": self.task_key,
             "label": self.label,
@@ -412,6 +445,9 @@ class AITask:
             "choices": {
                 name: (value.media_type if name == "output" else value)
                 for name, value in self.choices.items()
+            },
+            "offers": {
+                name: [dict(one) for one in options] for name, options in self.offers.items()
             },
             "prompt": "\n\n".join(
                 str(part.value) for part in self.input.content

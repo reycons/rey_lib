@@ -210,3 +210,32 @@ class TestFromGoverned:
 
         assert first is not second
         assert first.id != second.id
+
+
+class TestOffers:
+    """#1141 S2: a task states what its own choices may be, from the rows it read."""
+
+    def test_it_offers_the_enabled_engines_the_instructions_and_its_engines_representations(
+        self,
+    ) -> None:
+        task = _hydrate(task_key="search_index")
+
+        assert [dict(one) for one in task.offers["profile_key"]] == [
+            {"value": "local_testing", "label": "ollama:qwen3-coder-next:latest"},
+            {"value": "anthropic", "label": "anthropic:claude-sonnet-4-6"}]
+        assert [one["value"] for one in task.offers["instruction_key"]] == [
+            "__none__", "explain_v1", "empty_contract"]
+        assert [one["value"] for one in task.offers["representation"]] == [
+            "redacted", "unredacted"]
+
+    def test_the_representations_follow_the_chosen_engine(self) -> None:
+        task = _hydrate(task_key="search_index", profile_key="anthropic")
+
+        assert [one["value"] for one in task.offers["representation"]] == ["redacted"]
+
+    def test_the_projection_states_its_presentation_and_its_offers(self) -> None:
+        projection = _hydrate(task_key="search_index").projection()
+
+        assert projection["panel_type"] == AITask.PANEL_TYPE == "ai_task"
+        assert set(projection["offers"]) == {"profile_key", "instruction_key", "representation"}
+        assert "offers" not in _hydrate(task_key="search_index").definition()
