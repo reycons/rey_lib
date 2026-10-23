@@ -103,7 +103,7 @@ def _workflow() -> Workflow:
     ]
     process = WorkflowProcess(name="p", ordinal=1, application=application, config=None,
                               steps=steps)
-    return Workflow(name="code_index", enabled=True, config=None,
+    return Workflow(workflow_id=1, name="code_index", enabled=True, config=None,
                     processes=[process], control=object())
 
 
@@ -274,6 +274,7 @@ class TestTheWorkflowIsOpenedAtOneOfItsParts:
 
 def test_the_definition_is_what_the_workflow_is_and_where_it_stands() -> None:
     assert _workflow().definition() == {
+        "workflow_id": 1,
         "name": "code_index",
         "enabled": True,
         "state": "IDLE",

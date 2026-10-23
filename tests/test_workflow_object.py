@@ -105,7 +105,7 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
         ))
     process = WorkflowProcess(name=application.name, ordinal=1, application=application,
                               config=None, steps=steps)
-    return Workflow(name=workflow["name"], enabled=workflow.get("enabled", True),
+    return Workflow(workflow_id=1, name=workflow["name"], enabled=workflow.get("enabled", True),
                     config=None, processes=[process], control=control)
 
 
@@ -456,7 +456,7 @@ def test_a_child_runs_settings_are_its_steps_resolved_settings(tmp_path: Path) -
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[step])
 
-    Workflow(name="wf", enabled=True, config=None, processes=[process],
+    Workflow(workflow_id=1, name="wf", enabled=True, config=None, processes=[process],
              control=control, runtime=SimpleNamespace(),
              log=_log(tmp_path)).direct()
 
@@ -498,7 +498,7 @@ def test_the_handler_receives_its_run_and_steps_share_the_directions_data(
                               steps=steps)
     parent = parent_run(control, log=_log(tmp_path))
 
-    workflow = Workflow(name="wf", enabled=True, config=None,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=None,
                         processes=[process], control=control,
                         runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id)
     outcome = workflow.direct(metadata={"workflow": "wf"})
@@ -674,7 +674,7 @@ def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Pat
         _step(b, "check", "s2", 2, calls)])
     parent = parent_run(control, log=_log(tmp_path))
 
-    Workflow(name="wf", enabled=True, config=None,
+    Workflow(workflow_id=1, name="wf", enabled=True, config=None,
              processes=[first, second], control=control,
              runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id).direct()
 
@@ -690,7 +690,7 @@ def test_it_holds_config_and_control_and_owns_its_processes() -> None:
     config = {"paths": [{"name": "data", "path": "{root}"}]}
     control = RecordingControl()
 
-    workflow = Workflow(name="wf", enabled=True, config=config,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=config,
                         processes=[process], control=control)
     config["paths"].append({"name": "x", "path": "y"})
 
@@ -703,11 +703,11 @@ def test_a_process_of_another_workflow_is_refused() -> None:
     application = _application("load")
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[])
-    Workflow(name="first", enabled=True, config=None, processes=[process],
+    Workflow(workflow_id=1, name="first", enabled=True, config=None, processes=[process],
              control=None)
 
     with pytest.raises(AppError, match="already belongs to workflow 'first'"):
-        Workflow(name="second", enabled=True, config=None,
+        Workflow(workflow_id=2, name="second", enabled=True, config=None,
                  processes=[process], control=None)
 
 
@@ -718,7 +718,7 @@ def test_a_shared_ordinal_is_refused() -> None:
                                      _step(application, "load", "s2", 1, [])])
 
     with pytest.raises(AppError, match="share ordinal 1"):
-        Workflow(name="wf", enabled=True, config=None, processes=[process],
+        Workflow(workflow_id=1, name="wf", enabled=True, config=None, processes=[process],
                  control=None)
 
 
@@ -748,7 +748,7 @@ def test_a_process_name_selects_its_own_steps_in_release_order(
         _step(a, "load", "s1", 1, []), _step(a, "load", "s3", 3, [])])
     second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
         _step(b, "check", "s2", 2, [])])
-    workflow = Workflow(name="wf", enabled=True, config=None,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=None,
                         processes=[first, second], control=control,
                         runtime=SimpleNamespace(),
                         log=_log(tmp_path))
@@ -929,7 +929,7 @@ def test_relationships_follow_execution_order_across_interleaved_processes() -> 
                                    _step(application, "load", "s1", 1, [])])
     second = WorkflowProcess(name="b", ordinal=2, application=application, config=None,
                              steps=[_step(application, "load", "s2", 2, [])])
-    workflow = Workflow(name="wf", enabled=True, config=None,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=None,
                         processes=[first, second], control=None)
     relationships = workflow.projection(None)["relationships"]
     assert [edge for edge in relationships if edge["kind"] == "precedes"] == [
@@ -952,7 +952,7 @@ def test_a_selected_process_projects_its_own_route_past_another_processes_step(
     second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
         _step(b, "check", "s2", 2, calls)])
     parent = parent_run(control, log=_log(tmp_path))
-    workflow = Workflow(name="wf", enabled=True, config=None,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=None,
                         processes=[first, second], control=control,
                         runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id)
     before = workflow.relationships()

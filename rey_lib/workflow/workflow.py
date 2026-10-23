@@ -78,6 +78,8 @@ class Workflow:
 
     Attributes
     ----------
+    workflow_id : int
+        The workflow's governed identity: its control.workflow id (#1141).
     name : str
         The workflow's governed name.
     enabled : bool
@@ -108,6 +110,7 @@ class Workflow:
     def __init__(
         self,
         *,
+        workflow_id: Any,
         name: str,
         enabled: bool,
         config: Optional[Mapping[str, Any]],
@@ -121,8 +124,11 @@ class Workflow:
 
         Parameters
         ----------
+        workflow_id
+            The workflow's governed identity, its control.workflow id: an int or a
+            decimal-digit string, held as an int.
         name, enabled
-            The workflow's governed identity and switch.
+            The workflow's governed name and switch.
         config : Mapping[str, Any] | None
             The workflow's governed configuration. Copied.
         processes : Sequence[WorkflowProcess]
@@ -142,9 +148,17 @@ class Workflow:
         Raises
         ------
         AppError
-            When the name is missing, a process already belongs to another
-            workflow, or two steps share a workflow-wide ordinal.
+            When the governed id or the name is missing, a process already
+            belongs to another workflow, or two steps share a workflow-wide
+            ordinal.
         """
+        governed = _governed_id(workflow_id)
+        if governed is None:
+            raise AppError(
+                f"a workflow is missing its governed id (control.workflow id); "
+                f"given {workflow_id!r}."
+            )
+        self.workflow_id = governed
         if not name:
             raise AppError("a workflow is missing required 'name'.")
         self.name = name
@@ -230,6 +244,13 @@ class Workflow:
             raise AppError("a workflow was hydrated from no rows.")
         first = rows[0]
         name = str(first.get("workflow_name") or "")
+        # One workflow's rows: its governed identity is theirs, and theirs alone.
+        ids = {str(row.get("workflow_id")) for row in rows}
+        if len(ids) != 1:
+            raise AppError(
+                f"workflow '{name}' was hydrated from rows of more than one workflow: "
+                f"{', '.join(sorted(ids))}."
+            )
         # As HttpOperation.hydrate refuses a disabled job: a disabled workflow
         # is never offered as a hydrated runnable workflow.
         if not first.get("workflow_enabled"):
@@ -268,6 +289,7 @@ class Workflow:
                 approved=approved.get(application_name) or {},
             ))
         return cls(
+            workflow_id=first.get("workflow_id"),
             name=name,
             enabled=bool(first.get("workflow_enabled")),
             config=resolved["config"],
@@ -359,6 +381,16 @@ class Workflow:
                 workflow_process_id=workflow_process_id, workflow_step_id=workflow_step_id,
             )
         return workflow
+
+    def identifies(self, workflow_id: Any) -> bool:
+        """Whether ``workflow_id`` is this Workflow's governed identity (#1141).
+
+        The canonical equality: equal control.workflow ids, as integers. An int or
+        a decimal-digit string denotes one; nothing else -- a bool, a float, any
+        other string, a mapping -- identifies a Workflow. It takes a governed id,
+        never a reference: what a host's reference names is the host's to say.
+        """
+        return _governed_id(workflow_id) == self.workflow_id
 
     def focus(self, *, workflow_process_id: Any = None, workflow_step_id: Any = None) -> None:
         """Open this Workflow at one of its own processes or steps (backlog 1126).
@@ -571,6 +603,7 @@ class Workflow:
         """
         with self._acting:
             return {
+                "workflow_id": self.workflow_id,
                 "name": self.name,
                 "enabled": self.enabled,
                 "state": self.state,
@@ -897,3 +930,17 @@ class Workflow:
             failed_step_name=one.label or one.id,
             failure_message=payload["message"],
         )
+
+
+def _governed_id(value: Any) -> int | None:
+    """The control.workflow id ``value`` denotes, or None when it denotes none.
+
+    An int, or a string of decimal digits; a bool is not an id.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return None

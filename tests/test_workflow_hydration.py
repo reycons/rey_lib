@@ -206,6 +206,34 @@ def _hydrate(rows: list[dict[str, Any]]) -> tuple[Workflow, RecordingControl]:
                              control=control), control)
 
 
+class TestTheWorkflowOwnsItsGovernedIdentity:
+    """#1141: the canonical Workflow holds its control.workflow id and owns equality on it."""
+
+    def test_hydration_takes_the_governed_id_from_its_rows(self) -> None:
+        workflow, _ = _hydrate(_rows())
+
+        assert workflow.workflow_id == 1
+
+    def test_rows_of_more_than_one_workflow_are_refused(self) -> None:
+        rows = [*_rows(), _row(2, "wf", "only", 3, "load", _settings())]
+
+        with pytest.raises(AppError, match="more than one workflow"):
+            _hydrate(rows)
+
+    def test_an_int_or_a_decimal_string_identifies_it_and_nothing_else_does(self) -> None:
+        workflow, _ = _hydrate(_rows())
+
+        assert workflow.identifies(1) and workflow.identifies("1") and workflow.identifies(" 1 ")
+        for other in (2, "2", True, 1.0, "1.0", "one", "", None, {"workflow_id": 1}):
+            assert not workflow.identifies(other), other
+
+    def test_a_workflow_without_its_governed_id_is_refused(self) -> None:
+        rows = [{**row, "workflow_id": None} for row in _rows()]
+
+        with pytest.raises(AppError, match="governed id"):
+            _hydrate(rows)
+
+
 class TestTheWorkflowHoldsItsApplicationRun:
     """The creating application passes its Application Run id; the Workflow holds it."""
 
