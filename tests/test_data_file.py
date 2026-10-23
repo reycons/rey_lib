@@ -235,7 +235,7 @@ class TestTheFormat:
     """What format a file is identified as, distinct from file_type (#1215)."""
 
     @pytest.mark.parametrize("name, declared, expected", [
-        ("module.py", "", "python"),
+        ("module.py", "", "py"),
         ("config.yaml", "", "yaml"),
         ("notes.txt", "", "text"),
         ("rows.csv", "", "csv"),
@@ -257,6 +257,7 @@ class TestTheFormat:
         ("query.sql", "sql"),
         ("README.md", "md"),
         ("run.log", "log"),
+        ("component.ts", "ts"),
         ("QUERY.SQL", "sql"),
     ])
     def test_an_established_format_with_no_subclass_is_a_plain_file_with_a_format(
@@ -295,10 +296,11 @@ class TestTheFormat:
         assert JsonFile(tmp_path / "doc.json").format == "json"
 
     def test_the_new_formats_leave_the_suffix_map_and_file_type_alone(self) -> None:
-        """file_type keeps its meaning: sql, md and log claim no registered token."""
+        """file_type keeps its meaning: sql, md, log and ts claim no registered token."""
         assert File.type_for_suffix(".sql") == ""
         assert File.type_for_suffix(".md") == ""
         assert File.type_for_suffix(".log") == ""
+        assert File.type_for_suffix(".ts") == ""
 
 
 class TestDelimitedHeaderFile:

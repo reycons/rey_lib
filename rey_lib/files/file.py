@@ -77,13 +77,16 @@ _SUFFIX_FORMATS: dict[str, str] = {
     ".sql": "sql",
     ".md":  "md",
     ".log": "log",
+    ".ts":  "ts",
 }
 
-#: Registered tokens that are another name for one format (#1215): the format
-#: they share. Every other registered token is its own format, in lower case.
+#: Registered tokens whose format is not the token itself (#1215): the format,
+#: named by its file suffix. Aliases converge (DELIMITED_HEADER -> csv, NDJSON ->
+#: jsonl); PYTHON is py. Every other registered token is its own format, in lower case.
 _TOKEN_FORMATS: dict[str, str] = {
     "DELIMITED_HEADER": "csv",
     "NDJSON": "jsonl",
+    "PYTHON": "py",
 }
 
 #: Format token -> the File subclass that is that format.
@@ -268,9 +271,9 @@ class File:
         """The format this file is identified as (#1215), in lower case.
 
         A fact about the file, whether or not a registered subclass implements
-        that format: a registered token is its format (aliases converge --
-        DELIMITED_HEADER is csv, NDJSON is jsonl); otherwise a suffix that names
-        an established format (sql, md, log) answers. Empty when nothing
+        that format: a registered token is its format, named by its suffix
+        (DELIMITED_HEADER is csv, NDJSON is jsonl, PYTHON is py); otherwise a
+        suffix that names an established format (sql, md, log, ts) answers. Empty when nothing
         identifies the format. Distinct from ``file_type``, which stays the
         token a registered File subclass claims.
         """
