@@ -474,3 +474,108 @@ def test_a_request_still_waiting_when_the_channel_closes_is_refused() -> None:
     finally:
         print("trace:", app.trace)
         app.close()
+
+
+# -- a destination-free subject request (#1141 S3) ------------------------------
+
+#: A child that asks for an operation on its bound subject when told to -- naming
+#: no destination -- and keeps answering its own commands meanwhile.
+SUBJECT_ASKER = textwrap.dedent("""
+    import threading
+    from rey_lib.errors.error_utils import AppError
+    from rey_lib.run.app_channel import AttachedApp
+    from rey_lib.run.async_runtime import CLOSED_ERRORS
+
+    channel = AttachedApp.attach(12)
+
+    def ask(timeout):
+        try:
+            answer = channel.subject_request(
+                {"capability": "file.facts", "inputs": {}}, timeout=timeout)
+            channel.emit({"event": "asked", "answer": answer})
+        except AppError as refused:
+            print("refused:", refused, flush=True)
+            try:
+                channel.emit({"event": "refused", "error": str(refused)})
+            except CLOSED_ERRORS:
+                pass
+
+    channel.emit({"event": "ready"})
+    for command in channel.commands():
+        name = command.get("command")
+        if name == "ask":
+            threading.Thread(target=ask, args=(command.get("timeout", 20.0),)).start()
+        if name == "echo":
+            channel.emit({"event": "echoed", "value": command.get("value")})
+        if name in ("finish", "close"):
+            break
+    channel.close()
+""")
+
+
+def _subject_requested(events) -> dict:
+    """The next message the application emitted as a subject request."""
+    while "subject_request" not in (message := next(events)):
+        pass
+    return message
+
+
+def test_a_subject_request_names_no_destination_and_its_answer_comes_back() -> None:
+    app = _launch(SUBJECT_ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask"})
+
+        asked = _subject_requested(events)
+        # The payload as given, a request_id minted by the asker, and nothing that
+        # addresses another application.
+        assert asked["subject_request"] == {"capability": "file.facts", "inputs": {}}
+        assert set(asked) == {"subject_request", "request_id"} and asked["request_id"]
+
+        app.send({"command": "echo", "value": "meanwhile"})
+        assert next(events) == {"event": "echoed", "value": "meanwhile"}
+
+        answer = {"answer": {"result": {"file_type": "csv"}}, "request_id": asked["request_id"]}
+        app.send(answer)
+        # The answer went to the waiting request, never to the command loop.
+        assert next(events) == {"event": "asked", "answer": answer}
+        app.send({"command": "finish"})
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        app.close()
+
+
+def test_a_subject_request_with_no_answer_in_time_is_refused() -> None:
+    app = _launch(SUBJECT_ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask", "timeout": 0.5})
+        _subject_requested(events)
+
+        refused = next(events)
+        assert refused["event"] == "refused"
+        assert "bound subject" in refused["error"] and "0.5 s" in refused["error"]
+        app.send({"command": "finish"})
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        app.close()
+
+
+def test_a_subject_request_still_waiting_when_the_channel_closes_is_refused() -> None:
+    app = _launch(SUBJECT_ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask"})
+        _subject_requested(events)
+
+        app.close()
+        assert "refused: The channel closed before the bound subject answered." in "".join(
+            app.output(timeout=WAIT))
+    finally:
+        app.close()

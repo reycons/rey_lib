@@ -194,3 +194,35 @@ class TestThroughAI:
         with pytest.raises(AIConfigurationError, match="database.query"):
             _ai(engine, monkeypatch, operations).execute_task(task)
         assert ran == [] and engine.seen == []
+
+
+SUBJECT_ROW = {
+    "tool_key": "tree_expand", "description": "List one node's children.",
+    "input_schema": {"type": "object", "properties": {"node_key": {"type": "string"}}},
+    "replay_safe": True, "capability_key": "tree.children", "result_row_limit": 50,
+}
+
+
+def _mixed(connection: str | None) -> AITask:
+    """A task granted an environment tool and a subject tool (#1141 S3)."""
+    rows = _configuration(connection)
+    rows[1]["tools"] = [QUERY_ROW, SUBJECT_ROW, {**SUBJECT_ROW, "tool_key": "again"}]
+    return AITask.hydrate(rows, ENGINES, [], installation="local",
+                          task_key="search_index", input=AIInput.prompt("Count them."))
+
+
+class TestUnboundCapabilities:
+    def test_only_what_the_runtime_does_not_bind_is_left_once_each(
+        self, operations: dict,
+    ) -> None:
+        ai = AI(registry=AIRegistry(), connection_operations=operations)
+
+        assert ai.unbound_capabilities(_mixed("llm_reader")) == ("tree.children",)
+
+    def test_an_environment_capability_is_never_left_for_the_caller(
+        self, operations: dict,
+    ) -> None:
+        """Without its connection the database tool stays unbound, not someone else's."""
+        ai = AI(registry=AIRegistry(), connection_operations=operations)
+
+        assert ai.unbound_capabilities(_mixed(None)) == ("tree.children",)

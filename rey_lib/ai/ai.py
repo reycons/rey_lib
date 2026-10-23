@@ -445,6 +445,23 @@ class AI:
             ],
         }
 
+    def unbound_capabilities(self, task: AITask) -> tuple[str, ...]:
+        """The capability keys of ``task``'s governed tools that this runtime does not bind.
+
+        This runtime binds the environment capabilities its composition gave
+        its connections (such as the database capabilities, R3a), and only on
+        the task's governed connection; those are never left for anyone else,
+        so one the task's connection lacks stays unbound. Every other tool's
+        capability is left for the caller of :meth:`execute_task` to bind --
+        or, bound by nobody, refused by the execution's AIToolSet before the
+        model is asked (#1141 S3). In the task's tool order, each key once.
+        """
+        environment = {key for bound in self._connection_operations.values() for key in bound}
+        return tuple(dict.fromkeys(
+            tool.capability_key for tool in task.tools
+            if tool.capability_key and tool.capability_key not in environment
+        ))
+
     def execute_task(
         self,
         task: AITask,
