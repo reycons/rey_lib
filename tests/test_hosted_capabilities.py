@@ -10,6 +10,7 @@ kinds, access other than read -- and otherwise calls the catalogue.
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -166,8 +167,85 @@ def test_a_write_capability_is_refused_in_d1() -> None:
 
 
 def test_its_interface_carries_no_transport_identity_or_caller() -> None:
+    """The host's own check is the one addition (#1141 S3): a callable, not an identity."""
     construction = set(inspect.signature(HostedCapabilities.__init__).parameters)
     invocation = set(inspect.signature(HostedCapabilities.invoke).parameters)
 
-    assert construction == {"self", "application", "control", "catalogue", "hosted_kind"}
+    assert construction == {"self", "application", "control", "catalogue", "hosted_kind",
+                            "identified_by"}
     assert invocation == {"self", "capability", "inputs"}
+
+
+# -- a delivered capability request (#1141 S3) ------------------------------------
+
+
+def _answering(identified_by: Any, called: list[str] | None = None) -> HostedCapabilities:
+    """file_operator's capabilities with a catalogue that records each call."""
+    calls = called if called is not None else []
+    control = _Control([_row(one) for one in (_TEXT, _FACTS)])
+    application = Application(name="file_operator", capabilities=(_TEXT, _FACTS))
+    catalogue = {
+        "file.text": lambda inputs: calls.append("file.text") or "hello"[: inputs["max_bytes"]],
+        "file.facts": lambda inputs: calls.append("file.facts") or {"file_type": "text"},
+    }
+    return HostedCapabilities(application, control, catalogue, "configured_file", identified_by)
+
+
+def test_applicable_asks_invokes_authorization_and_calls_nothing() -> None:
+    called: list[str] = []
+    capabilities = _answering(lambda subject: True, called)
+
+    assert capabilities.applicable(
+        ["file.facts", "file.unknown", "file.text", "file.facts", "database.query"]
+    ) == ["file.facts", "file.text"]
+    assert called == []
+
+
+def test_applicable_refuses_what_invoke_would_refuse_before_reading_inputs() -> None:
+    write = _declared("file.write", _NO_INPUTS, access="write")
+    foreign = replace(_declared("file.other", _NO_INPUTS), target_kinds=("workflow",))
+    capabilities, _ = _hosted(published=(_TEXT, write, foreign), catalogue={
+        "file.text": lambda inputs: "x", "file.write": lambda inputs: "x",
+        "file.other": lambda inputs: "x"})
+
+    assert capabilities.applicable(["file.text", "file.write", "file.other"]) == ["file.text"]
+
+
+def test_the_subject_goes_unread_to_the_hosts_check_and_nowhere_else() -> None:
+    seen: list[Any] = []
+    reference = {"file_manifest_id": 42, "anything": ["the host's vocabulary"]}
+    capabilities = _answering(lambda subject: seen.append(subject) or True)
+
+    assert capabilities.answer({"subject": reference, "capability": "file.facts",
+                                "inputs": {}}) == {"file_type": "text"}
+    assert seen == [reference] and seen[0] is reference
+
+
+def test_a_subject_the_host_does_not_hold_is_refused_before_anything_runs() -> None:
+    called: list[str] = []
+    capabilities = _answering(lambda subject: False, called)
+
+    for request in ({"subject": {"x": 1}, "capability": "file.facts", "inputs": {}},
+                    {"subject": {"x": 1}, "applicable": ["file.facts"]}):
+        with pytest.raises(AppError, match="does not hold the subject"):
+            capabilities.answer(request)
+    assert called == []
+
+
+def test_a_host_with_no_check_answers_no_subject_request() -> None:
+    capabilities, _ = _hosted()
+
+    with pytest.raises(AppError, match="does not hold the subject"):
+        capabilities.answer({"subject": {}, "applicable": ["file.text"]})
+
+
+def test_an_answer_is_applicable_or_invoke_and_invoke_still_checks_its_inputs() -> None:
+    capabilities = _answering(lambda subject: True)
+
+    assert capabilities.answer({"subject": {}, "applicable": ["file.text", "x"]}) == ["file.text"]
+    assert capabilities.answer({"subject": {}, "capability": "file.text",
+                                "inputs": {"max_bytes": 3}}) == "hel"
+    with pytest.raises(AppError, match="refuses its inputs"):
+        capabilities.answer({"subject": {}, "capability": "file.text", "inputs": {}})
+    with pytest.raises(AppError, match="names a capability or asks which apply"):
+        capabilities.answer({"subject": {}})
