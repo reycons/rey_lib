@@ -75,7 +75,6 @@ SELECT node_type_key,
        action_label,
        action_icon,
        action_placement,
-       route,
        action_target
   FROM tree.node_type_action_vw
  WHERE node_type_is_enabled
@@ -144,7 +143,6 @@ def declaration(row: Mapping[str, Any]) -> dict[str, Any]:
         "label": row.get("action_label"),
         "icon": row.get("action_icon"),
         "placement": row.get("action_placement"),
-        "route": row.get("route"),
         "action_target": row.get("action_target"),
         "requires_state": row.get("requires_state"),
         "target": row.get("target"),

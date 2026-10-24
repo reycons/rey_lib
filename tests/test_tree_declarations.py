@@ -30,7 +30,7 @@ def _row(node_type: str, placement: str | None, action_key: str = "", **values: 
     return {"node_type_key": node_type, "selectable": True, "placement": placement,
             "sort_order": values.pop("sort_order", None), "action_key": action_key,
             "action_label": action_key.title(), "action_icon": "file",
-            "action_placement": "menu", "route": None, "action_target": None,
+            "action_placement": "menu", "action_target": None,
             "requires_state": values.pop("requires_state", None),
             "target": values.pop("target", None)}
 
@@ -70,7 +70,7 @@ def test_a_declaration_is_the_view_row_s_own_settings() -> None:
     assert declaration(_row("run", "text_click", "open", target={"kind": "k"},
                             requires_state="done")) == {
         "action_key": "open", "label": "Open", "icon": "file", "placement": "menu",
-        "route": None, "action_target": None, "requires_state": "done",
+        "action_target": None, "requires_state": "done",
         "target": {"kind": "k"},
     }
 
