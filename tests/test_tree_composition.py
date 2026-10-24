@@ -26,8 +26,8 @@ class _Paths:
 
 
 def _ctx() -> SimpleNamespace:
-    """A resolved installation context."""
-    return SimpleNamespace(selected_installation_name="local", paths=_Paths())
+    """An installation context, as an application runs under one."""
+    return SimpleNamespace(installation=SimpleNamespace(name="local"), paths=_Paths())
 
 
 def _groups(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> dict[str, Any]:
@@ -85,6 +85,11 @@ def test_the_groups_statement_is_the_packaged_file(monkeypatch) -> None:
 def test_no_placement_is_refused() -> None:
     with pytest.raises(ConfigError, match="named placement"):
         tree_groups(_ctx(), "")
+
+
+def test_a_context_naming_no_installation_is_refused() -> None:
+    with pytest.raises(ConfigError, match="names none"):
+        tree_groups(SimpleNamespace(paths=_Paths()), "explorer")
 
 
 def test_roots_are_the_groups_persisted_roots_and_disabled_ones_are_not_exposed(

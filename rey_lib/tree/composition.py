@@ -50,8 +50,9 @@ def tree_groups(ctx: Any, placement: str) -> list[dict[str, Any]]:
     groups is an ordinary answer -- an installation may surface none there.
 
     Args:
-        ctx: The resolved installation context; its ``selected_installation_name``
-            is whose groups these are, and it resolves the Tree connection.
+        ctx: The installation context the Tree runs under; its installation
+            (``ctx.installation.name``) is whose groups these are, and it
+            resolves the Tree connection.
         placement: Where the Tree is asked for (``explorer``, ``loader_source``,
             ...). The vocabulary is the database's.
 
@@ -61,13 +62,17 @@ def tree_groups(ctx: Any, placement: str) -> list[dict[str, Any]]:
         ``panel_configuration`` (an empty mapping when none is declared).
 
     Raises:
-        ConfigError: When no placement is named.
+        ConfigError: When no placement is named, or the context names no
+            installation.
     """
     if not placement:
         raise ConfigError("A Tree's groups are asked for in a named placement.")
+    installation = str(getattr(getattr(ctx, "installation", None), "name", "") or "")
+    if not installation:
+        raise ConfigError("A Tree's groups belong to an installation, and this context names none.")
     handle = shared_connection(ctx, TREE_CONNECTION).handle()
     rows = DatabaseQuery(read_text_file(_SQL_DIR / "tree_groups.sql"), {
-        "installation": ctx.selected_installation_name,
+        "installation": installation,
         "placement": placement,
     }).rows(handle)
     return [
