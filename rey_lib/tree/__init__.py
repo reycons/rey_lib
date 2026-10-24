@@ -1,16 +1,18 @@
-"""The tree's non-presentation mechanics (backlog 1036, 1054).
+"""The canonical Tree objects and the library traversal they use (backlog 1036, 1054, 1218).
 
-Shared by every consumer of the tree -- the Console, which presents it, and an AI
-inspection run in ai_app -- so there is one implementation of each:
+Defined here and hosted live by tree_app (#1218); one implementation of each:
 
-    TreeProjection   one reader's held records; its lifetime is the consumer's
-    TreeTraversal    route a node to its source, read, cap, admit
-    persisted        tree.tree_vw, the persisted tree's data object
-    sources          the declared non-persisted source names
-    inspection       what a model may see of a node, and how far it may expand
+    persisted        tree.tree_vw, the governed Tree state (groups, roots, nodes)
+    composition      the groups a placement surfaces and the roots a group exposes
+    declarations     what a node type declares, the declaration an interaction
+                     names, and the unsigned identity it binds a record to
+    TreeProjection   one reader's live Tree: admitted records and source state
+    inspection       what may be disclosed of a node, and how far it may expand
+    TreeTraversal    library traversal: route a node to its source, read, cap, admit
+    sources          the declared non-persisted source names, and their adapters
 
-Not a tree model: what a node means, what it can do and how it is drawn are not
-here.
+Not here: the web representation of the Tree (rey_bff), signing an opening for a
+browser (rey_bff), and drawing the Tree (rey_console).
 """
 
 from __future__ import annotations
@@ -18,11 +20,13 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.tree.collection import CollectionDataObject
+from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_groups, tree_roots
 from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.declarations import (
     NODE_TYPE_ACTION_VIEW_NAME,
     NodeTypeActionDataObject,
     declared_fact,
+    interacted_declaration,
     offered,
 )
 from rey_lib.tree.folder import FileDataObject, folder_children
@@ -88,6 +92,7 @@ __all__ = [
     "JsonlDataObject",
     "NODE_TYPE_ACTION_VIEW_NAME",
     "NodeTypeActionDataObject",
+    "RUNTIME_BINDINGS",
     "TOOL_SOURCE",
     "TREE_CONNECTION",
     "TREE_SCHEMA",
@@ -100,8 +105,11 @@ __all__ = [
     "expand",
     "folder_children",
     "inspected",
+    "interacted_declaration",
     "offered",
     "persisted_tree",
     "rey_lib_sources",
     "subject",
+    "tree_groups",
+    "tree_roots",
 ]

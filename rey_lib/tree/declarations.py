@@ -8,6 +8,7 @@ where, in what order, in which state, and the identity each declares::
     tree.node_type_action     which actions a type offers, where, in what order
       -> tree.node_type_action_vw
       -> NodeTypeActionDataObject   every node type's declarations
+      -> interacted_declaration     the declaration a reported interaction names
       -> offered / declared_fact    one declaration, applied to one record
 
 The tree data objects all name ``tree.node_type_action`` as the answer to what a
@@ -41,6 +42,7 @@ __all__ = [
     "TEXT_CLICK_PLACEMENT",
     "declaration",
     "declared_fact",
+    "interacted_declaration",
     "offered",
 ]
 
@@ -158,6 +160,47 @@ def offered(declared: Any, state: str) -> bool:
         return False
     required = str(declared.get("requires_state") or "")
     return not required or required == state
+
+
+def interacted_declaration(
+    declarations: Mapping[str, Any],
+    record: Mapping[str, Any],
+    interaction: str = "",
+    control: str = "",
+) -> dict[str, Any] | None:
+    """The declaration a reported interaction with one record names (#1218).
+
+    The Tree-domain meaning of an interaction: a click on the record's text names
+    its type's ``text_click`` declaration; a pressed control names the button or
+    panel control its type declares under that ``action_key``. Either applies only
+    where :func:`offered` says it does in the record's state (``actionable_in``),
+    so a control never offered for this record matches nothing. What the matched
+    declaration binds the record to is :func:`declared_fact`'s; nothing here signs
+    or opens anything.
+
+    Args:
+        declarations: Every node type's declarations
+            (:meth:`NodeTypeActionDataObject.declarations`).
+        record: The record interacted with, which names its ``node_type``.
+        interaction: :data:`TEXT_CLICK_PLACEMENT` where the record's text was clicked.
+        control: The ``action_key`` a pressed control was offered under.
+
+    Returns:
+        The matched declaration, or None when the interaction names nothing this
+        record's type offers in its state.
+    """
+    declared = declarations.get(str(record.get("node_type") or "")) or {}
+    state = str(record.get("actionable_in") or "")
+    if control:
+        for candidate in [*(declared.get("buttons") or []),
+                          *(declared.get("panel_controls") or [])]:
+            if str(candidate.get("action_key")) == control:
+                return candidate if offered(candidate, state) else None
+        return None
+    if interaction == TEXT_CLICK_PLACEMENT:
+        clicked = declared.get("text_click")
+        return clicked if offered(clicked, state) else None
+    return None
 
 
 def declared_fact(

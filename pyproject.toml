@@ -115,6 +115,7 @@ include = ["rey_lib*"]
 # reads live beside it, as rule sql_lives_in_files_and_is_parameterized asks).
 [tool.setuptools.package-data]
 "rey_lib.inferred_architecture" = ["sql/*.sql"]
+"rey_lib.tree" = ["sql/*.sql"]
 
 [tool.ruff]
 line-length = 100

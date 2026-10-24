@@ -20,6 +20,7 @@ from rey_lib.tree.declarations import (
     NodeTypeActionDataObject,
     declaration,
     declared_fact,
+    interacted_declaration,
     offered,
 )
 
@@ -123,3 +124,45 @@ def test_the_fact_is_plain_and_unsigned() -> None:
     fact = declared_fact({"target": {"kind": "k", "fields": {"a": "a"}}}, {"a": 1})
 
     assert isinstance(fact, dict) and fact == {"kind": "k", "a": 1}
+
+
+# -- the declaration a reported interaction names (#1218) ----------------------
+
+_DECLARED = {
+    "run": {
+        "selectable": True,
+        "text_click": {"action_key": "open_database_object", "requires_state": None},
+        "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
+        "panel_controls": [{"action_key": "refresh", "requires_state": None}],
+    },
+}
+
+
+def test_a_text_click_names_the_types_text_click_declaration() -> None:
+    found = interacted_declaration(_DECLARED, {"node_type": "run"}, interaction="text_click")
+
+    assert found["action_key"] == "open_database_object"
+
+
+def test_a_control_names_the_button_or_panel_control_it_was_offered_under() -> None:
+    record = {"node_type": "run", "actionable_in": "rollbackable"}
+
+    assert interacted_declaration(_DECLARED, record, control="open_rollback")["action_key"] \
+        == "open_rollback"
+    assert interacted_declaration(_DECLARED, record, control="refresh")["action_key"] \
+        == "refresh"
+
+
+def test_a_control_not_offered_in_the_records_state_matches_nothing() -> None:
+    assert interacted_declaration(_DECLARED, {"node_type": "run", "actionable_in": "done"},
+                                  control="open_rollback") is None
+
+
+def test_a_control_the_type_never_declared_matches_nothing() -> None:
+    assert interacted_declaration(_DECLARED, {"node_type": "run"}, control="delete") is None
+
+
+def test_an_unknown_type_or_an_unnamed_interaction_matches_nothing() -> None:
+    assert interacted_declaration(_DECLARED, {"node_type": "area"}, interaction="text_click") \
+        is None
+    assert interacted_declaration(_DECLARED, {"node_type": "run"}) is None
