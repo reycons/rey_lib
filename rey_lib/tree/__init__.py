@@ -3,7 +3,7 @@
 Defined here and hosted live by tree_app (#1218); one implementation of each:
 
     persisted        tree.tree_vw, the governed Tree state (groups, roots, nodes)
-    composition      the groups a placement surfaces and the roots a group exposes
+    composition      the groups a placement surfaces, the roots a group exposes, a node's children
     declarations     what a node type declares, the declaration an interaction
                      names, and the unsigned identity it binds a record to
     TreeProjection   one reader's live Tree: admitted records and source state
@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.tree.collection import CollectionDataObject
-from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_groups, tree_roots
+from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_children, tree_groups, tree_roots
 from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.declarations import (
     NODE_TYPE_ACTION_VIEW_NAME,
@@ -110,6 +110,7 @@ __all__ = [
     "persisted_tree",
     "rey_lib_sources",
     "subject",
+    "tree_children",
     "tree_groups",
     "tree_roots",
 ]

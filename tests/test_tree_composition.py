@@ -146,3 +146,33 @@ def test_refresh_in_configuration_states_whether_a_root_may_be_read_again(monkey
 
     assert first["refreshable"] is True
     assert "refreshable" not in second
+
+
+class _Traversal:
+    """A TreeTraversal stand-in: what it was built from and asked, and the children it yields."""
+
+    built: list[tuple[Any, Any]] = []
+    asked: list[tuple[Any, ...]] = []
+
+    def __init__(self, persisted: Any, sources: Any) -> None:
+        """Record what the traversal was built over."""
+        _Traversal.built.append((persisted, sources))
+
+    def children(self, ctx: Any, record: dict, projection: Any, fresh: bool) -> list[dict]:
+        """Yield one enabled and one disabled child."""
+        _Traversal.asked.append((record, projection, fresh))
+        return [{"node_key": "c1", "is_enabled": "t"}, {"node_key": "c2", "is_enabled": False}]
+
+
+def test_a_nodes_children_are_the_canonical_traversals_enabled_children(monkeypatch) -> None:
+    _Traversal.built, _Traversal.asked = [], []
+    monkeypatch.setattr(composition, "TreeTraversal", _Traversal)
+    monkeypatch.setattr(composition, "persisted_tree", lambda: "persisted")
+    monkeypatch.setattr(composition._tree, "rey_lib_sources", lambda: {"folder": "files"})
+    projection = object()
+
+    children = composition.tree_children(_ctx(), {"node_key": "7:1"}, projection, fresh=True)
+
+    assert children == [{"node_key": "c1", "is_enabled": "t"}]
+    assert _Traversal.built == [("persisted", {"folder": "files"})]
+    assert _Traversal.asked == [({"node_key": "7:1"}, projection, True)]

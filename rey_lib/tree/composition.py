@@ -1,12 +1,14 @@
-"""The canonical Tree's group and root composition (#1218).
+"""The canonical Tree's group, root and child composition (#1218).
 
-Which governed Tree groups take part in a Tree, and which roots that Tree exposes:
+Which governed Tree groups take part in a Tree, which roots that Tree exposes,
+and what hangs beneath a node:
 
     tree_groups   installation + placement -> the governed groups surfaced there
     tree_roots    a group's governed roots -> the roots the Tree exposes
+    tree_children a node's record -> the enabled children the traversal yields
 
-Both are Tree-domain behaviour: they turn governed Tree configuration into the
-groups and roots of the Tree, and they belong with the canonical Tree objects
+All are Tree-domain behaviour: they turn governed Tree configuration into the
+groups, roots and children of the Tree, and they belong with the canonical Tree objects
 wherever those are hosted. Nothing here builds a web representation, signs an
 opening or knows which surface shows the result.
 
@@ -26,9 +28,11 @@ from rey_lib.db.connection import shared_connection
 from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import read_text_file
+import rey_lib.tree as _tree
 from rey_lib.tree.persisted import TREE_CONNECTION, persisted_tree
+from rey_lib.tree.traversal import TreeTraversal
 
-__all__ = ["RUNTIME_BINDINGS", "tree_groups", "tree_roots"]
+__all__ = ["RUNTIME_BINDINGS", "tree_children", "tree_groups", "tree_roots"]
 
 #: The packaged statements this module reads (package data, like inferred_architecture/sql).
 _SQL_DIR: Final = Path(__file__).parent / "sql"
@@ -119,6 +123,36 @@ def tree_roots(
             record["refreshable"] = bool(record["tree_configuration"]["refresh"])
         exposed.append(record)
     return exposed
+
+
+def tree_children(
+    ctx: Any,
+    record: dict[str, Any],
+    projection: Any = None,
+    fresh: bool = False,
+) -> list[dict[str, Any]]:
+    """The enabled children of one node, whatever its source.
+
+    The canonical traversal over the persisted Tree and the sources rey_lib
+    implements (``TreeTraversal(persisted_tree(), rey_lib_sources())``): the
+    record decides where its children come from, and the projection, when
+    given, admits them and holds them for the next expansion. A disabled child
+    is not exposed.
+
+    Args:
+        ctx: The installation context the source is read in.
+        record: The parent, as the projection holds it.
+        projection: The reader's projection of this Tree, if there is one.
+        fresh: Read the source again rather than answer from held state.
+
+    Returns:
+        The enabled children, in the order their source gave them.
+    """
+    traversal = TreeTraversal(persisted_tree(), _tree.rey_lib_sources())
+    return [
+        child for child in traversal.children(ctx, record, projection, fresh)
+        if _true(child.get("is_enabled"))
+    ]
 
 
 def _resolved_configuration(
