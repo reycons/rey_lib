@@ -21,7 +21,6 @@ from rey_lib.inferred_architecture import (
     SCHEMA_PROJECTION,
     ObjectMap,
 )
-from rey_lib.tree.declarations import TEXT_CLICK_PLACEMENT, declared_fact, interacted_declaration
 
 
 def _claim(claim_id: int, name: str, outcome: str | None = "supported") -> dict[str, Any]:
@@ -58,26 +57,9 @@ READ: dict[str, Any] = {
 }
 
 
-#: The governed declarations as NodeTypeActionDataObject.declarations answers them:
-#: a claim's text_click is declaration 130 (configured_file -> file_operator serve).
-OPEN_FILE: dict[str, Any] = {
-    "action_key": "open_file", "label": "Open File", "icon": "file", "placement": "menu",
-    "action_target": None, "requires_state": None,
-    "target": {"kind": "configured_file", "root": "{apps}",
-               "fields": {"relative_path": "owner_subject_id"},
-               "application_command_id": 41, "application": "file_operator",
-               "operation": "serve"},
-}
-DECLARATIONS: dict[str, Any] = {
-    CLAIM_NODE_TYPE: {"selectable": True, "text_click": OPEN_FILE,
-                      "buttons": [], "panel_controls": []},
-}
-
-
-def _architecture(declarations: dict[str, Any] | None = None) -> ObjectMap:
+def _architecture() -> ObjectMap:
     return ObjectMap({"kind": "inferred_architecture", "installation": "admin"},
-                     OBJECT_PROJECTION, {name: [dict(r) for r in rows] for name, rows in READ.items()},
-                     DECLARATIONS if declarations is None else declarations)
+                     OBJECT_PROJECTION, {name: [dict(r) for r in rows] for name, rows in READ.items()})
 
 
 def _ids(items: list[dict[str, Any]]) -> list[str]:
@@ -103,7 +85,7 @@ def test_the_architecture_map_reads_its_five_statements_on_the_hosts_connection(
     monkeypatch.setattr(module, "DatabaseQuery", _Query)
     connection = SimpleNamespace(handle=lambda: "handle")
 
-    held = ObjectMap.for_architecture(connection, "admin", DECLARATIONS)
+    held = ObjectMap.for_architecture(connection, "admin")
 
     assert held.subject == {"kind": "inferred_architecture", "installation": "admin"}
     assert held.projection_kind == OBJECT_PROJECTION
@@ -204,27 +186,16 @@ def test_a_first_click_selects_and_the_projection_highlights_its_connections() -
 
 @pytest.mark.parametrize("drill", [[], ["area:10"], ["area:10", "claim:1"]],
                          ids=["from the estate", "from an area", "from the claim itself"])
-def test_a_right_click_on_a_claim_selects_its_declared_opening_at_any_focus(
+def test_a_right_click_on_a_claim_identifies_the_same_file_at_any_focus(
     drill: list[str],
 ) -> None:
     held = _architecture()
     for node in drill:
         held.double_click(node)
 
-    assert held.context_click("claim:1") == {
-        "declaration": OPEN_FILE,
-        "identity": {"kind": "configured_file", "root": "{apps}",
-                     "application_command_id": 41, "application": "file_operator",
-                     "operation": "serve", "relative_path": "rey_lib/Alpha.py"},
-    }
-
-
-def test_the_selection_is_the_one_a_tree_click_on_the_same_record_selects() -> None:
-    record = {"node_type": CLAIM_NODE_TYPE, **READ["claims"][0]}
-    declared = interacted_declaration(DECLARATIONS, record, TEXT_CLICK_PLACEMENT)
-
-    assert _architecture().context_click("claim:1") == {
-        "declaration": declared, "identity": declared_fact(declared, record)}
+    # The File the claim shows (#1218): its owner file beneath the apps root.
+    assert held.context_click("claim:1") == {"identity": {
+        "kind": "configured_file", "root": "{apps}", "relative_path": "rey_lib/Alpha.py"}}
 
 
 def test_a_right_click_on_a_held_non_claim_changes_nothing() -> None:
@@ -286,17 +257,26 @@ def test_a_click_or_double_click_on_a_node_the_map_does_not_hold_is_refused(node
     assert held.projection()["selected"] is None
 
 
-def test_a_claim_whose_type_declares_no_opening_is_refused() -> None:
-    with pytest.raises(ConfigError, match="declares nothing to open"):
-        _architecture({}).context_click("claim:1")
+def test_an_opened_claim_names_only_the_file_never_its_host_or_panel() -> None:
+    opened = _architecture().context_click("claim:1")
+
+    assert set(opened) == {"identity"}
+    assert not {"application", "operation", "application_command_id", "panel",
+                "declaration"} & set(opened["identity"])
 
 
-def test_a_claim_opening_that_binds_no_identity_is_refused() -> None:
-    bare = {CLAIM_NODE_TYPE: {**DECLARATIONS[CLAIM_NODE_TYPE],
-                              "text_click": {**OPEN_FILE, "target": {}}}}
+def test_a_claim_naming_no_owner_file_is_refused() -> None:
+    held = _architecture()
+    held._read["claims"][0]["owner_subject_id"] = ""  # noqa: SLF001
 
-    with pytest.raises(ConfigError, match="declares no governed identity"):
-        _architecture(bare).context_click("claim:1")
+    with pytest.raises(ConfigError, match="no owner file"):
+        held.context_click("claim:1")
+
+
+def test_the_map_reads_no_tree_declarations() -> None:
+    # A File opening is the hosting application's, not a Tree placement's (#1218).
+    assert not {"interacted_declaration", "declared_fact", "NodeTypeActionDataObject"} & set(
+        vars(module))
 
 
 def test_the_map_has_no_separate_record_lookup() -> None:

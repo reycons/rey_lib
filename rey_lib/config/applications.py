@@ -43,6 +43,7 @@ __all__ = [
     "JSON_VALUE_TYPE",
     "build_applications",
     "configured_application",
+    "hosted_command",
 ]
 
 #: The value type of a parameter that carries one governed structured value
@@ -289,6 +290,10 @@ class ApplicationCommand:
     parameter_groups: tuple[ApplicationParameterGroup, ...] = ()
     #: How it is invoked: ``run`` or ``hosted`` (``INVOCATION_*``, #1166).
     invocation: str = INVOCATION_RUN
+    #: For a hosted command, the canonical subject identity kinds it can open and
+    #: host (#1218): the hosting application's own declaration of what it hosts,
+    #: from which an opening reaches it. Empty for a ``run`` command.
+    hosted_subject_kinds: tuple[str, ...] = ()
 
     def arguments(self, inputs: Mapping[str, Any]) -> list[str]:
         """This command's published command-line form of its semantic inputs.
@@ -600,6 +605,30 @@ class Application:
         from.
         """
         return tuple(one.name for one in self.commands)
+
+
+def hosted_command(ctx: Any, kind: str) -> tuple[Application, ApplicationCommand]:
+    """The configured application and hosted command that host a subject ``kind`` (#1218).
+
+    Read off ``ctx.applications``: the one hosted command whose
+    ``hosted_subject_kinds`` names the kind, as its application published it.
+
+    Raises:
+        ConfigError: When no configured command hosts the kind, or more than one
+            claims it.
+    """
+    found = [
+        (application, command)
+        for application in getattr(ctx, "applications", None) or ()
+        for command in application.commands
+        if kind and kind in command.hosted_subject_kinds
+    ]
+    if not found:
+        raise ConfigError(f"No configured application hosts the subject kind '{kind}'.")
+    if len(found) > 1:
+        claims = ", ".join(f"{one.name} {command.name}" for one, command in found)
+        raise ConfigError(f"The subject kind '{kind}' is hosted by several commands: {claims}.")
+    return found[0]
 
 
 def configured_application(ctx: Any, name: str) -> Application:
@@ -986,20 +1015,51 @@ def _commands(
     invoked = _value_invocations(cli, application)
     return tuple(
         ApplicationCommand(name=value, parameters=takes,
-                           invocation=invoked.get(value, INVOCATION_RUN))
+                           invocation=invoked.get(value, (INVOCATION_RUN, ()))[0],
+                           hosted_subject_kinds=invoked.get(value, (INVOCATION_RUN, ()))[1])
         for value in carrier.possible_values
     )
 
 
-def _value_invocations(cli: dict[str, Any], application: str) -> dict[str, str]:
-    """Each stated command value's invocation, from the carrier as declared (#1166)."""
+def _value_invocations(
+    cli: dict[str, Any], application: str,
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Each stated command value's invocation and hosted subject kinds (#1166, #1218)."""
     for one in (_plain(item) for item in (cli.get("parameters") or [])):
         if isinstance(one, dict) and _is_command_carrier(one):
-            return dict(
-                _possible_value(value, application, one)
-                for value in (one.get("possible_values") or [])
-            )
+            return {
+                name: (invocation, kinds)
+                for name, invocation, kinds in (
+                    _possible_value(value, application, one)
+                    for value in (one.get("possible_values") or [])
+                )
+            }
     return {}
+
+
+def _hosted_subject_kinds(
+    value: Any, invocation: str, application: str, where: str,
+) -> tuple[str, ...]:
+    """A command's declared hosted subject kinds, empty when absent (#1218).
+
+    Raises:
+        ConfigError: When they are not a list of non-empty names, or are declared
+            on a command that is not hosted.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or not all(
+            isinstance(one, str) and one for one in value):
+        raise ConfigError(
+            f"Application '{application}' {where} declares hosted_subject_kinds that "
+            "are not a list of subject kind names."
+        )
+    if invocation != INVOCATION_HOSTED:
+        raise ConfigError(
+            f"Application '{application}' {where} declares hosted_subject_kinds but is "
+            f"invoked '{invocation}'; only a hosted command hosts subjects."
+        )
+    return tuple(value)
 
 
 def _is_command_carrier(entry: dict[str, Any]) -> bool:
@@ -1025,18 +1085,20 @@ def _invocation(value: Any, application: str, where: str) -> str:
 
 def _possible_value(
     value: Any, application: str, entry: dict[str, Any],
-) -> tuple[str, str]:
-    """One stated possible value, as its name and its invocation (#1166).
+) -> tuple[str, str, tuple[str, ...]]:
+    """One stated possible value, as its name, invocation and hosted subject kinds.
 
     A value is stated as itself (its name, invoked ``run``) or as an object
-    ``{name, invocation?}``. Only the command carrier's values may state an
-    invocation -- on any other parameter it would mean nothing -- and an object
-    with any other shape is refused rather than interpreted.
+    ``{name, invocation?, hosted_subject_kinds?}`` (#1166, #1218). Only the
+    command carrier's values may state an invocation or hosted subject kinds --
+    on any other parameter they would mean nothing -- and an object with any
+    other shape is refused rather than interpreted.
 
     Raises:
         ConfigError: When an object value has no name, an unknown key, an
-            invocation outside ``run`` / ``hosted``, or an invocation on a
-            parameter that does not carry commands.
+            invocation outside ``run`` / ``hosted``, an invocation or hosted
+            subject kinds on a parameter that does not carry commands, or hosted
+            subject kinds on a command that is not hosted.
     """
     parameter = entry.get("name")
     if not isinstance(value, dict):
@@ -1045,22 +1107,24 @@ def _possible_value(
                 f"Application '{application}' parameter '{parameter}' states a "
                 "possible value that is neither a value nor a {name, invocation} object."
             )
-        return str(value), INVOCATION_RUN
-    unknown = sorted(set(value) - {"name", "invocation"})
+        return str(value), INVOCATION_RUN, ()
+    unknown = sorted(set(value) - {"name", "invocation", "hosted_subject_kinds"})
     name = value.get("name")
     if unknown or not isinstance(name, str) or not name:
         raise ConfigError(
             f"Application '{application}' parameter '{parameter}' states a possible "
-            "value object that is not {name, invocation?}"
+            "value object that is not {name, invocation?, hosted_subject_kinds?}"
             + (f" (unknown {unknown})" if unknown else " (it needs a name)") + "."
         )
-    if "invocation" in value and not _is_command_carrier(entry):
+    if ({"invocation", "hosted_subject_kinds"} & set(value)) and not _is_command_carrier(entry):
         raise ConfigError(
             f"Application '{application}' parameter '{parameter}' states an "
-            "invocation on a value that is not a command."
+            "invocation or hosted subject kinds on a value that is not a command."
         )
-    return name, _invocation(value.get("invocation"), application,
-                             f"command value '{name}'")
+    where = f"command value '{name}'"
+    invocation = _invocation(value.get("invocation"), application, where)
+    return name, invocation, _hosted_subject_kinds(
+        value.get("hosted_subject_kinds"), invocation, application, where)
 
 
 def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCommand:
@@ -1071,6 +1135,7 @@ def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCo
     that would otherwise hide a field forever.
     """
     name = str(entry.get("name") or "")
+    invocation = _invocation(entry.get("invocation"), application, f"command '{name}'")
     groups = _mode_groups(entry, application, name)
     parameters = tuple(
         _parameter(one, ctx, application, name, groups)
@@ -1083,7 +1148,9 @@ def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCo
         parameters=parameters,
         mode_groups=groups,
         parameter_groups=_parameter_groups(entry, parameters, application, name),
-        invocation=_invocation(entry.get("invocation"), application, f"command '{name}'"),
+        invocation=invocation,
+        hosted_subject_kinds=_hosted_subject_kinds(
+            entry.get("hosted_subject_kinds"), invocation, application, f"command '{name}'"),
     )
 
 

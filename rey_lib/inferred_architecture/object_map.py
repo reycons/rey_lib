@@ -21,11 +21,10 @@ is laid out and styled is the viewer's.
 
 The map owns what an interaction means (#1099): a ``click`` selects a node; a
 ``double_click`` drills; a ``context_click`` (a right-click) on a claim opens
-it. Only the last ever opens, and it answers the same opening selection a Tree
-click answers (#1218): the claim's governed declaration and the identity it
-binds the claim to, through the one declaration owner (``rey_lib.tree.declarations``).
-Which host and panel that leads to are the declaration's and its subject's,
-never the map's.
+it. Only the last ever opens, and it answers the canonical identity of the File
+the claim shows (#1218) and stops there: which application hosts that File is
+the hosting application's own declaration, and how it is presented its
+subject's; neither is the map's.
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ from rey_lib.db.database_objects import DatabaseSchema
 from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import read_text_file
-from rey_lib.tree.declarations import TEXT_CLICK_PLACEMENT, declared_fact, interacted_declaration
 
 __all__ = ["CLAIM_NODE_TYPE", "OBJECT_PROJECTION", "SCHEMA_PROJECTION", "ObjectMap"]
 
@@ -63,6 +61,11 @@ _CLAIM: Final = "claim:"
 _TABLE: Final = "table:"
 _EXTERNAL: Final = "external:"
 
+#: A claim's owner file is a configured file beneath the apps root: its
+#: ``owner_subject_id`` is the path relative to it (#1218).
+_CLAIM_FILE_KIND: Final = "configured_file"
+_CLAIM_FILE_ROOT: Final = "{apps}"
+
 
 def _statement(name: str) -> str:
     """One of the object map's statements, read from its file."""
@@ -77,16 +80,11 @@ class ObjectMap:
     """
 
     def __init__(self, subject: dict[str, Any], projection_kind: str,
-                 read: dict[str, Any],
-                 declarations: dict[str, Any] | None = None) -> None:
+                 read: dict[str, Any]) -> None:
         """Hold what was read. Use ``for_architecture`` or ``for_schema``."""
         self.subject = dict(subject)
         self.projection_kind = projection_kind
         self._read = read
-        #: Every node type's governed declarations
-        #: (``NodeTypeActionDataObject.declarations``), which a claim's opening
-        #: is selected from (#1218). Empty for a schema map: it holds no claims.
-        self._declarations: dict[str, Any] = dict(declarations or {})
         # The object projection opens on the estate; the schema projection on
         # every table closed to its name.
         self._focus: dict[str, Any] = (
@@ -111,22 +109,19 @@ class ObjectMap:
     # -- opening ---------------------------------------------------------------
 
     @classmethod
-    def for_architecture(cls, connection: Any, installation: str,
-                         declarations: dict[str, Any]) -> "ObjectMap":
+    def for_architecture(cls, connection: Any, installation: str) -> "ObjectMap":
         """The estate's object map, read on the shared ``connection``.
 
         Args:
             connection: The shared Connection the host resolved; held by the
                 host, never opened or closed here.
             installation: The installation the map subject names.
-            declarations: Every node type's governed declarations, as the host
-                read them (``NodeTypeActionDataObject.declarations``).
         """
         handle = connection.handle()
         read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
                 for name in _OBJECT_READS}
         return cls({"kind": "inferred_architecture", "installation": installation},
-                   OBJECT_PROJECTION, read, declarations)
+                   OBJECT_PROJECTION, read)
 
     @classmethod
     def for_schema(cls, connection: Any, catalog: str, schema: str) -> "ObjectMap":
@@ -198,18 +193,17 @@ class ObjectMap:
         claim -- an area, a table -- has no context-click behaviour: nothing
         changes.
 
-        The claim is its governed record (its node type and its own fields), and
-        its opening is selected exactly as a Tree click selects one: the record's
-        ``text_click`` declaration (``interacted_declaration``) and the identity
-        that declaration binds it to (``declared_fact``).
+        A claim shows its owner's File, and the map says only which File that is:
+        its canonical identity, a configured file beneath the apps root.
 
         Returns:
-            For a claim, the opening selection ``{"declaration", "identity"}``.
-            None for any other node.
+            For a claim, ``{"identity": {"kind", "root", "relative_path"}}`` -- what
+            to open, naming no application, operation or panel. None for any
+            other node.
 
         Raises:
-            ConfigError: When the node is none this map holds, or the claim
-                declares no opening or no governed identity.
+            ConfigError: When the node is none this map holds, or the claim names
+                no owner file.
         """
         node_id = str(node_id or "")
         if not self._holds[self.projection_kind](node_id):
@@ -217,14 +211,11 @@ class ObjectMap:
         claim = self._claim_keyed(node_id)
         if claim is None:
             return None
-        record = {"node_type": CLAIM_NODE_TYPE, **claim}
-        declared = interacted_declaration(self._declarations, record, TEXT_CLICK_PLACEMENT)
-        if declared is None:
-            raise ConfigError("This claim declares nothing to open.")
-        identity = declared_fact(declared, record)
-        if identity is None:
-            raise ConfigError("This claim's opening declares no governed identity.")
-        return {"declaration": declared, "identity": identity}
+        relative_path = str(claim.get("owner_subject_id") or "")
+        if not relative_path:
+            raise ConfigError("This claim names no owner file to open.")
+        return {"identity": {"kind": _CLAIM_FILE_KIND, "root": _CLAIM_FILE_ROOT,
+                             "relative_path": relative_path}}
 
     def double_click(self, node_id: str) -> None:
         """Drill (#1099): move the focus through the node; the projection says where.

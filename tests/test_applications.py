@@ -20,7 +20,9 @@ from typing import Any
 
 import pytest
 
-from rey_lib.config.applications import Application, build_applications, configured_application
+from rey_lib.config.applications import (
+    Application, build_applications, configured_application, hosted_command,
+)
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -239,6 +241,69 @@ class TestCommandInvocation:
             {"name": "mode", "possible_values": ["one", {"name": "two"}]},
         ])])[0]
         assert built.parameters[0].possible_values == ("one", "two")
+
+
+class TestHostedSubjectKinds:
+    """A hosted command declares the subject kinds it hosts (#1218)."""
+
+    FILES = ["file_manifest", "configured_file"]
+
+    def test_a_carrier_value_declares_the_kinds_its_hosted_command_hosts(self) -> None:
+        built = build([declaration(parameters=[
+            {"name": "command", "positional": True, "possible_values": [
+                "run", {"name": "serve", "invocation": "hosted",
+                        "hosted_subject_kinds": self.FILES}]},
+        ])])[0]
+
+        assert built.command("serve").hosted_subject_kinds == tuple(self.FILES)
+        assert built.command("run").hosted_subject_kinds == ()
+
+    def test_a_listed_command_declares_them_the_same_way(self) -> None:
+        built = build([declaration(commands=[
+            {"name": "serve", "invocation": "hosted", "hosted_subject_kinds": self.FILES},
+        ])])[0]
+
+        assert built.command("serve").hosted_subject_kinds == tuple(self.FILES)
+
+    @pytest.mark.parametrize("value", [
+        {"name": "serve", "hosted_subject_kinds": ["configured_file"]},       # run
+        {"name": "serve", "invocation": "hosted", "hosted_subject_kinds": "file"},
+        {"name": "serve", "invocation": "hosted", "hosted_subject_kinds": [""]},
+    ])
+    def test_kinds_on_a_run_command_or_not_a_list_of_names_are_refused(self, value: Any) -> None:
+        with pytest.raises(ConfigError, match="hosted_subject_kinds"):
+            build([declaration(parameters=[
+                {"name": "command", "positional": True, "possible_values": [value]},
+            ])])
+
+    def test_only_command_values_may_state_kinds(self) -> None:
+        with pytest.raises(ConfigError, match="not a command"):
+            build([declaration(parameters=[
+                {"name": "mode", "possible_values": [
+                    {"name": "fast", "hosted_subject_kinds": ["configured_file"]}]},
+            ])])
+
+    def _hosting(self, *kinds: list[str]) -> SimpleNamespace:
+        built = build([
+            {**declaration(commands=[{"name": "serve", "invocation": "hosted",
+                                      "hosted_subject_kinds": one}]), "name": f"host{n}"}
+            for n, one in enumerate(kinds)
+        ])
+        return SimpleNamespace(applications=built)
+
+    def test_the_hosted_command_for_a_kind_is_the_one_that_declares_it(self) -> None:
+        application, command = hosted_command(
+            self._hosting(["workflow"], self.FILES), "configured_file")
+
+        assert (application.name, command.name) == ("host1", "serve")
+
+    def test_a_kind_no_command_hosts_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="No configured application hosts"):
+            hosted_command(self._hosting(self.FILES), "workflow")
+
+    def test_a_kind_claimed_twice_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="hosted by several commands"):
+            hosted_command(self._hosting(self.FILES, ["configured_file"]), "configured_file")
 
 
 class TestSettingsProjection:
