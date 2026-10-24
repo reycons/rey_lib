@@ -21,9 +21,11 @@ is laid out and styled is the viewer's.
 
 The map owns what an interaction means (#1099): a ``click`` selects a node; a
 ``double_click`` drills; a ``context_click`` (a right-click) on a claim opens
-it. Only the last ever opens, and it answers what the claim IS as a governed
-record and stops there: signing it, choosing what opens it and where, are not
-the map's.
+it. Only the last ever opens, and it answers the same opening selection a Tree
+click answers (#1218): the claim's governed declaration and the identity it
+binds the claim to, through the one declaration owner (``rey_lib.tree.declarations``).
+Which host and panel that leads to are the declaration's and its subject's,
+never the map's.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from rey_lib.db.database_objects import DatabaseSchema
 from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import read_text_file
+from rey_lib.tree.declarations import TEXT_CLICK_PLACEMENT, declared_fact, interacted_declaration
 
 __all__ = ["CLAIM_NODE_TYPE", "OBJECT_PROJECTION", "SCHEMA_PROJECTION", "ObjectMap"]
 
@@ -74,11 +77,16 @@ class ObjectMap:
     """
 
     def __init__(self, subject: dict[str, Any], projection_kind: str,
-                 read: dict[str, Any]) -> None:
+                 read: dict[str, Any],
+                 declarations: dict[str, Any] | None = None) -> None:
         """Hold what was read. Use ``for_architecture`` or ``for_schema``."""
         self.subject = dict(subject)
         self.projection_kind = projection_kind
         self._read = read
+        #: Every node type's governed declarations
+        #: (``NodeTypeActionDataObject.declarations``), which a claim's opening
+        #: is selected from (#1218). Empty for a schema map: it holds no claims.
+        self._declarations: dict[str, Any] = dict(declarations or {})
         # The object projection opens on the estate; the schema projection on
         # every table closed to its name.
         self._focus: dict[str, Any] = (
@@ -103,19 +111,22 @@ class ObjectMap:
     # -- opening ---------------------------------------------------------------
 
     @classmethod
-    def for_architecture(cls, connection: Any, installation: str) -> "ObjectMap":
+    def for_architecture(cls, connection: Any, installation: str,
+                         declarations: dict[str, Any]) -> "ObjectMap":
         """The estate's object map, read on the shared ``connection``.
 
         Args:
             connection: The shared Connection the host resolved; held by the
                 host, never opened or closed here.
             installation: The installation the map subject names.
+            declarations: Every node type's governed declarations, as the host
+                read them (``NodeTypeActionDataObject.declarations``).
         """
         handle = connection.handle()
         read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
                 for name in _OBJECT_READS}
         return cls({"kind": "inferred_architecture", "installation": installation},
-                   OBJECT_PROJECTION, read)
+                   OBJECT_PROJECTION, read, declarations)
 
     @classmethod
     def for_schema(cls, connection: Any, catalog: str, schema: str) -> "ObjectMap":
@@ -180,26 +191,40 @@ class ObjectMap:
         self._selected = node_id
 
     def context_click(self, node_id: str) -> dict[str, Any] | None:
-        """Open (#1099): a right-click on a claim opens the subject it represents.
+        """Open (#1099, #1218): a right-click on a claim opens the subject it represents.
 
         Validity is this map's own inventory's answer, never the screen on show,
         so the same claim opens from any focus. A node this map holds that is no
         claim -- an area, a table -- has no context-click behaviour: nothing
         changes.
 
+        The claim is its governed record (its node type and its own fields), and
+        its opening is selected exactly as a Tree click selects one: the record's
+        ``text_click`` declaration (``interacted_declaration``) and the identity
+        that declaration binds it to (``declared_fact``).
+
         Returns:
-            For a claim, its governed record -- what the claim IS: its node type
-            and its own fields. Which action that record offers, and what opens
-            it, are its declaration's, never the map's. None for any other node.
+            For a claim, the opening selection ``{"declaration", "identity"}``.
+            None for any other node.
 
         Raises:
-            ConfigError: When the node is none this map holds.
+            ConfigError: When the node is none this map holds, or the claim
+                declares no opening or no governed identity.
         """
         node_id = str(node_id or "")
         if not self._holds[self.projection_kind](node_id):
             raise ConfigError(f"The map has no node {node_id!r}.")
         claim = self._claim_keyed(node_id)
-        return {"node_type": CLAIM_NODE_TYPE, **claim} if claim is not None else None
+        if claim is None:
+            return None
+        record = {"node_type": CLAIM_NODE_TYPE, **claim}
+        declared = interacted_declaration(self._declarations, record, TEXT_CLICK_PLACEMENT)
+        if declared is None:
+            raise ConfigError("This claim declares nothing to open.")
+        identity = declared_fact(declared, record)
+        if identity is None:
+            raise ConfigError("This claim's opening declares no governed identity.")
+        return {"declaration": declared, "identity": identity}
 
     def double_click(self, node_id: str) -> None:
         """Drill (#1099): move the focus through the node; the projection says where.
