@@ -2,7 +2,7 @@
 
 ``File`` is the root of the file domain. Every physical file is a File: it has
 a path and an encoding, carries its governed identity when something governs
-it, can be shown as bounded, display-safe text, and can be moved, kicked out
+it, is shown as bounded, display-safe Content, and can be moved, kicked out
 and governed whatever its format. What a file IS -- which format it is -- is
 also answered here, once:
 
@@ -28,6 +28,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping
 
+from rey_lib.content import Content
 from rey_lib.files import primitive_file_io
 from rey_lib.files.file_utils import bounded_text_preview
 from rey_lib.viewers.language import classify_text_language
@@ -342,20 +343,21 @@ class File:
             "conversion": self.conversion,
         }
 
-    def text(self, max_bytes: int) -> dict[str, Any]:
-        """This file's text, for LOOKING AT, bounded and display-safe.
+    def content(self, max_bytes: int) -> Content:
+        """This file's Content, for LOOKING AT, bounded and display-safe (#1220).
 
-        Not format-dependent, so every File answers it. Whether it may be shown
-        at all is this File's own ``display_refusal``; a refused file carries no
-        content and says why. The bounded read is the primitive IO's.
+        Not format-dependent, so every File produces it. Reading, bounding,
+        the language and whether it may be shown at all are this File's own;
+        a refused file's Content carries no text and says why. The bounded
+        read is the primitive IO's.
 
         Args:
             max_bytes: How much of the file at most.
 
         Returns:
-            ``name``, ``size_bytes``, ``truncated``, ``content``,
-            ``blocked_reason`` (empty when the text may be shown) and
-            ``language``.
+            The Content: the file's name, its bounded text, the language that
+            text is in, whether it was truncated, and its refusal when it may
+            not be shown.
         """
         refused = self.display_refusal()
         if not refused:
@@ -364,22 +366,14 @@ class File:
                 preview["content"].encode(self.encoding, "ignore"),
             )
             if not refused:
-                return {
-                    "name": preview["name"],
-                    "size_bytes": preview["size_bytes"],
-                    "truncated": preview["truncated"],
-                    "content": preview["content"],
-                    "blocked_reason": "",
-                    "language": self.language(preview["content"]),
-                }
-        return {
-            "name": self.path.name,
-            "size_bytes": self.path.stat().st_size,
-            "truncated": False,
-            "content": "",
-            "blocked_reason": refused,
-            "language": self.language(),
-        }
+                return Content(
+                    name=preview["name"],
+                    text=preview["content"],
+                    language=self.language(preview["content"]),
+                    truncated=preview["truncated"],
+                )
+        return Content(name=self.path.name, text="", language=self.language(),
+                       refusal=refused)
 
     def language(self, content: str | None = None) -> str:
         """The language this file is written in (#1129): what highlighting and

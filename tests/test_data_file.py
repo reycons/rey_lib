@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from rey_lib.content import Content
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile
 from rey_lib.files.file import File, file_format
@@ -666,46 +667,42 @@ class TestTheDateRangeRuleReadsThroughTheCsvFile:
             _read_date_range_from_column(source, "day", "%Y-%m-%d")
 
 
-class TestText:
-    """What any file shows when it is looked at: its text, bounded and display-safe."""
+class TestContent:
+    """What any file shows when it is looked at: its Content, bounded and display-safe (#1220)."""
 
-    def test_a_file_no_format_claims_still_shows_its_text(self, tmp_path: Path) -> None:
+    def test_a_file_no_format_claims_still_shows_its_content(self, tmp_path: Path) -> None:
         source = tmp_path / "module.py"
         source.write_text("x = 1\n", encoding="utf-8")
 
-        shown = File.for_path(source).text(1_000)
+        shown = File.for_path(source).content(1_000)
 
-        assert shown == {
-            "name": "module.py", "size_bytes": 6, "truncated": False,
-            "content": "x = 1\n", "blocked_reason": "", "language": "python",
-        }
+        assert shown == Content(name="module.py", text="x = 1\n", language="python")
 
-    def test_the_text_is_bounded_and_says_so(self, tmp_path: Path) -> None:
+    def test_the_content_is_bounded_and_says_so(self, tmp_path: Path) -> None:
         source = _csv(tmp_path, "a,b\n1,2\n")
 
-        shown = File.for_path(source).text(4)
+        shown = File.for_path(source).content(4)
 
-        assert shown["content"] == "a,b\n"
-        assert shown["truncated"] is True
-        assert shown["size_bytes"] == 8
+        assert shown.text == "a,b\n"
+        assert shown.truncated is True
 
-    def test_a_secret_file_shows_no_content(self, tmp_path: Path) -> None:
+    def test_a_secret_file_shows_no_text(self, tmp_path: Path) -> None:
         source = tmp_path / "server.key"
         source.write_text("secret", encoding="utf-8")
 
-        shown = File.for_path(source).text(1_000)
+        shown = File.for_path(source).content(1_000)
 
-        assert shown["content"] == ""
-        assert shown["blocked_reason"] == "Sensitive file preview is blocked."
+        assert shown.text == ""
+        assert shown.refusal == "Sensitive file preview is blocked."
 
-    def test_a_binary_file_shows_no_content(self, tmp_path: Path) -> None:
+    def test_a_binary_file_shows_no_text(self, tmp_path: Path) -> None:
         source = tmp_path / "blob.bin"
         source.write_bytes(b"ab\x00cd")
 
-        shown = File.for_path(source).text(1_000)
+        shown = File.for_path(source).content(1_000)
 
-        assert shown["content"] == ""
-        assert shown["blocked_reason"] == "Binary file preview is not supported."
+        assert shown.text == ""
+        assert shown.refusal == "Binary file preview is not supported."
 
 
 def test_no_file_states_its_own_presentation() -> None:
@@ -725,13 +722,13 @@ def test_no_file_states_its_own_presentation() -> None:
     ("query.sql", "select 1\n", "sql"),
     ("notes", "select a from b\n", "sql"),
 ], ids=["python", "yaml", "sql by name", "sql by its text"])
-def test_a_file_states_its_language_with_its_text(
+def test_a_file_states_its_language_with_its_content(
     tmp_path: Path, name: str, body: str, language: str,
 ) -> None:
-    """#1129: the language is the File's answer, carried with its text."""
+    """#1129: the language is the File's answer, carried in its Content."""
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
 
     held = File.for_path(path)
 
-    assert held.text(1_000)["language"] == held.language(body) == language
+    assert held.content(1_000).language == held.language(body) == language
