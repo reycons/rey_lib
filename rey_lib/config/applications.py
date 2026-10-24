@@ -290,9 +290,11 @@ class ApplicationCommand:
     parameter_groups: tuple[ApplicationParameterGroup, ...] = ()
     #: How it is invoked: ``run`` or ``hosted`` (``INVOCATION_*``, #1166).
     invocation: str = INVOCATION_RUN
-    #: For a hosted command, the canonical subject identity kinds it can open and
-    #: host (#1218): the hosting application's own declaration of what it hosts,
-    #: from which an opening reaches it. Empty for a ``run`` command.
+    #: For a hosted command, the opening kinds it accepts (#1218, #1141): the
+    #: hosting application's own declaration of what it opens and hosts, from
+    #: which an opening of that kind reaches it. A kind binds the opening to this
+    #: host; it is not an identity and does not establish that what is opened is
+    #: a governed subject. Empty for a ``run`` command.
     hosted_subject_kinds: tuple[str, ...] = ()
 
     def arguments(self, inputs: Mapping[str, Any]) -> list[str]:
@@ -608,10 +610,11 @@ class Application:
 
 
 def hosted_command(ctx: Any, kind: str) -> tuple[Application, ApplicationCommand]:
-    """The configured application and hosted command that host a subject ``kind`` (#1218).
+    """The configured application and hosted command an opening of ``kind`` reaches (#1218).
 
     Read off ``ctx.applications``: the one hosted command whose
-    ``hosted_subject_kinds`` names the kind, as its application published it.
+    ``hosted_subject_kinds`` names the kind, as its application published it. The
+    kind binds the opening to its host only (#1141).
 
     Raises:
         ConfigError: When no configured command hosts the kind, or more than one
