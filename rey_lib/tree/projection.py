@@ -33,7 +33,44 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-__all__ = ["TreeProjection"]
+__all__ = ["PUBLIC_NODE_FIELDS", "TreeProjection", "public_node"]
+
+
+#: What the Tree states of a node outside its own domain (#1218): its identity,
+#: parentage and display facts, and the unsigned declarations its type offers it
+#: in its state (``offered_actions``). Named rather than derived from a record --
+#: the traversal and ordering internals a record also carries (tree_object_key,
+#: tree_configuration, expansion_tvw, page_size, sort_*) stay inside the Tree,
+#: and a field arriving on a record must not leave the domain because something
+#: upstream started carrying it.
+PUBLIC_NODE_FIELDS = (
+    "node_key",
+    "parent_node_key",
+    "label",
+    "icon",
+    "tone",
+    "has_children",
+    "is_enabled",
+    "selectable",
+    "text_click",
+    "buttons",
+    "panel_controls",
+)
+
+
+def public_node(record: dict[str, Any]) -> dict[str, Any]:
+    """One node's public projection: exactly :data:`PUBLIC_NODE_FIELDS`.
+
+    The Tree's own API, not a browser representation: what a consumer composes
+    from it (a profile, its affordances) is the consumer's.
+
+    Args:
+        record: The record as the projection holds it, with what its type offers it.
+
+    Returns:
+        The declared fields, and nothing else the record carries.
+    """
+    return {field: record.get(field) for field in PUBLIC_NODE_FIELDS}
 
 
 class TreeProjection:

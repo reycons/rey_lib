@@ -6,7 +6,8 @@ Defined here and hosted live by tree_app (#1218); one implementation of each:
     composition      the groups a placement surfaces, the roots a group exposes, a node's children
     declarations     what a node type declares, the declaration an interaction
                      names, and the unsigned identity it binds a record to
-    TreeProjection   one reader's live Tree: admitted records and source state
+    TreeProjection   one reader's live Tree: admitted records and source state;
+                     public_node states a node outside the Tree (PUBLIC_NODE_FIELDS)
     inspection       what may be disclosed of a node, and how far it may expand
     TreeTraversal    library traversal: route a node to its source, read, cap, admit
     sources          the declared non-persisted source names, and their adapters
@@ -47,7 +48,7 @@ from rey_lib.tree.persisted import (
     TreeDataRow,
     persisted_tree,
 )
-from rey_lib.tree.projection import TreeProjection
+from rey_lib.tree.projection import PUBLIC_NODE_FIELDS, TreeProjection, public_node
 from rey_lib.tree.sources import (
     APPLICATION_SOURCE,
     DATABASE_SOURCE,
@@ -93,6 +94,7 @@ __all__ = [
     "JsonlDataObject",
     "NODE_TYPE_ACTION_VIEW_NAME",
     "NodeTypeActionDataObject",
+    "PUBLIC_NODE_FIELDS",
     "RUNTIME_BINDINGS",
     "TOOL_SOURCE",
     "TREE_CONNECTION",
@@ -110,6 +112,7 @@ __all__ = [
     "offered",
     "offered_actions",
     "persisted_tree",
+    "public_node",
     "rey_lib_sources",
     "subject",
     "tree_children",
