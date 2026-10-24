@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.run.hosted_objects import HostedObjects
+from rey_lib.run.hosted_objects import Emit, HostedObjects
 
 
 class _Channel:
@@ -24,75 +24,102 @@ class _Channel:
         self.emitted.append(message)
 
 
-def _construct(subject: str, identity: Mapping[str, Any]) -> dict[str, Any]:
+class _Settings:
+    """A hosted object stand-in: one application's settings, with one command of its own."""
+
+    released: list[str] = []
+
+    def __init__(self, application_id: str, emit: Emit) -> None:
+        self.application_id = application_id
+        self.emit = emit
+        self.renamed = ""
+
+    def projection(self) -> dict[str, Any]:
+        return {"application_id": self.application_id, "renamed": self.renamed}
+
+    def answer(self, command: dict[str, Any]) -> None:
+        if command.get("command") != "rename":
+            raise ConfigError(f"settings do not answer {command.get('command')!r}")
+        self.renamed = str(command.get("to") or "")
+        self.emit({"projection": self.projection(), "request_id": command.get("request_id")})
+
+    def release(self) -> None:
+        _Settings.released.append(self.application_id)
+
+
+def _construct(subject: str, identity: Mapping[str, Any], emit: Emit) -> _Settings:
     if subject != "application.settings":
         raise ConfigError(f"No subject {subject!r} here.")
-    return {"application_id": identity.get("application_id")}
+    return _Settings(str(identity.get("application_id")), emit)
 
 
-def _project(subject: str, held: dict[str, Any]) -> dict[str, Any]:
-    return {"subject_key": subject, **held}
+@pytest.fixture(autouse=True)
+def _quiet(monkeypatch) -> None:
+    _Settings.released = []
+    monkeypatch.setattr(ConfigError, "report", lambda self, *_a, **_k: None)
 
 
-def _hosted() -> HostedObjects:
-    return HostedObjects(_construct, _project)
+def _open(application_id: str, request_id: str) -> dict[str, Any]:
+    return {"command": "open", "subject": "application.settings",
+            "identity": {"application_id": application_id}, "request_id": request_id}
 
 
 def test_each_open_holds_a_new_object_under_an_opaque_id() -> None:
-    hosted = _hosted()
+    hosted = HostedObjects(_construct)
+    channel = _Channel([_open("file_operator", "r1"), _open("ai_app", "r2")])
 
-    first, projected = hosted.open("application.settings", {"application_id": "file_operator"})
-    second, _ = hosted.open("application.settings", {"application_id": "ai_app"})
+    hosted.serve(channel)
 
-    assert first != second and len(hosted) == 2
-    assert projected == {"subject_key": "application.settings", "application_id": "file_operator"}
-    assert hosted.projection(second)["application_id"] == "ai_app"
+    first, second = channel.emitted
+    assert first["object"] != second["object"]
+    assert first["projection"]["application_id"] == "file_operator"
+    assert (first["request_id"], second["request_id"]) == ("r1", "r2")
 
 
-def test_releasing_an_object_ends_that_object_only() -> None:
-    hosted = _hosted()
-    first, _ = hosted.open("application.settings", {"application_id": "file_operator"})
-    second, _ = hosted.open("application.settings", {"application_id": "ai_app"})
+def test_an_objects_own_command_is_answered_by_it_and_names_it() -> None:
+    hosted = HostedObjects(_construct)
+    channel = _Channel([])
+    object_id, _ = hosted.open("application.settings", {"application_id": "file_operator"},
+                               channel.emit)
+    channel._commands.append({"command": "rename", "object": object_id, "to": "fo",
+                              "request_id": "r2"})
+
+    hosted.serve(channel)
+
+    assert channel.emitted == [{"projection": {"application_id": "file_operator",
+                                               "renamed": "fo"},
+                                "request_id": "r2", "object": object_id}]
+
+
+def test_releasing_an_object_ends_that_object_only_and_serving_ending_releases_the_rest() -> None:
+    hosted = HostedObjects(_construct)
+    first, _ = hosted.open("application.settings", {"application_id": "file_operator"},
+                           lambda message: None)
+    second, _ = hosted.open("application.settings", {"application_id": "ai_app"},
+                            lambda message: None)
 
     hosted.release(first)
-
-    assert len(hosted) == 1
+    assert _Settings.released == ["file_operator"] and len(hosted) == 1
     assert hosted.projection(second)["application_id"] == "ai_app"
     with pytest.raises(ConfigError, match="No object is held"):
         hosted.projection(first)
 
-
-def test_the_protocol_names_every_answer_by_its_object() -> None:
-    hosted = _hosted()
-    channel = _Channel([{"command": "open", "subject": "application.settings",
-                         "identity": {"application_id": "file_operator"}, "request_id": "r1"}])
-
-    hosted.serve(channel)
-    (opened,) = channel.emitted
-    object_id = opened["object"]
-    channel = _Channel([{"command": "projection", "object": object_id},
-                        {"command": "release", "object": object_id, "request_id": "r2"},
-                        {"command": "close"},
-                        {"command": "projection", "object": object_id}])
-    hosted.serve(channel)
-
-    assert opened["request_id"] == "r1" and opened["projection"]["application_id"] == "file_operator"
-    assert channel.emitted == [
-        {"object": object_id, "projection": opened["projection"]},
-        {"object": object_id, "released": True, "request_id": "r2"},
-    ]
+    hosted.serve(_Channel([{"command": "close"}]))
+    assert _Settings.released == ["file_operator", "ai_app"] and len(hosted) == 0
 
 
-def test_a_refusal_is_answered_and_serving_goes_on(monkeypatch) -> None:
-    monkeypatch.setattr(ConfigError, "report", lambda self, *_a, **_k: None)
+def test_a_refusal_is_answered_and_serving_goes_on() -> None:
+    hosted = HostedObjects(_construct)
     channel = _Channel([
         {"command": "open", "subject": "recipe.document", "identity": {}, "request_id": "r1"},
         {"command": "projection", "object": "nope", "request_id": "r2"},
-        {"command": "execute", "request_id": "r3"},
+        {"command": "rename", "object": "nope", "request_id": "r3"},
+        _open("ai_app", "r4"),
     ])
 
-    _hosted().serve(channel)
+    hosted.serve(channel)
 
-    assert [one["request_id"] for one in channel.emitted] == ["r1", "r2", "r3"]
-    assert all("error" in one for one in channel.emitted)
+    assert [one["request_id"] for one in channel.emitted] == ["r1", "r2", "r3", "r4"]
+    assert all("error" in one for one in channel.emitted[:3])
     assert channel.emitted[1]["object"] == "nope"
+    assert channel.emitted[3]["projection"]["application_id"] == "ai_app"
