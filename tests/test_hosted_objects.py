@@ -123,3 +123,29 @@ def test_a_refusal_is_answered_and_serving_goes_on() -> None:
     assert all("error" in one for one in channel.emitted[:3])
     assert channel.emitted[1]["object"] == "nope"
     assert channel.emitted[3]["projection"]["application_id"] == "ai_app"
+
+
+def test_an_object_a_held_objects_behaviour_established_is_held_like_an_opened_one() -> None:
+    """#1141: held under its own id, its messages naming it, addressed and released alike."""
+    hosted = HostedObjects(_construct)
+
+    class _Establishing(_Channel):
+        def commands(self) -> list[dict[str, Any]]:
+            # While serving: a held object's behaviour establishes another.
+            self.established = hosted.hold(lambda emit: _Settings("made", emit))
+            return [{"command": "rename", "object": self.established[0], "to": "x",
+                     "request_id": "r1"}]
+
+    channel = _Establishing([])
+    hosted.serve(channel)
+
+    object_id, projection = channel.established
+    assert projection == {"application_id": "made", "renamed": ""}
+    assert channel.emitted == [{"projection": {"application_id": "made", "renamed": "x"},
+                                "request_id": "r1", "object": object_id}]
+    assert _Settings.released == ["made"]
+
+
+def test_nothing_is_held_by_hold_unless_serving() -> None:
+    with pytest.raises(ConfigError, match="only while serving"):
+        HostedObjects(_construct).hold(lambda emit: _Settings("made", emit))

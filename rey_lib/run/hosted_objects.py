@@ -85,6 +85,8 @@ class HostedObjects:
     def __init__(self, construct: Construct) -> None:
         self._construct = construct
         self._held: dict[str, Hosted] = {}
+        # Where the channel this instance serves sends; set when serving begins.
+        self._emit: Callable[[dict[str, Any]], None] | None = None
 
     def open(self, subject: str, identity: Mapping[str, Any],
              emit: Callable[[dict[str, Any]], None]) -> tuple[str, dict[str, Any]]:
@@ -103,6 +105,32 @@ class HostedObjects:
         object_id = uuid.uuid4().hex
         hosted = self._construct(subject, dict(identity or {}),
                                  lambda message: emit({**message, "object": object_id}))
+        projection = hosted.projection()
+        self._held[object_id] = hosted
+        return object_id, projection
+
+    def hold(self, make: Callable[[Callable[[dict[str, Any]], None]], Hosted],
+             ) -> tuple[str, dict[str, Any]]:
+        """Hold an object a held object's own behaviour established (#1141).
+
+        Held exactly as an opened object is -- its own opaque id, every message it
+        emits carrying that id, addressed and released like any other -- but made
+        by the application, not constructed from an opening's identity.
+
+        Args:
+            make: Builds the object, given the emit its messages go out through.
+
+        Returns:
+            Its new opaque id and its projection.
+
+        Raises:
+            ConfigError: When this instance is not serving a channel.
+        """
+        if self._emit is None:
+            raise ConfigError("Hosted objects hold an established object only while serving.")
+        emit = self._emit
+        object_id = uuid.uuid4().hex
+        hosted = make(lambda message: emit({**message, "object": object_id}))
         projection = hosted.projection()
         self._held[object_id] = hosted
         return object_id, projection
@@ -137,6 +165,7 @@ class HostedObjects:
         Args:
             channel: The application's end of the channel (AttachedApp.attach).
         """
+        self._emit = channel.emit
         try:
             for command in channel.commands():
                 name = str(command.get("command") or "")
