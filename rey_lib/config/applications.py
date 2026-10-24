@@ -50,10 +50,13 @@ __all__ = [
 #: is the receiving application's to validate.
 JSON_VALUE_TYPE = "json"
 
-#: How a command may be invoked (#1166): ``run`` -- an ordinary command the
+#: How a command may be invoked (#1166, #1223): ``run`` -- an ordinary command the
 #: execution service and the application runner start; ``hosted`` -- it needs
 #: the attached app channel of ``LaunchedApp.launch``, so the runner does not
-#: offer it. Declared per command; absent means ``run``.
+#: offer it. A hosted command exposes the reusable multi-object hosting contract
+#: (rey_lib.run.HostedObjects: open / projection / release over its channel);
+#: how long an instance is retained is the invoking context's, never the
+#: command's. Declared per command; absent means ``run``.
 INVOCATION_RUN = "run"
 INVOCATION_HOSTED = "hosted"
 _INVOCATIONS = frozenset({INVOCATION_RUN, INVOCATION_HOSTED})
