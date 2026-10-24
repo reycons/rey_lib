@@ -30,7 +30,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import read_text_file
 import rey_lib.tree as _tree
 from rey_lib.tree.persisted import TREE_CONNECTION, persisted_tree
-from rey_lib.tree.traversal import TreeTraversal
+from rey_lib.tree.traversal import Assemble, TreeTraversal
 
 __all__ = ["RUNTIME_BINDINGS", "tree_children", "tree_groups", "tree_roots"]
 
@@ -130,6 +130,7 @@ def tree_children(
     record: dict[str, Any],
     projection: Any = None,
     fresh: bool = False,
+    assemble: Assemble | None = None,
 ) -> list[dict[str, Any]]:
     """The enabled children of one node, whatever its source.
 
@@ -144,13 +145,15 @@ def tree_children(
         record: The parent, as the projection holds it.
         projection: The reader's projection of this Tree, if there is one.
         fresh: Read the source again rather than answer from held state.
+        assemble: What the host adds to each admitted child before the
+            projection holds it (``TreeTraversal``'s step), if anything.
 
     Returns:
         The enabled children, in the order their source gave them.
     """
     traversal = TreeTraversal(persisted_tree(), _tree.rey_lib_sources())
     return [
-        child for child in traversal.children(ctx, record, projection, fresh)
+        child for child in traversal.children(ctx, record, projection, fresh, assemble)
         if _true(child.get("is_enabled"))
     ]
 

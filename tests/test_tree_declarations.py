@@ -22,6 +22,7 @@ from rey_lib.tree.declarations import (
     declared_fact,
     interacted_declaration,
     offered,
+    offered_actions,
 )
 
 
@@ -166,3 +167,28 @@ def test_an_unknown_type_or_an_unnamed_interaction_matches_nothing() -> None:
     assert interacted_declaration(_DECLARED, {"node_type": "area"}, interaction="text_click") \
         is None
     assert interacted_declaration(_DECLARED, {"node_type": "run"}) is None
+
+
+# -- what one record offers, in its state (#1218) -------------------------------
+
+def test_a_record_offers_what_its_type_declares_in_its_state() -> None:
+    offers = offered_actions(_DECLARED, {"node_type": "run", "actionable_in": "rollbackable"})
+
+    assert offers == {
+        "selectable": True,
+        "text_click": {"action_key": "open_database_object", "requires_state": None},
+        "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
+        "panel_controls": [{"action_key": "refresh", "requires_state": None}],
+    }
+
+
+def test_a_declaration_needing_another_state_is_absent() -> None:
+    offers = offered_actions(_DECLARED, {"node_type": "run", "actionable_in": "done"})
+
+    assert offers["buttons"] == []
+    assert offers["text_click"]["action_key"] == "open_database_object"
+
+
+def test_an_undeclared_type_offers_nothing() -> None:
+    assert offered_actions(_DECLARED, {"node_type": "area"}) == {
+        "selectable": False, "text_click": None, "buttons": [], "panel_controls": []}

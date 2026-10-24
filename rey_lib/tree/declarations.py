@@ -8,6 +8,7 @@ where, in what order, in which state, and the identity each declares::
     tree.node_type_action     which actions a type offers, where, in what order
       -> tree.node_type_action_vw
       -> NodeTypeActionDataObject   every node type's declarations
+      -> offered_actions            what one record offers, in its state
       -> interacted_declaration     the declaration a reported interaction names
       -> offered / declared_fact    one declaration, applied to one record
 
@@ -44,6 +45,7 @@ __all__ = [
     "declared_fact",
     "interacted_declaration",
     "offered",
+    "offered_actions",
 ]
 
 #: The view the declarations are read from, in the tree schema.
@@ -160,6 +162,39 @@ def offered(declared: Any, state: str) -> bool:
         return False
     required = str(declared.get("requires_state") or "")
     return not required or required == state
+
+
+def offered_actions(
+    declarations: Mapping[str, Any], record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Everything one record's type offers it, in the record's state (#1218).
+
+    The selection semantics a Tree node carries: whether it takes the selection,
+    the declaration a click on its text names, and the buttons and panel controls
+    it offers, each in declared order. A declaration whose required state the
+    record is not in (``actionable_in``) is absent. Each is the unsigned
+    declaration as :func:`declaration` states it; nothing here signs or opens.
+
+    Args:
+        declarations: Every node type's declarations
+            (:meth:`NodeTypeActionDataObject.declarations`).
+        record: The record, which names its ``node_type``.
+
+    Returns:
+        ``selectable``, ``text_click`` (one declaration or None), ``buttons`` and
+        ``panel_controls``.
+    """
+    declared = declarations.get(str(record.get("node_type") or "")) or {}
+    state = str(record.get("actionable_in") or "")
+    clicked = declared.get("text_click")
+    return {
+        "selectable": bool(declared.get("selectable")),
+        "text_click": clicked if offered(clicked, state) else None,
+        "buttons": [button for button in declared.get("buttons") or []
+                    if offered(button, state)],
+        "panel_controls": [control for control in declared.get("panel_controls") or []
+                           if offered(control, state)],
+    }
 
 
 def interacted_declaration(

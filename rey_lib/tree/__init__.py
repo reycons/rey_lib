@@ -28,6 +28,7 @@ from rey_lib.tree.declarations import (
     declared_fact,
     interacted_declaration,
     offered,
+    offered_actions,
 )
 from rey_lib.tree.folder import FileDataObject, folder_children
 from rey_lib.tree.jsonl import JsonlDataObject
@@ -107,6 +108,7 @@ __all__ = [
     "inspected",
     "interacted_declaration",
     "offered",
+    "offered_actions",
     "persisted_tree",
     "rey_lib_sources",
     "subject",
