@@ -1,10 +1,9 @@
-"""What the tree data object is, and what it is allowed to read.
+"""What the tree data object is, and how it reads (backlog 1054, 1207).
 
-Moved from the Console with the object itself (backlog 1054). The tree is loaded
-from one place. These prove that the object is the shared database view
-specialized rather than a parallel abstraction, that it asks for its own
-connection, that it reads the canonical view and nothing beneath it, and that the
-identities the producing SQL composed arrive unread.
+The object is the shared database view specialized rather than a parallel
+abstraction; it asks for its own connection; it reads through one packaged,
+parameterized statement over tree.f_tree_rows and names no relation itself; and
+the identities the producing SQL composed arrive unread.
 """
 
 from __future__ import annotations
@@ -21,12 +20,16 @@ from rey_lib.tree.persisted import (
     TreeDataObject,
 )
 
-#: Every relation the tree is *not* allowed to read: the tables the canonical
-#: view is built from, and the producers that feed it.
+#: Every relation the read must not name itself: the tables beneath the Tree,
+#: the providers (the database dispatches to them), and the union.
 FORBIDDEN = (
-    "tree_group", "tree_root", "tree_node",
+    "tree_group", "tree_root", "tree_node", "tree_vw",
     "persisted_tvw", "run_history_tvw", "file_manifest_tvw",
 )
+
+#: Every value the statement binds, each present on every read.
+BOUND = {"expansion_tvw", "row_type", "tree_group_id", "tree_root_id",
+         "parent_node_key", "row_limit"}
 
 
 def tree_object() -> TreeDataObject:
@@ -104,12 +107,12 @@ def test_it_reads_through_its_own_connection(spy: Spy) -> None:
     assert "control" not in spy.asked_for
 
 
-def test_it_reads_the_canonical_view_and_nothing_beneath_it(spy: Spy) -> None:
-    """One datasource. The tables and the producers are never named."""
+def test_it_reads_through_the_dispatch_function_and_names_no_relation(spy: Spy) -> None:
+    """One packaged statement over tree.f_tree_rows; no table, provider or union named."""
     tree_object().rows(ctx=object())
 
     statement = spy.statements[0]
-    assert "tree.tree_vw" in statement
+    assert "tree.f_tree_rows(" in statement
     # Qualified, not bare: "tree_group" also matches the ordering column
     # tree_group_id, and a substring test over SQL cannot tell a table from a
     # column that shares its prefix.
@@ -143,7 +146,7 @@ def test_a_scoped_read_binds_its_group(spy: Spy) -> None:
     tree_object().rows(ctx=object(), row_type="root", tree_group_id=1)
 
     statement, params = spy.statements[0], spy.params[0]
-    assert "tree_group_id = :tree_group_id" in statement
+    assert ":tree_group_id" in statement
     assert params["tree_group_id"] == 1
 
 
@@ -158,9 +161,12 @@ def test_a_root_read_is_ordered_by_the_roots_declared_sort_order(spy: Spy) -> No
     tree_object().rows(ctx=object(), row_type="root", tree_group_id=1)
 
     terms = _order_by(spy.statements[0])
-    assert terms[:3] == [
-        "tree_group_id", "sort_order NULLS LAST", "tree_root_id NULLS FIRST",
-    ]
+    assert terms[0] == "tree_group_id"
+    # The root's declared position, applied for a root read only.
+    assert terms[1] == ("CASE WHEN CAST(:row_type AS character varying) = 'root' "
+                        "THEN sort_order END NULLS LAST")
+    assert terms[2] == "tree_root_id NULLS FIRST"
+    assert spy.params[0]["row_type"] == "root"
 
 
 def test_a_child_read_keeps_the_projections_own_order(spy: Spy) -> None:
@@ -169,6 +175,7 @@ def test_a_child_read_keeps_the_projections_own_order(spy: Spy) -> None:
 
     assert _order_by(spy.statements[0]) == [
         "tree_group_id",
+        "CASE WHEN CAST(:row_type AS character varying) = 'root' THEN sort_order END NULLS LAST",
         "tree_root_id NULLS FIRST",
         "sort_rank NULLS LAST",
         "sort_ts DESC NULLS LAST",
@@ -183,21 +190,22 @@ def test_a_child_read_binds_the_parent_key(spy: Spy) -> None:
     tree_object().rows(ctx=object(), row_type="node", parent_node_key="1:1:9")
 
     statement, params = spy.statements[0], spy.params[0]
-    assert "parent_node_key = :parent_node_key" in statement
+    assert ":parent_node_key" in statement
     assert params["parent_node_key"] == "1:1:9"
     # The key is carried whole: it is bound, never spliced into the statement.
     assert "1:1:9" not in statement
 
 
-def test_predicates_compose(spy: Spy) -> None:
-    """Every predicate is optional, and together they narrow one read."""
+def test_every_value_is_bound_and_an_omitted_filter_is_null(spy: Spy) -> None:
+    """Every filter is optional: an omitted one is bound as NULL and applies none."""
     tree_object().rows(
         ctx=object(), row_type="node", tree_group_id=2, parent_node_key="2:3",
     )
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert statement.count("AND") >= 2
-    assert set(params) == {"row_type", "tree_group_id", "parent_node_key"}
+    params = spy.params[0]
+    assert set(params) == BOUND
+    assert params == {"expansion_tvw": None, "row_type": "node", "tree_group_id": 2,
+                      "tree_root_id": None, "parent_node_key": "2:3", "row_limit": None}
 
 
 def test_a_scoped_read_binds_its_root(spy: Spy) -> None:
@@ -205,7 +213,7 @@ def test_a_scoped_read_binds_its_root(spy: Spy) -> None:
     tree_object().rows(ctx=object(), row_type="node", tree_root_id=35)
 
     statement, params = spy.statements[0], spy.params[0]
-    assert "tree_root_id = :tree_root_id" in statement
+    assert ":tree_root_id" in statement
     assert params["tree_root_id"] == 35
     assert "35" not in statement
 
@@ -213,27 +221,37 @@ def test_a_scoped_read_binds_its_root(spy: Spy) -> None:
 def test_a_child_read_carries_the_parents_own_scope(spy: Spy) -> None:
     """Expanding a node binds the group and root the record already holds.
 
-    Without them the union evaluates every tree to answer one node.
+    The record's own expansion is what the database dispatches.
     """
-    parent = {"node_key": "19:35:ungrouped:1", "tree_group_id": 19, "tree_root_id": 35}
+    parent = {"node_key": "19:35:ungrouped:1", "tree_group_id": 19, "tree_root_id": 35,
+              "expansion_tvw": "tree.development_backlog_tvw"}
 
     tree_object().children(object(), parent)
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert params == {
+    assert spy.params[0] == {
+        "expansion_tvw": "tree.development_backlog_tvw",
         "row_type": "node",
         "tree_group_id": 19,
         "tree_root_id": 35,
         "parent_node_key": "19:35:ungrouped:1",
+        "row_limit": None,
     }
-    assert "tree.tree_vw" in statement
+
+
+def test_a_record_declaring_no_expansion_is_read_from_the_persisted_provider(spy: Spy) -> None:
+    """A NULL expansion is bound as NULL: the database answers it from persisted_tvw."""
+    tree_object().children(object(), {"node_key": "1:1:9", "expansion_tvw": "  "})
+
+    assert spy.params[0]["expansion_tvw"] is None
 
 
 def test_a_record_without_scope_is_read_by_its_key_alone(spy: Spy) -> None:
-    """Compatibility fallback: a record holding no scope adds no predicate."""
+    """A record holding no scope binds none: its key alone narrows the read."""
     tree_object().children(object(), {"node_key": "1:1:9"})
 
-    assert spy.params[0] == {"row_type": "node", "parent_node_key": "1:1:9"}
+    assert spy.params[0] == {"expansion_tvw": None, "row_type": "node", "tree_group_id": None,
+                             "tree_root_id": None, "parent_node_key": "1:1:9",
+                             "row_limit": None}
 
 
 def test_row_types_are_preserved_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,9 +273,9 @@ def test_one_kind_and_a_bound_are_asked_for_rather_than_filtered(spy: Spy) -> No
     tree_object().rows(ctx=object(), row_type="node", limit=50)
 
     statement, params = spy.statements[0], spy.params[0]
-    assert "row_type = :row_type" in statement
-    assert "LIMIT :row_limit" in statement
-    assert params == {"row_type": "node", "row_limit": 50}
+    assert ":row_type" in statement
+    assert "LIMIT CAST(:row_limit AS bigint)" in statement
+    assert params["row_type"] == "node" and params["row_limit"] == 50
     # Bound, never interpolated.
     assert "'node'" not in statement
     assert "50" not in statement

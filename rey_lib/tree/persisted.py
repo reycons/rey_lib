@@ -19,23 +19,26 @@ record whose children are persisted, and asks a different object for a record
 sourced from somewhere else; every feeder answers in the same canonical record
 shape, and none of them knows the others exist.
 
-`tree.tree_vw` is the only tree datasource this reads. The tables beneath it --
-``tree_group``, ``tree_root``, ``tree_node`` -- and the producer views that feed
-it are never queried from here. The database enforces it too: the ``tree`` connection is granted
-SELECT on the view alone.
+It reads through ``tree.f_tree_rows`` (backlog 1206 / 1207), the database
+implementation of this object's retrieval seam: one packaged, parameterized
+statement (``sql/tree_rows.sql``), every value bound. Which provider answers is
+the database's dispatch of the record's own expansion -- NULL is the persisted
+provider, an unknown expansion is refused, and there is no fallback to the union.
+Python never names a relation. The tables beneath -- ``tree_group``,
+``tree_root``, ``tree_node`` -- are never queried from here.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
-
-from rey_lib.errors.error_utils import ConfigError
 
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
 from rey_lib.db.database_query import DatabaseQuery
+from rey_lib.files import read_text_file
 
 __all__ = [
     "persisted_tree",
@@ -57,30 +60,8 @@ TREE_SCHEMA = "tree"
 TREE_VIEW_NAME = "tree_vw"
 
 
-def _projections(ctx: Any) -> frozenset[str]:
-    """Every view of the tree schema, as the catalog has them.
-
-    Read once per process: the set changes when a projection is created, which
-    is a deployment, not a request.
-    """
-    global _KNOWN
-    if _KNOWN is None:
-        handle = shared_connection(ctx, TREE_CONNECTION).handle()
-        rows = DatabaseQuery(_RELATIONS).rows(handle)
-        _KNOWN = frozenset(str(row.get("relation") or "") for row in rows)
-    return _KNOWN
-
-
-#: The views this schema has, once resolved. Not a cache of anything a request
-#: changes: a projection is created by a migration.
-_KNOWN: frozenset[str] | None = None
-
-_RELATIONS = """
-SELECT n.nspname || '.' || c.relname AS relation
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
- WHERE n.nspname = 'tree' AND c.relkind = 'v'
-"""
+#: The packaged statement every Tree read runs (backlog 1207).
+_ROWS_SQL = Path(__file__).parent / "sql" / "tree_rows.sql"
 
 
 @dataclass(frozen=True)
@@ -134,12 +115,14 @@ class TreeDataObject(DatabaseView):
         relation: str | None = None,
         tree_root_id: Any = None,
     ) -> tuple[TreeDataRow, ...]:
-        """Read rows from the view, in the order the view's own columns define.
+        """Read the Tree rows one expansion owns, in the Tree's presentation order.
 
-        Values arrive as the database emitted them. Nothing is reinterpreted,
-        normalized, deduplicated or reordered afterwards: a node that carries
-        two actions is two rows, because that is what the view says, and hiding
-        it here would make Python disagree with its own datasource.
+        One packaged statement (``sql/tree_rows.sql``) over ``tree.f_tree_rows``,
+        every value bound: an omitted filter is bound as NULL and applies no
+        predicate. Values arrive as the database emitted them. Nothing is
+        reinterpreted, normalized, deduplicated or reordered afterwards: a node
+        that carries two actions is two rows, because that is what the
+        projection says.
 
         Args:
             ctx: Finalized installation context, which resolves the connection.
@@ -149,50 +132,46 @@ class TreeDataObject(DatabaseView):
                 when omitted. The key is bound, never interpreted: this does not
                 know what one is made of and never takes one apart.
             limit: At most this many rows, or every row when omitted.
-            relation: Which projection to read, or the union when omitted. A
-                caller that knows which one owns what it is asking for says so,
-                and is answered without the others being computed.
+            relation: The expansion that owns what is asked for -- a record's
+                own ``expansion_tvw`` -- or the persisted provider when omitted.
+                The database dispatches it and refuses one it does not declare.
             tree_root_id: Restrict to one root, or every root when omitted.
 
         Returns:
-            The rows, in view order.
+            The rows, in the Tree's presentation order.
         """
-        statement, params = self._select(
-            row_type=row_type,
-            tree_group_id=tree_group_id,
-            parent_node_key=parent_node_key,
-            limit=limit,
-            relation=relation,
-            tree_root_id=tree_root_id,
-        )
+        params = {
+            "expansion_tvw": relation,
+            "row_type": None if row_type is None else str(row_type),
+            "tree_group_id": None if tree_group_id is None else int(tree_group_id),
+            "tree_root_id": None if tree_root_id is None else int(tree_root_id),
+            "parent_node_key": None if parent_node_key is None else str(parent_node_key),
+            "row_limit": None if limit is None else int(limit),
+        }
         handle = shared_connection(ctx, TREE_CONNECTION).handle()
-        read = DatabaseQuery(statement, params).rows(handle)
+        read = DatabaseQuery(read_text_file(_ROWS_SQL), params).rows(handle)
         return tuple(TreeDataRow(values=MappingProxyType(row)) for row in read)
 
     def children(self, ctx: Any, record: dict[str, Any]) -> list[dict[str, Any]]:
         """The children of one record, from the projection that owns them.
 
-        The edge the view declares -- a row's ``parent_node_key`` is some other
-        row's ``node_key`` -- and nothing more. The key is passed back exactly as
-        it was received: nothing splits one, counts its separators, or recovers
-        an id from it.
+        The edge the projection declares -- a row's ``parent_node_key`` is some
+        other row's ``node_key`` -- and nothing more. The key is passed back
+        exactly as it was received: nothing splits one, counts its separators,
+        or recovers an id from it.
 
         **Which projection is asked is the record's own answer.** It carries the
-        ``expansion_tvw`` its root declared, so a folder read never evaluates a
-        projection it has nothing to do with. Reading the union instead would
-        make every branch pay for every other: a recursive projection cannot
-        have a parent predicate pushed into it, so it is computed whole before
-        the filter applies, and one slow branch is then every branch's cost.
+        ``expansion_tvw`` its provider declared, and the database dispatches it
+        to that one provider -- a NULL expansion to the persisted one -- so a
+        read never evaluates a projection it has nothing to do with.
 
         These arrive with their identity already composed, so whoever holds them
         does not give them one.
 
         **The read carries the parent's own tree scope.** The record holds its
         ``tree_group_id`` and ``tree_root_id``, and a child is always in its
-        parent's group and root, so both are bound beside the key. Without
-        them the union evaluates every tree to answer one node. A record that
-        holds neither is still read by its key alone -- a compatibility
-        fallback, not the normal path.
+        parent's group and root, so both are bound beside the key. A record that
+        holds neither is still read by its key alone.
         """
         return [
             row.to_dict()
@@ -202,92 +181,19 @@ class TreeDataObject(DatabaseView):
                 tree_group_id=record.get("tree_group_id"),
                 tree_root_id=record.get("tree_root_id"),
                 parent_node_key=str(record.get("node_key") or ""),
-                relation=self._owning(ctx, record),
+                relation=_owning(record),
             )
         ]
 
-    def _owning(self, ctx: Any, record: dict[str, Any]) -> str:
-        """Which projection owns this record's descendants.
 
-        The root said so and the row carries it. A name that is not a view of
-        this schema is refused rather than run: the value is the database's own,
-        and checking it against the catalog is what keeps it that way however it
-        got there.
-        """
-        declared = str(record.get("expansion_tvw") or "").strip()
-        if not declared:
-            return self._qualified()
-        if declared not in _projections(ctx):
-            raise ConfigError(
-                f"'{declared}' is named as an expansion view and is not one.",
-            )
-        return declared
+def _owning(record: Mapping[str, Any]) -> str | None:
+    """The expansion a record declares for its descendants, or None for the persisted one.
 
-    def _qualified(self) -> str:
-        """This view, as it is addressed."""
-        return f"{self.identity.schema}.{self.identity.name}"
-
-    def _select(
-        self,
-        *,
-        row_type: str | None,
-        tree_group_id: Any = None,
-        parent_node_key: str | None = None,
-        limit: int | None,
-        relation: str | None = None,
-        tree_root_id: Any = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """The statement that reads this view, and the values bound into it.
-
-        Ordering is the view's own presentation ordering, so the same read
-        answers the same way twice. A root read is ordered by the root's own
-        ``sort_order`` first. ``node_key`` breaks the final tie because it
-        is unique and is the one column guaranteed to be present on every row.
-
-        Parameters are bound, never interpolated: a value concatenated into SQL
-        is an injection and a quoting bug waiting for its first apostrophe.
-        """
-        qualified = relation or self._qualified()
-        params: dict[str, Any] = {}
-        # Every predicate is optional and every one is bound. They compose:
-        # the tree is read one scope at a time -- a group's roots, or one
-        # node's children -- and never filtered after the fact.
-        clauses: list[str] = []
-        if row_type is not None:
-            clauses.append("row_type = :row_type")
-            params["row_type"] = str(row_type)
-        if tree_group_id is not None:
-            clauses.append("tree_group_id = :tree_group_id")
-            params["tree_group_id"] = int(tree_group_id)
-        if tree_root_id is not None:
-            clauses.append("tree_root_id = :tree_root_id")
-            params["tree_root_id"] = int(tree_root_id)
-        if parent_node_key is not None:
-            clauses.append("parent_node_key = :parent_node_key")
-            params["parent_node_key"] = str(parent_node_key)
-        where = ""
-        if clauses:
-            where = "WHERE  " + "\n   AND ".join(clauses) + "\n"
-        bound = ""
-        if limit is not None:
-            bound = "\nLIMIT :row_limit"
-            params["row_limit"] = int(limit)
-        # A root's position is its row's declared sort_order. Only a root read
-        # asks for it: every other level keeps the order its projection gives.
-        declared = "         sort_order   NULLS LAST,\n" if row_type == "root" else ""
-        return (
-            "SELECT *\n"
-            f"FROM   {qualified}\n"
-            f"{where}"
-            "ORDER BY tree_group_id,\n"
-            f"{declared}"
-            "         tree_root_id NULLS FIRST,\n"
-            "         sort_rank    NULLS LAST,\n"
-            "         sort_ts      DESC NULLS LAST,\n"
-            "         sort_number  NULLS LAST,\n"
-            "         sort_text    NULLS LAST,\n"
-            f"         node_key     NULLS FIRST{bound}"
-        ), params
+    Carried as the record states it; whether it is a declared expansion is the
+    database's answer (``tree.f_tree_rows`` refuses one it does not declare).
+    """
+    declared = str(record.get("expansion_tvw") or "").strip()
+    return declared or None
 
 
 def persisted_tree() -> TreeDataObject:
