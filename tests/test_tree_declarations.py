@@ -1,8 +1,7 @@
 """The governed declaration authority, read and interpreted in the tree domain (#1165).
 
-What a node type declares, whether a placement applies to a record's state, and the
-identity a declaration binds a record to -- an unsigned plain fact. Nothing here
-signs, launches or presents.
+What a node type declares and whether a placement applies to a record's state.
+Nothing here binds, signs, launches or presents.
 """
 
 from __future__ import annotations
@@ -13,13 +12,11 @@ from typing import Any
 import pytest
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tree import declarations
 from rey_lib.tree.declarations import (
     NODE_TYPE_ACTION_VIEW_NAME,
     NodeTypeActionDataObject,
     declaration,
-    declared_fact,
     interacted_declaration,
     offered,
     offered_actions,
@@ -84,47 +81,6 @@ def test_a_declaration_is_the_view_row_s_own_settings() -> None:
 ])
 def test_a_declaration_applies_only_in_the_state_it_requires(declared, state, applies) -> None:
     assert offered(declared, state) is applies
-
-
-def test_a_declaration_binds_flat_fields_and_stated_values() -> None:
-    declared = {"target": {"kind": "database_object", "connection": "rey_apps",
-                           "fields": {"run_id": "run_id"}}}
-
-    assert declared_fact(declared, {"run_id": 7, "other": 1}) == {
-        "kind": "database_object", "connection": "rey_apps", "run_id": 7,
-    }
-
-
-def test_field_references_inside_stated_values_are_read_from_the_record() -> None:
-    declared = {"target": {"kind": "database_object", "filters": [
-        {"column": "backlog_key", "operator": "equals", "value": {"$field": "subject_id"}}]}}
-
-    fact = declared_fact(declared, {"subject_id": "1143"})
-
-    assert fact == {"kind": "database_object", "filters": [
-        {"column": "backlog_key", "operator": "equals", "value": "1143"}]}
-
-
-def test_a_field_reference_the_record_lacks_is_refused() -> None:
-    with pytest.raises(ConfigError, match="record field 'subject_id'"):
-        declared_fact({"target": {"kind": "k", "value": {"$field": "subject_id"}}}, {})
-
-
-@pytest.mark.parametrize("target", [None, {}, {"kind": "k"}, {"fields": {"a": "a"}}])
-def test_no_identity_is_declared_without_a_kind_and_something_to_bind(target) -> None:
-    assert declared_fact({"target": target}, {"a": 1}) is None
-
-
-def test_a_column_reading_wins_over_a_stated_value_of_the_same_name() -> None:
-    declared = {"target": {"kind": "k", "name": "stated", "fields": {"name": "label"}}}
-
-    assert declared_fact(declared, {"label": "from the row"})["name"] == "from the row"
-
-
-def test_the_fact_is_plain_and_unsigned() -> None:
-    fact = declared_fact({"target": {"kind": "k", "fields": {"a": "a"}}}, {"a": 1})
-
-    assert isinstance(fact, dict) and fact == {"kind": "k", "a": 1}
 
 
 # -- the declaration a reported interaction names (#1218) ----------------------
