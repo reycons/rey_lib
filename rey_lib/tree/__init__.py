@@ -26,6 +26,7 @@ from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.declarations import (
     NODE_TYPE_ACTION_VIEW_NAME,
     NodeTypeActionDataObject,
+    declared_fact,
     interacted_declaration,
     offered,
     offered_actions,
@@ -103,6 +104,7 @@ __all__ = [
     "TreeDataRow",
     "TreeProjection",
     "TreeTraversal",
+    "declared_fact",
     "expand",
     "folder_children",
     "inspected",

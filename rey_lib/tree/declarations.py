@@ -10,12 +10,13 @@ where, in what order, in which state, and the identity each declares::
       -> NodeTypeActionDataObject   every node type's declarations
       -> offered_actions            what one record offers, in its state
       -> interacted_declaration     the declaration a reported interaction names
-      -> offered                    whether one declaration applies to one record
+      -> offered / declared_fact    one declaration, applied to one record
 
 The tree data objects all name ``tree.node_type_action`` as the answer to what a
 node can do; this is where that answer is read and interpreted. It is tree-domain
-meaning only: what a record's type declares and whether a placement applies to
-the record's state. How an interaction crosses a browser boundary, which process it
+meaning only: what a record's type declares, whether a placement applies to the
+record's state, and the identity a declaration binds the record to -- an
+unsigned plain fact. How that fact crosses a browser boundary, which process it
 launches and what presents it are not this module's and appear nowhere in it.
 
 **It is not a second registry.** It carries no executable and no predicate:
@@ -35,11 +36,13 @@ from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "BUTTON_PLACEMENT",
+    "FIELD_REFERENCE",
     "NODE_TYPE_ACTION_VIEW_NAME",
     "NodeTypeActionDataObject",
     "PANEL_PLACEMENT",
     "TEXT_CLICK_PLACEMENT",
     "declaration",
+    "declared_fact",
     "interacted_declaration",
     "offered",
     "offered_actions",
@@ -54,6 +57,11 @@ NODE_TYPE_ACTION_VIEW_NAME = "node_type_action_vw"
 TEXT_CLICK_PLACEMENT = "text_click"
 BUTTON_PLACEMENT = "button"
 PANEL_PLACEMENT = "panel"
+
+#: The one form of a field reference inside a declared target (#1143): an object
+#: that is exactly ``{"$field": "<record column>"}`` stands for that column's
+#: value, read from the record when a declaration is bound to it.
+FIELD_REFERENCE = "$field"
 
 _SELECT = """
 SELECT node_type_key,
@@ -80,7 +88,8 @@ class NodeTypeActionDataObject(DatabaseView):
 
     Everything a ``DatabaseView`` owns is retained, because it is one; what it
     adds is the read, shaped by node type. It interprets nothing beyond grouping
-    the view's rows: whether a declaration applies to a record is :func:`offered`.
+    the view's rows: whether a declaration applies to a record, and what it binds
+    the record to, are :func:`offered` and :func:`declared_fact`.
     """
 
     def declarations(self, ctx: Any) -> dict[str, dict[str, Any]]:
@@ -198,8 +207,9 @@ def interacted_declaration(
     its type's ``text_click`` declaration; a pressed control names the button or
     panel control its type declares under that ``action_key``. Either applies only
     where :func:`offered` says it does in the record's state (``actionable_in``),
-    so a control never offered for this record matches nothing. Nothing here
-    binds, signs or opens anything.
+    so a control never offered for this record matches nothing. What the matched
+    declaration binds the record to is :func:`declared_fact`'s; nothing here signs
+    or opens anything.
 
     Args:
         declarations: Every node type's declarations
@@ -225,3 +235,71 @@ def interacted_declaration(
         return clicked if offered(clicked, state) else None
     return None
 
+
+def declared_fact(
+    declared: Mapping[str, Any], record: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The identity one declaration binds one record to, as an unsigned plain fact.
+
+    The declaration's ``target`` names a kind, the record column each of its
+    ``fields`` is read from, and values it states outright -- which may name record
+    fields inside them as ``{"$field": "<column>"}`` (#1143), read here so the fact
+    holds values and no reference. A column reading wins over a stated value of
+    the same name: the row is the more specific answer.
+
+    Returns:
+        ``{"kind": ..., ...}``, or None when the declaration names no target.
+
+    Raises:
+        ConfigError: When a field reference names a column the record lacks.
+    """
+    target = declared.get("target") or {}
+    fields = target.get("fields") or {}
+    if not target.get("kind") or not (fields or _references_a_field(target)):
+        return None
+    return {
+        "kind": target["kind"],
+        **{name: _bound(value, record) for name, value in target.items()
+           if name not in ("kind", "fields")},
+        **{field: record.get(column) for field, column in fields.items()},
+    }
+
+
+def _is_field_reference(value: Any) -> bool:
+    """Whether a declared value is a field reference: exactly ``{"$field": <string>}``."""
+    return (isinstance(value, dict) and set(value) == {FIELD_REFERENCE}
+            and isinstance(value[FIELD_REFERENCE], str))
+
+
+def _references_a_field(value: Any) -> bool:
+    """Whether a declared value names a record field anywhere inside it."""
+    if _is_field_reference(value):
+        return True
+    if isinstance(value, dict):
+        return any(_references_a_field(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_references_a_field(item) for item in value)
+    return False
+
+
+def _bound(value: Any, record: Mapping[str, Any]) -> Any:
+    """A declared value with each field reference in it read from the record (#1143).
+
+    Only an object that is exactly ``{"$field": "<column>"}`` is a reference.
+    Objects and lists are walked; every other value is returned as stated. No
+    dotted paths, defaults, expressions, interpolation or templating.
+
+    Raises:
+        ConfigError: When a reference names a column the record does not have.
+    """
+    if _is_field_reference(value):
+        column = value[FIELD_REFERENCE]
+        if column not in record:
+            raise ConfigError(f"The declaration names the record field '{column}', "
+                              "which this record does not have.")
+        return record[column]
+    if isinstance(value, dict):
+        return {key: _bound(item, record) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_bound(item, record) for item in value]
+    return value
