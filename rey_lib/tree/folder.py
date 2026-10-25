@@ -169,4 +169,7 @@ class FileDataObject:
             # columns; nothing here says which action they are for.
             "root": root,
             "relative_path": entry.get("path"),
+            # The row's tree.subject_panel key (#1240): a file opens as a file; a
+            # directory opens nothing.
+            **({} if directory else {"subject_key": "file"}),
         }

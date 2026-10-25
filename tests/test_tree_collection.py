@@ -159,6 +159,18 @@ def test_a_member_s_published_node_type_is_its_own() -> None:
         ("AI", "ai_application"), ("Loader", "application")]
 
 
+def test_an_opening_member_s_row_carries_its_subject_key() -> None:
+    """#1240: the row data holds its tree.subject_panel key; a tool's row holds none."""
+    members = [
+        {"id": "ai_app", "label": "AI", "node_type": "ai_application", "application_id": "ai_app"},
+        {"id": "rey_loader", "label": "Loader", "node_type": "", "application_id": "rey_loader"},
+    ]
+
+    made = CollectionDataObject().children(object(), APPLICATION_ROOT, members)
+
+    assert [record["subject_key"] for record in made] == ["ai", "application.settings"]
+
+
 def test_tools_are_one_more_collection_and_not_one_more_object() -> None:
     """Same object, same two methods, told a different name to read."""
     made = CollectionDataObject().children(object(), TOOL_ROOT, TOOLS)
@@ -193,15 +205,31 @@ def _application(name: str) -> Any:
     )[0]
 
 
+#: The installation a configuration load names (ctx.installation).
+_LOCAL = SimpleNamespace(name="local")
+
+
 class TestTheTreeProjects:
     """It projects the objects, and normalizes nothing."""
 
     def test_applications_come_from_the_built_objects(self) -> None:
         rows = collection.configured_applications(SimpleNamespace(
-            applications=(_application("alpha"), _application("beta")),
+            applications=(_application("alpha"), _application("beta")), installation=_LOCAL,
         ))
 
         assert [row["id"] for row in rows] == ["alpha", "beta"]
+
+    def test_each_application_carries_the_installation_the_context_is(self) -> None:
+        """#1141: the installation-scoped opening reads it from the record."""
+        rows = collection.configured_applications(SimpleNamespace(
+            applications=(_application("ai_app"),), installation=_LOCAL,
+        ))
+
+        assert [row["installation"] for row in rows] == ["local"]
+
+    def test_a_context_naming_no_installation_is_a_fault(self) -> None:
+        with pytest.raises(ConfigError, match="ctx.installation is missing"):
+            collection.configured_applications(SimpleNamespace(applications=()))
 
     def test_the_published_node_type_is_projected_unchanged(self) -> None:
         declared = [{"name": "alpha", "app_path": "/apps/alpha", "entry_point": "main.py",
@@ -211,7 +239,7 @@ class TestTheTreeProjects:
                                    registrations={"alpha": published})[0]
 
         rows = collection.configured_applications(SimpleNamespace(
-            applications=(alpha, _application("beta")),
+            applications=(alpha, _application("beta")), installation=_LOCAL,
         ))
 
         assert [row["node_type"] for row in rows] == ["ai_application", ""]
@@ -252,7 +280,7 @@ def test_the_projection_asks_the_owner(
     asked: list[Any] = []
     monkeypatch.setattr(collection, owner, lambda given: asked.append(given) or [])
 
-    getattr(collection, projection)(SimpleNamespace())
+    getattr(collection, projection)(SimpleNamespace(installation=_LOCAL))
 
     assert len(asked) == 1, f"{projection} did not call {owner}"
 

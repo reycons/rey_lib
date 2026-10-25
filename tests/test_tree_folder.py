@@ -277,3 +277,11 @@ def test_rey_lib_implements_the_folder_source() -> None:
         FOLDER_SOURCE, DATABASE_SOURCE, JSONL_SOURCE, APPLICATION_SOURCE, TOOL_SOURCE,
     }
     assert isinstance(sources[FOLDER_SOURCE], FileDataObject)
+
+
+def test_a_file_row_carries_its_subject_key_and_a_directory_row_none(asked) -> None:
+    """#1240: the row data holds its tree.subject_panel key; a directory opens nothing."""
+    directory, file = FileDataObject().children(object(), PLACE)
+
+    assert file["subject_key"] == "file"
+    assert "subject_key" not in directory

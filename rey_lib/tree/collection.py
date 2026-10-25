@@ -57,8 +57,11 @@ def configured_applications(ctx: Any) -> list[dict[str, Any]]:
 
     A projection of ``ctx.applications`` -- the objects the config load built,
     which own the enabled filtering and the shape the declaration had to be in.
-    Nothing is normalized, enriched or filtered here.
+    Nothing is normalized, enriched or filtered here. Each record carries the
+    installation the context is (``ctx.installation.name``), the identity an
+    opening of an installation-scoped subject binds (#1141: the installation's AI).
     """
+    installation = _ctx_installation(ctx)
     return [
         {
             "id": row.name,
@@ -73,9 +76,27 @@ def configured_applications(ctx: Any) -> list[dict[str, Any]]:
             # Published by the application, as its icon is (backlog 1098):
             # which node type its node is. Carried, never chosen here.
             "node_type": row.node_type,
+            # The installation this context is: carried, never chosen here.
+            "installation": installation,
         }
         for row in _ctx_applications(ctx)
     ]
+
+
+def _ctx_installation(ctx: Any) -> str:
+    """The installation the context is, as the config load named it.
+
+    Raises:
+        ConfigError: When the context names no installation: it was not built by
+            the configuration load.
+    """
+    name = str(getattr(getattr(ctx, "installation", None), "name", "") or "")
+    if not name:
+        raise ConfigError(
+            "ctx.installation is missing: the installation is named by the "
+            "configuration load, so a context without it was not built by it."
+        )
+    return name
 
 
 def _ctx_applications(ctx: Any) -> tuple[Any, ...]:
@@ -109,6 +130,14 @@ def configured_tools(ctx: Any) -> list[dict[str, Any]]:
         {"id": tool.name, "label": tool.label}
         for tool in ToolRegistry.from_configuration(ctx.tools).all_tools()
     ]
+
+#: The tree.subject_panel key each opening member's row carries (#1240), by its
+#: node type: an application opens as its settings; the installation's AI
+#: application opens as the AI (#1141 settled model). Other members open nothing.
+_MEMBER_SUBJECT_KEY: dict[str, str] = {
+    "application": "application.settings",
+    "ai_application": "ai",
+}
 
 #: Which boundary answers for each collection. The whole of what this object
 #: supports: a name absent here is refused, not improvised.
@@ -200,11 +229,12 @@ class CollectionDataObject:
                 as.
             entry: The member, as the configured boundary normalized it.
         """
+        node_type = str(entry.get("node_type") or "") or _MEMBER_TYPE[collection]
         return {
             "row_type": "node",
             # What the member published, or what its collection's members are:
             # a published node type is the member's own (backlog 1098).
-            "node_type": str(entry.get("node_type") or "") or _MEMBER_TYPE[collection],
+            "node_type": node_type,
             "label": str(entry.get("label") or entry.get("id") or ""),
             # What the member published, or the mark its collection is known
             # by. The fallback is the SEMANTIC icon rather than nothing: an
@@ -217,6 +247,8 @@ class CollectionDataObject:
             "tree_object_key": None,
             "tree_configuration": {},
             **self._identity(collection, entry),
+            **({"subject_key": _MEMBER_SUBJECT_KEY[node_type]}
+               if node_type in _MEMBER_SUBJECT_KEY else {}),
         }
 
     def _identity(self, collection: str, entry: dict[str, Any]) -> dict[str, Any]:

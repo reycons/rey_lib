@@ -357,6 +357,8 @@ class DatabaseDataObject:
                 "connection": configured.get("connection"),
                 "catalog": entry.get("catalog"),
                 "schema": entry.get("name"),
+                # The row's tree.subject_panel key (#1240): a schema opens as its map.
+                "subject_key": "schema.map",
             }
             for entry in (state or {}).get("schemas") or []
             if not catalog or str(entry.get("catalog") or "") == catalog
@@ -462,6 +464,9 @@ class DatabaseDataObject:
             "tree_object_key": DATABASE_SOURCE,
             "tree_configuration": self._addressed(configured, entry, collection),
             **self._identity(entry),
+            # The row's tree.subject_panel key (#1240): what this object opens as.
+            **({"subject_key": f"database.{_MEMBER_TYPE[collection]}"}
+               if collection in _MEMBER_TYPE else {}),
         }
 
     # -- what an object is made of ----------------------------------------------

@@ -703,3 +703,14 @@ def test_a_routine_record_carries_its_signature_as_identity() -> None:
         "connection": "rey_apps", "schema_name": "control", "name": "load",
         "signature": "integer",
     }
+
+
+def test_an_object_row_and_a_schema_row_carry_their_subject_keys() -> None:
+    """#1240: the row data holds its tree.subject_panel key."""
+    table = DatabaseDataObject().children(
+        object(), scoped(catalog="rey_apps", schema="tree", collection="tables"), SCHEMA_OBJECTS,
+    )[0]
+    schema = DatabaseDataObject().children(object(), scoped(catalog="rey_apps"), SNAPSHOT)[0]
+
+    assert table["subject_key"] == "database.table"
+    assert schema["subject_key"] == "schema.map"
