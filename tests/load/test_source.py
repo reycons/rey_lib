@@ -143,6 +143,41 @@ class TestTheDeclarativeForm:
         assert declared == {"selected": None, "values": {"file": "/a.csv"}}
 
 
+class TestItsLiveQuery:
+    """#1151: what a reader runs is the Source's own statement on its own connection."""
+
+    def test_a_database_source_runs_its_statement_on_its_connection(
+        self, connections: list[str],
+    ) -> None:
+        source = Source({"source-connection": "file_reader",
+                         "statement": "select * from read_csv('f.csv')"}, selected="database")
+
+        query = source.query(SimpleNamespace())
+
+        assert query.statement == "select * from read_csv('f.csv')"
+        assert query.connection.handle() == "handle:file_reader"
+        assert connections == ["file_reader"]
+
+    def test_an_edit_is_what_the_next_query_runs(self, connections: list[str]) -> None:
+        source = Source({"source-connection": "warehouse", "statement": "select 1"},
+                        selected="database")
+
+        source.update("statement", "select 2")
+
+        assert source.query(SimpleNamespace()).statement == "select 2"
+
+    def test_a_source_with_no_connection_is_refused(self, connections: list[str]) -> None:
+        source = Source({"statement": "select 1"}, selected="database")
+
+        with pytest.raises(ConfigError, match="statement and its connection"):
+            source.query(SimpleNamespace())
+        assert connections == []
+
+    def test_a_file_source_runs_no_statement(self) -> None:
+        with pytest.raises(ConfigError, match="only a database Source"):
+            Source({"file": "/nowhere/a.csv"}).query(SimpleNamespace())
+
+
 class TestResolution:
 
     def test_a_file_resolves_to_a_data_file_without_reading_it(self) -> None:
@@ -270,6 +305,10 @@ class TestItsSnapshot:
         assert set(SOURCE_FIELD_METADATA) == set(SOURCE_FIELDS)
         for name, found in SOURCE_FIELD_METADATA.items():
             assert found["value_type"] and found["description"], name
+
+    def test_its_connection_says_it_is_a_connection(self) -> None:
+        """#1151 row 1: the domain value it holds -- not how it is drawn."""
+        assert SOURCE_FIELD_METADATA["source-connection"]["value_type"] == "connection"
 
     def test_file_type_is_offered_the_data_formats_of_files_one_registry(self) -> None:
         """Read from DataFile.formats() (#1133), never a second list."""

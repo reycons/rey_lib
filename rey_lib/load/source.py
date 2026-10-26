@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from rey_lib.db.connection import shared_connection
+from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.data_file import DataFile
@@ -110,8 +111,10 @@ SOURCE_FIELD_METADATA: dict[str, dict[str, str]] = {
         "description": "The file type to work within, where type-level configuration is "
                        "being edited. Omit it to open the file without a governing scope.",
     },
+    # A CONNECTION, SAID BY THE VOCABULARY: the value names one of the configured
+    # connections. What a surface offers for it, and how, is the surface's.
     "source-connection": {
-        "value_type": "choice",
+        "value_type": "connection",
         "description": "The connection the SOURCE statement runs on. The destination has "
                        "its own, and they may differ.",
     },
@@ -504,6 +507,32 @@ class Source:
         self.observe_governed_context(self._manifest.governed_context())
 
     # -- execution -----------------------------------------------------------
+
+    def query(self, ctx: Any) -> DatabaseQuery:
+        """This Source's statement as a live query on its own connection (#1151).
+
+        What a reader runs while writing the Source's statement: the statement and
+        the connection are this Source's own fields, so what is run is what the load
+        reads. Built from them on each call and handed back, never kept -- as
+        ``resolve`` -- so the Source stays the one holder of both.
+
+        Args:
+            ctx: The runtime context, for the configured connections.
+
+        Raises:
+            ConfigError: When this Source is not a database Source, or names no
+                statement or no connection.
+        """
+        with self._acting:
+            kind = self.selected_kind()
+            statement = str(self.value("statement") or "")
+            connection = str(self.value("source-connection") or "")
+        if kind != "database":
+            raise ConfigError(f"Source ({kind}): only a database Source runs its statement.")
+        if not statement.strip() or not connection:
+            raise ConfigError("Source (database): a statement and its connection are needed "
+                              "to run it.")
+        return DatabaseQuery(statement, connection=shared_connection(ctx, connection))
 
     def resolve(
         self,

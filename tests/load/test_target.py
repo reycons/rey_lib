@@ -343,6 +343,7 @@ class TestItsSnapshot:
             "field_metadata": TARGET_FIELD_METADATA,
             "write_policy": "replace",
             "modes": ["create", "replace", "recreate", "append"],
+            "modes_kind": "database",
         }
 
     def test_every_field_states_what_it_is(self) -> None:
@@ -350,3 +351,16 @@ class TestItsSnapshot:
         assert set(TARGET_FIELD_METADATA) == set(TARGET_FIELDS)
         for name, found in TARGET_FIELD_METADATA.items():
             assert found["value_type"] and found["description"], name
+
+    def test_its_connection_and_table_say_what_they_are(self) -> None:
+        """#1151 rows 1-2: the domain value each field holds -- not how it is drawn."""
+        assert TARGET_FIELD_METADATA["connection"]["value_type"] == "connection"
+        assert TARGET_FIELD_METADATA["table"]["value_type"] == "table"
+        assert TARGET_FIELD_METADATA["out-file"]["value_type"] == "path"
+
+    def test_the_modes_are_said_to_belong_to_the_kind_whose_fields_they_are(self) -> None:
+        """#1151 row 3: the Target, not a surface, associates its modes with a kind."""
+        shown = Target({"out-file": "/out.csv"}).projection(SimpleNamespace())
+
+        assert shown["modes_kind"] == "database"
+        assert set(shown["modes"]) <= set(shown["fields"][shown["modes_kind"]])

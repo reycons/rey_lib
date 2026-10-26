@@ -435,6 +435,14 @@ class TestTheCompletedView:
 
         assert "observed_col" not in json.dumps(transform.declaration())
 
+    def test_it_projects_the_output_datatypes_a_column_may_declare(self) -> None:
+        """#1151: the Transform's own constraint on a column's datatype, in its order."""
+        from rey_lib.data.column_transform import OUTPUT_DATATYPES
+
+        projection = _authoring("a").projection(SimpleNamespace())
+
+        assert projection["datatypes"] == list(OUTPUT_DATATYPES)
+
 
 class TestEditingOneField:
 
@@ -1559,6 +1567,23 @@ class TestItsSnapshot:
             SimpleNamespace(), Source({"file": str(self._csv(tmp_path))}),
             {"selected": "manifest", "values": deepcopy_values(self._STORED)},
         )
+
+    def test_it_says_which_of_its_kinds_author_a_column_mapping(self, tmp_path: Path) -> None:
+        """#1151 row 4: the kinds that keep a declaration here map columns; no surface decides."""
+        shown = self._stored(tmp_path).projection(SimpleNamespace())
+
+        assert shown["mapping_kinds"] == ["declaration", "http", "manifest"]
+        assert {"identity", "yaml"}.isdisjoint(shown["mapping_kinds"])
+
+    def test_it_says_which_fields_choose_the_request_a_kind_carries(self, tmp_path: Path) -> None:
+        """#1151: the field that chooses the HTTP operation, never one its settings write."""
+        shown = self._stored(tmp_path).projection(SimpleNamespace())
+
+        assert shown["request_fields"]["http"] == ["http-adapter"]
+        assert all(not fields for kind, fields in shown["request_fields"].items()
+                   if kind != "http")
+        # Not a form field of its kind: it is drawn with its request.
+        assert "http-adapter" not in shown["fields"]["http"]
 
     def test_one_read_of_its_source_and_one_completion(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

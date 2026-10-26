@@ -55,6 +55,7 @@ from typing import Any, Mapping, Optional
 
 from rey_lib.config.config_loader import parse_yaml
 from rey_lib.data.column_transform import (
+    OUTPUT_DATATYPES,
     TransformPersistence,
     authorable_starters,
     choice_for,
@@ -1283,12 +1284,25 @@ class Transform:
                     choice_options((_rule_and_choice(entry)[0] or {}).get("type"))
                     for entry in columns
                 ],
+                # THE OUTPUT DATATYPES AN ENTRY MAY DECLARE (#1151): the Transform's
+                # own constraint on its columns' datatype, in published order.
+                "datatypes": list(OUTPUT_DATATYPES),
                 # HOW EACH ENTRY'S RULE IS AUTHORED, as its TransformChoice states it.
                 "column_settings": self._settings(columns),
                 # WHERE A PREVIEW WOULD SEND RECORDS, or None.
                 "outbound": self.outbound(PREVIEW_ROWS),
                 # ITS OWN HTTP STATE AND OFFER (backlog 829).
                 "http_request": self.http_request(),
+                # WHICH OF ITS KINDS AUTHOR A COLUMN MAPPING (#1151 row 4), in its
+                # kinds' order: the ones that keep a declaration here.
+                "mapping_kinds": [kind for kind in self.kinds() if kind in _AUTHORED_IN],
+                # WHICH FIELDS CHOOSE THE REQUEST A KIND CARRIES (#1151): those drawn
+                # with its request, less the one its request settings write.
+                "request_fields": {
+                    kind.id: [name for name in kind.fields
+                              if name in _DRAWN_IN_REQUEST and name != _HTTP_REQUEST]
+                    for kind in TRANSFORM_KINDS
+                },
                 "choices": self.choices(),
                 "field_operations": self.field_operations(),
                 # WHAT IT CAN DO BEYOND ITS EDITS.

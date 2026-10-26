@@ -69,6 +69,9 @@ TARGET_KINDS: tuple[_Kind, ...] = (
     _Kind("file", ("out-file",), ("out-file",)),
 )
 
+#: The kind the write modes belong to: the one whose fields carry them.
+_MODES_KIND: str = next(kind.id for kind in TARGET_KINDS if set(MODES) <= set(kind.fields))
+
 #: Every field a Target holds, across its kinds.
 TARGET_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     name for kind in TARGET_KINDS for name in kind.fields
@@ -82,12 +85,14 @@ TARGET_PARAMETERS: tuple[str, ...] = TARGET_FIELDS
 #: facts: the projection carries them and the loader's CLI declaration reads
 #: them (#1151). No placeholder is a real answer.
 TARGET_FIELD_METADATA: dict[str, dict[str, str]] = {
+    # A CONNECTION and a TABLE, said by the vocabulary as what each value IS --
+    # how a surface draws either is the surface's (as "path" already is).
     "connection": {
-        "value_type": "choice",
+        "value_type": "connection",
         "description": "The connection the DESTINATION is reached through.",
     },
     "table": {
-        "value_type": "string", "placeholder": "schema.table",
+        "value_type": "table", "placeholder": "schema.table",
         "description": "The destination, as schema.table.",
     },
     "create": {
@@ -275,6 +280,8 @@ class Target:
                                    for name, found in TARGET_FIELD_METADATA.items()},
                 "write_policy": self.write_policy(),
                 "modes": list(MODES),
+                # WHICH KIND THE MODES ARE OF: the one whose fields they are.
+                "modes_kind": _MODES_KIND,
             }
 
     # -- changing ------------------------------------------------------------
