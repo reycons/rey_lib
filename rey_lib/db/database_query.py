@@ -222,6 +222,59 @@ class DatabaseQuery:
                 "connection": self.connection.name if self.connection is not None else None,
             }
 
+    def lint(self, ctx: Any) -> dict[str, Any]:
+        """This query's current statement, formatted and checked by the artifact engine.
+
+        DELEGATES, owns no rule: the installation's configured artifact engine
+        (``rey_lib.artifacts``, SQLFluff) formats the statement, and the findings are
+        what it could NOT resolve -- positioned against the formatted text, which is
+        therefore the document they belong to (#1252; the Console's deleted
+        ``lint_sql_text``, now an operation of the live query).
+
+        READ-ONLY: answers and changes nothing. The formatted text reaches this query
+        only through an ordinary ``update``. Nothing in ``execute`` formats or lints.
+
+        Args:
+            ctx: The runtime context, whose artifact configuration the engine reads.
+
+        Returns:
+            ``{"formattedSql", "diagnostics"}`` -- or only ``{"diagnostics": []}`` for
+            an empty statement.
+
+        Raises:
+            ArtifactProcessingError: When the engine refuses; left to the caller's
+                failure boundary.
+        """
+        # Imported here: the artifact engine is a consumer of this layer's text,
+        # not a dependency of the query.
+        from rey_lib.artifacts import artifact_config_from_ctx, lint_artifact, process_artifact
+
+        with self._acting:
+            sql = self.text()
+        if not sql.strip():
+            return {"diagnostics": []}
+        config = artifact_config_from_ctx(ctx)
+        formatted_sql = process_artifact(sql, "sql", config)
+        findings = lint_artifact(formatted_sql, "sql", config)
+        return {
+            "formattedSql": formatted_sql,
+            "diagnostics": [
+                {
+                    "message": str(item.get("message") or "SQL lint finding"),
+                    "severity": str(item.get("severity") or "warning"),
+                    "startLine": int(item.get("start_line") or 1),
+                    "startColumn": int(item.get("start_column") or 1),
+                    "endLine": int(item.get("end_line") or item.get("start_line") or 1),
+                    "endColumn": int(
+                        item.get("end_column") or (int(item.get("start_column") or 1) + 1)
+                    ),
+                    "code": str(item.get("code") or ""),
+                    "source": str(item.get("source") or "sql-lint"),
+                }
+                for item in findings
+            ],
+        }
+
     def execute(self) -> dict[str, Any]:
         """Execute this query as its own state says, on its connection.
 

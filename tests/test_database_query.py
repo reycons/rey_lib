@@ -79,7 +79,9 @@ def test_it_offers_the_four_ways_to_run_and_the_live_query_and_holds_no_sql() ->
     assert public - {
         "statement", "params", "connection", "pageable", "rows_per_page", "current_page",
         "order_by", "filters",
-    } == {"rows", "run", "page", "read", "act", "text", "update", "projection", "execute"}
+    } == {"rows", "run", "page", "read", "act", "text", "update", "projection", "execute",
+          # Its statement, linted by the artifact engine; read-only (#1252).
+          "lint"}
     for sql in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert sql not in code, sql
 
@@ -374,3 +376,73 @@ class TestTheLiveQuery:
             query.connection = _Connection()  # type: ignore[assignment]
         with pytest.raises(DatabaseError, match=refusal):
             query.execute()
+
+
+# -- linting the live query's statement (#1252) -------------------------------------
+
+
+class TestItsLint:
+    """The query offers a lint of its current statement, delegated to the artifact engine."""
+
+    @staticmethod
+    def _engine(monkeypatch: pytest.MonkeyPatch, findings: list[dict[str, Any]]) -> list[tuple]:
+        import rey_lib.artifacts as artifacts
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(artifacts, "artifact_config_from_ctx", lambda ctx: {"sql": "cfg"})
+        monkeypatch.setattr(artifacts, "process_artifact",
+                            lambda sql, kind, config: calls.append(("format", sql, kind, config))
+                            or sql.upper())
+        monkeypatch.setattr(artifacts, "lint_artifact",
+                            lambda sql, kind, config: calls.append(("lint", sql, kind, config))
+                            or findings)
+        return calls
+
+    def test_it_formats_through_the_engine_and_reports_against_the_formatted_text(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = self._engine(monkeypatch, [{
+            "message": "Found unparsable section", "severity": "error", "start_line": 2,
+            "start_column": 3, "end_line": 2, "end_column": 8, "code": "PRS",
+            "source": "sqlfluff",
+        }])
+        query = DatabaseQuery("select a from t")
+
+        answered = query.lint(object())
+
+        assert calls == [("format", "select a from t", "sql", {"sql": "cfg"}),
+                         ("lint", "SELECT A FROM T", "sql", {"sql": "cfg"})]
+        assert answered == {"formattedSql": "SELECT A FROM T", "diagnostics": [{
+            "message": "Found unparsable section", "severity": "error", "startLine": 2,
+            "startColumn": 3, "endLine": 2, "endColumn": 8, "code": "PRS",
+            "source": "sqlfluff",
+        }]}
+
+    def test_it_changes_nothing_on_the_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._engine(monkeypatch, [])
+        query = DatabaseQuery("select a from t")
+
+        query.lint(object())
+
+        assert query.statement == "select a from t"
+
+    def test_an_empty_statement_has_nothing_to_lint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._engine(monkeypatch, [])
+
+        assert DatabaseQuery("  ").lint(object()) == {"diagnostics": []}
+        assert calls == []
+
+    def test_an_engine_refusal_reaches_the_caller_unwrapped(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import rey_lib.artifacts as artifacts
+        from rey_lib.artifacts import ArtifactProcessingError
+
+        self._engine(monkeypatch, [])
+
+        def refuse(sql: str, kind: str, config: Any) -> str:
+            raise ArtifactProcessingError("engine refused")
+
+        monkeypatch.setattr(artifacts, "process_artifact", refuse)
+        with pytest.raises(ArtifactProcessingError, match="engine refused"):
+            DatabaseQuery("select 1").lint(object())
