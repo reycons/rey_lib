@@ -39,6 +39,7 @@ either is written down.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -48,6 +49,21 @@ from rey_lib.encryption import sha256_file
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 __all__ = ["FileManifest", "InventoryOutcome", "MutationDestination"]
+
+
+def _require_manifest_reader(reader: Any) -> None:
+    """Refuse a reader that does not offer the manifest retrieval contract.
+
+    By name, here, rather than as an AttributeError at the call: a reader
+    written against the retired single-file contract (file_source_context)
+    would otherwise fail somewhere less informative.
+    """
+    if not callable(getattr(reader, "get_file_manifests", None)):
+        raise ConfigError(
+            f"ManifestSource: the reader {type(reader).__name__} does not offer "
+            "get_file_manifests, the governed manifest retrieval contract "
+            "(control.f_file_manifest_get)."
+        )
 
 
 @dataclass(frozen=True)
@@ -331,6 +347,94 @@ class FileManifest:
             source_name=source_name or None, file_name=file_name or None,
             limit=limit,
         )
+
+    @staticmethod
+    def get_for_operation(
+        reader: Any,
+        installation_id: int,
+        operation: str,
+        source_name: Optional[str] = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Every governed file remaining for one operation, one row set per file.
+
+        **ONE control call for the whole set** (backlog 619). The database
+        decides which files remain for the operation, at which mutation, in
+        which installation and source, and excludes kicked-out files; nothing
+        here filters, re-selects or orders what came back.
+
+        Each row set is one governed file at one working mutation. The rows
+        arrive ordered by manifest then mutation, so a file's rows are
+        contiguous; they are grouped by ``file_mutation_id`` in arrival order.
+
+        Args:
+            reader: Whatever answers the manifest retrieval contract.
+            installation_id: The installation whose files these are.
+            operation: The operation the files are wanted for, e.g.
+                ``file_sanitization``. The routine refuses one it does not know.
+            source_name: Narrows the set to one declared source, or None.
+
+        Returns:
+            One row set per selected file, in the routine's order; an empty list
+            when nothing remains.
+        """
+        _require_manifest_reader(reader)
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in reader.get_file_manifests(
+            installation_id=installation_id,
+            operation=operation,
+            source_name=source_name,
+        ):
+            grouped.setdefault(int(row["file_mutation_id"]), []).append(dict(row))
+        return list(grouped.values())
+
+    @staticmethod
+    def working_file_name(rows: Any) -> Optional[str]:
+        """The working mutation's file name: the last segment of its path.
+
+        NOT the manifest's ``file_name``, which is fixed when the file is
+        inventoried. A conversion or a move gives the working mutation a path of
+        its own -- an Excel sheet's CSV, a sanitized copy -- and this is that
+        path's name, by the rule the file selectors applied
+        (regexp_replace(path, '^.*/', '')).
+        """
+        path = rows[0]["path"]
+        if not path:
+            return None
+        return re.sub(r"^.*/", "", path)
+
+    @staticmethod
+    def working_base_name(rows: Any) -> Optional[str]:
+        """The working file name without its last extension.
+
+        The selectors' rule exactly -- regexp_replace(name, '\\.[^.]*$', '') --
+        not ``Path.stem``, which keeps a leading-dot name whole.
+        """
+        name = FileManifest.working_file_name(rows)
+        if name is None:
+            return None
+        return re.sub(r"\.[^.]*$", "", name)
+
+    @staticmethod
+    def template_context(rows: Any) -> dict[str, Any]:
+        """The fields a configured destination template may name.
+
+        ``<file_name>`` and ``<base_name>`` are the WORKING names, as they were
+        on the selector row a step used to resolve its templates against;
+        ``<base_path>`` and ``<classification.*>`` are the file's current
+        classification. Facts of what the file IS, read once with the context.
+        """
+        first = rows[0]
+        return {
+            "file_manifest_id": int(first["file_manifest_id"]),
+            "file_mutation_id": int(first["file_mutation_id"]),
+            "path": first["path"],
+            "file_name": FileManifest.working_file_name(rows),
+            "base_name": FileManifest.working_base_name(rows),
+            "base_path": first.get("base_path"),
+            "classification": first.get("classification"),
+            "record_type": first.get("record_type"),
+            "conversion": first.get("conversion"),
+        }
 
     def list_files(self) -> list[dict[str, Any]]:
         """Return every current file, in order.

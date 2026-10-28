@@ -94,6 +94,30 @@ _TOKEN_FORMATS: dict[str, str] = {
 _FORMATS: dict[str, type["File"]] = {}
 _DISCOVERED = False
 
+#: File facts the contract returns, carried as read-only context.
+#:
+#: Named rather than "every column that is not something else": a list that
+#: absorbed whatever arrived would silently acquire meaning from a contract
+#: change nobody read.
+_FILE_FACTS: tuple[str, ...] = (
+    "base_path", "file_name", "file_extension", "checksum_sha256",
+    "size_bytes", "source_name", "record_type", "action", "status",
+    "result", "mutated_ts", "classification", "is_classified",
+    "file_type_key", "file_type_name", "signature", "type_header_definition",
+    "key_fields", "filename_match", "data_profile_key", "profile_row_count",
+    # The working mutation's conversion provenance -- sanitize reads its
+    # operator to tell an Excel-generated CSV from a delivered one -- and the
+    # MANIFEST's data profile key, which profiling builds on. Not the
+    # same-named data_profile_key above: that is the file type's profile and
+    # is empty until a profile exists (backlog 619).
+    "conversion", "manifest_data_profile_key",
+    # The ORIGINAL file (backlog 624): where it was inventoried -- its inbox is
+    # that path's directory -- and where it physically is now, at which state.
+    # Carried on the DataFile so a failing operation can move the original
+    # without reaching back here.
+    "manifest_path", "original_path", "original_mutation_id",
+)
+
 
 def file_format(*file_types: str) -> Callable[[type["File"]], type["File"]]:
     """Register the decorated File subclass as the format these tokens name.
@@ -234,6 +258,68 @@ class File:
         resolved = _FORMATS.get(token, File)(source, **facts)
         resolved._format = File._format_of(token, source.suffix)
         return resolved
+
+    @classmethod
+    def file(cls, rows: Any, **settings: Any) -> File:
+        """The governed File for one governed file's rows, at their working path.
+
+        **The declared layout WINS over the suffix**, exactly as a configured
+        load's declared ``file_type`` does -- ``ConfiguredLoad.data_file_for``
+        is the same shape, and for the same reason: the estate has already said
+        what this file is, so nothing guesses from a name. Built through
+        ``cls.for_path``, so ``DataFile.file`` resolves through
+        ``DataFile.for_path`` and refuses a file with no record semantics.
+
+        Args:
+            rows: One governed file's rows, as ``FileManifest.get_for_operation``
+                answers them; the file-level values repeat on every row.
+            settings: Format-specific settings for the subtype, passed through
+                untouched.
+
+        Returns:
+            The registered subtype for this file's format.
+
+        Raises:
+            DataStructureError: Where the context resolved no path. A file
+                object over an unknown path could only fail later and somewhere
+                less informative.
+        """
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415
+
+        first = rows[0]
+        file_manifest_id = int(first["file_manifest_id"])
+        path = first["path"]
+        layout = first["layout"]
+        file_facts = {name: first[name] for name in _FILE_FACTS if name in first}
+        if not path:
+            raise DataStructureError(
+                f"ManifestSource: manifest {file_manifest_id} resolved no "
+                f"working path, so there is no file to open."
+            )
+        # NO READ HAPPENS HERE. A DataFile is built over a path; opening it is
+        # the caller's, which is what keeps this object out of the filesystem.
+        #
+        # THE GOVERNED IDENTITY OF EXACTLY THIS STATE: the mutation these rows
+        # were selected at, and the classification and base_path they carry.
+        # Which state that is was the caller's selection, made before this.
+        manifest_path = file_facts.get("manifest_path")
+        return cls.for_path(
+            Path(path), file_type=layout or "",
+            file_manifest_id=file_manifest_id,
+            file_mutation_id=int(first["file_mutation_id"]),
+            classification=file_facts.get("classification"),
+            base_path=file_facts.get("base_path"),
+            # The original file's facts (backlog 624), from the same rows.
+            inbox=str(Path(manifest_path).parent) if manifest_path else None,
+            original_path=file_facts.get("original_path"),
+            original_mutation_id=file_facts.get("original_mutation_id"),
+            # What the selected state is, and the file's profile group
+            # (backlog 630): the facts kinds used to read off a template row.
+            record_type=file_facts.get("record_type"),
+            conversion=file_facts.get("conversion"),
+            data_profile_key=file_facts.get("manifest_data_profile_key"),
+            **settings,
+        )
 
     @staticmethod
     def type_for_suffix(suffix: str) -> str:

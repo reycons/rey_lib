@@ -80,8 +80,9 @@ from rey_lib.files.file_loader import (
     resolve_pattern,
 )
 from rey_lib.files.file_routing import FileRoutingError
+from rey_lib.files.file_transform import MoveTransform
 from rey_lib.load.configured_load import ConfiguredLoad as _ConfiguredLoad
-from rey_lib.load.mutation_context import (
+from rey_lib.files.mutation_context import (
     build_mutation_context,
     log_governed_source_file_mutation,
 )
@@ -190,9 +191,6 @@ def _route_file(
     if file_path is None:
         return
 
-    # Deferred: rey_lib.load.transform imports this module.
-    from rey_lib.load.transform import Transform
-
     # EVERY FILE MOVE IS Transform(kind="move") (rule 78, backlog 624): a
     # configured move is a plain move of this ungoverned file to the path its
     # data source names. A delete is not a move and stays the movement
@@ -209,10 +207,9 @@ def _route_file(
             _logger.debug("Movement skipped -- source missing: %s", source_path)
             continue
         try:
-            Transform(
-                values={"route": str(destination), "operation": str(move.to)},
-                selected="move",
-            ).resolve(ctx).apply(File.for_path(source_path))
+            MoveTransform(
+                ctx, route=str(destination), operation=str(move.to),
+            ).apply(File.for_path(source_path))
         except (ConfigError, FileRoutingError, OSError) as exc:
             # Handled -- the next movement still runs -- so reported here (rule 79).
             error = exc if isinstance(exc, AppError) else FileRoutingError(

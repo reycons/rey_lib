@@ -64,7 +64,6 @@ from rey_lib.data.column_transform import (
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
-from rey_lib.load.file_transform import build_file_transform, file_kind, file_kinds
 from rey_lib.errors.error_utils import StateError
 from rey_lib.logs import AppLogger
 from rey_lib.web_utils.operation import HttpOperation
@@ -171,34 +170,9 @@ _DRAWN_IN_REQUEST = (_HTTP_ADAPTER, _HTTP_REQUEST)
 #: How a configured header is marked in the request shown.
 _CONFIGURED = "configured"
 
-# THE FILE-LEVEL KINDS -- what is done to a governed file rather than to its
-# records -- are a REGISTRY OF THEIR OWN (``rey_lib.load.file_transform``),
-# deliberately kept out of TRANSFORM_KINDS and :meth:`Transform.kinds`, which
-# are the record-transform choices a load is offered. One resolver still serves
-# both: :meth:`Transform.resolve` builds a ``FileTransform`` for a registered
-# file-level kind.
-
-
 def _kind_of(kind_id: str) -> Optional[_Kind]:
-    """The record kind, or the registered file-level kind, called ``kind_id``."""
-    if kind_id in _BY_ID:
-        return _BY_ID[kind_id]
-    registered = file_kind(kind_id)
-    if registered is None:
-        return None
-    return _Kind(registered.id, registered.fields, registered.required)
-
-
-def _is_file_kind(kind_id: str) -> bool:
-    """Whether ``kind_id`` is a registered file-level kind."""
-    return kind_id not in _BY_ID and file_kind(kind_id) is not None
-
-
-def _file_fields() -> tuple[str, ...]:
-    """Every field the registered file-level kinds hold."""
-    return tuple(dict.fromkeys(
-        name for kind in file_kinds() for name in kind.fields
-    ))
+    """The record kind called ``kind_id``."""
+    return _BY_ID.get(kind_id)
 
 #: The one field of one entry an edit may change, as ``edit_column`` names it.
 COLUMN_FIELDS: tuple[str, ...] = ("source", "name", "datatype", "export", "type", "transform")
@@ -488,10 +462,10 @@ class Transform:
             ValueError: If the field is not a Transform field. A source or a
                 destination setting handed to a transform is a wiring fault.
         """
-        if name not in TRANSFORM_FIELDS and name not in _file_fields():
+        if name not in TRANSFORM_FIELDS:
             raise ConfigError(
                 f"Transform: '{name}' is not a transform field. "
-                f"Fields: {', '.join((*TRANSFORM_FIELDS, *_file_fields()))}."
+                f"Fields: {', '.join(TRANSFORM_FIELDS)}."
             )
         if name == _HTTP_ADAPTER and self._in_http():
             self.select_http_operation(name, value)
@@ -622,7 +596,7 @@ class Transform:
         if _kind_of(kind) is None:
             raise ConfigError(
                 f"Transform: no transform kind is called '{kind}'. Kinds: "
-                f"{', '.join((*self.kinds(), *(one.id for one in file_kinds())))}."
+                f"{', '.join(self.kinds())}."
             )
         return kind
 
@@ -1342,11 +1316,6 @@ class Transform:
             )
         held = self.configuration()
         kind = self.selected_kind()
-        if _is_file_kind(kind):
-            raise ConfigError(
-                f"Transform ({kind}) is a file-level kind: it operates on a governed "
-                "file and has no record declaration."
-            )
         if kind == "identity":
             return None
         # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): the mapping the grid
@@ -1407,21 +1376,12 @@ class Transform:
             An ``IdentityTransform`` for ``identity``; a ``ColumnTransform`` for
             every other record kind, carrying its ``TransformPersistence`` where
             the configuration holds one; an ``HTTPTransform`` for ``http``
-            (``load_operation._build_http_transform``); a ``FileTransform`` for
-            a registered file-level kind (``rey_lib.load.file_transform``).
+            (``load_operation._build_http_transform``).
 
         Raises:
-            ConfigError: As :meth:`executed_declaration` refuses, or where a
-                file-level kind is incomplete.
+            ConfigError: As :meth:`executed_declaration` refuses.
         """
         kind = self.selected_kind()
-        if _is_file_kind(kind):
-            missing = self.validate(ctx)
-            if missing:
-                raise ConfigError(
-                    f"Transform ({kind}) is missing: {', '.join(missing)}."
-                )
-            return build_file_transform(ctx, kind, self.configuration())
         if kind == "http":
             declared = self.executed_declaration(ctx)
             # THE HELD OPERATION EXECUTES (backlog 837): the one selected, whose

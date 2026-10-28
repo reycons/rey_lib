@@ -55,14 +55,14 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
 from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
 from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile
-from rey_lib.files.file import File
+from rey_lib.files.file import File, _FILE_FACTS
+from rey_lib.files.manifest import FileManifest, _require_manifest_reader
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.errors.error_utils import StateError
@@ -99,21 +99,6 @@ class SourceContextReader(Protocol):
         operation -- is the routine's decision, never the caller's.
         """
         ...
-
-
-def _require_manifest_reader(reader: Any) -> None:
-    """Refuse a reader that does not offer the manifest retrieval contract.
-
-    By name, here, rather than as an AttributeError at the call: a reader
-    written against the retired single-file contract (file_source_context)
-    would otherwise fail somewhere less informative.
-    """
-    if not callable(getattr(reader, "get_file_manifests", None)):
-        raise ConfigError(
-            f"ManifestSource: the reader {type(reader).__name__} does not offer "
-            "get_file_manifests, the governed manifest retrieval contract "
-            "(control.f_file_manifest_get)."
-        )
 
 
 def _read_governed_file(
@@ -465,47 +450,6 @@ class ManifestSource:
             source.requested_file_type_id = source.persisted_file_type_id
         return source
 
-    @classmethod
-    def get_for_operation(
-        cls,
-        reader: SourceContextReader,
-        installation_id: int,
-        operation: str,
-        source_name: Optional[str] = None,
-    ) -> list["ManifestSource"]:
-        """Every governed file remaining for one operation, one object per file.
-
-        **ONE control call for the whole set** (backlog 619). The database
-        decides which files remain for the operation, at which mutation, in
-        which installation and source, and excludes kicked-out files; nothing
-        here filters, re-selects or orders what came back.
-
-        Each object is exactly what :meth:`create` builds from one file's rows,
-        opened by its mutation: one governed file at one working mutation. The
-        rows arrive ordered by manifest then mutation, so a file's rows are
-        contiguous; they are grouped by ``file_mutation_id`` in arrival order.
-
-        Args:
-            reader: Whatever answers the manifest retrieval contract.
-            installation_id: The installation whose files these are.
-            operation: The operation the files are wanted for, e.g.
-                ``file_sanitization``. The routine refuses one it does not know.
-            source_name: Narrows the set to one declared source, or None.
-
-        Returns:
-            One ManifestSource per selected file, in the routine's order; an
-            empty list when nothing remains.
-        """
-        _require_manifest_reader(reader)
-        grouped: dict[int, list[dict[str, Any]]] = {}
-        for row in reader.get_file_manifests(
-            installation_id=installation_id,
-            operation=operation,
-            source_name=source_name,
-        ):
-            grouped.setdefault(int(row["file_mutation_id"]), []).append(dict(row))
-        return [cls(rows, opened_by="mutation") for rows in grouped.values()]
-
     def reread(self, reader: SourceContextReader) -> "ManifestSource":
         """Read this governed file's context again, keeping the selected transform.
 
@@ -607,10 +551,7 @@ class ManifestSource:
         Raises:
             ConfigError: When the file is not a DataFile.
         """
-        opened = self.file(**settings)
-        if not isinstance(opened, DataFile):
-            raise ConfigError(DataFile.refusal_for(opened, self.layout or ""))
-        return opened
+        return DataFile.file(self._rows, **settings)
 
     def file(self, **settings: Any) -> File:
         """The governed File for the working path.
@@ -632,35 +573,7 @@ class ManifestSource:
                 object over an unknown path could only fail later and somewhere
                 less informative.
         """
-        if not self.path:
-            raise DataStructureError(
-                f"ManifestSource: manifest {self.file_manifest_id} resolved no "
-                f"working path, so there is no file to open."
-            )
-        # NO READ HAPPENS HERE. A DataFile is built over a path; opening it is
-        # the caller's, which is what keeps this object out of the filesystem.
-        #
-        # THE GOVERNED IDENTITY OF EXACTLY THIS STATE: the mutation this source
-        # was opened at, and the classification and base_path its rows carry.
-        # Which state that is was the caller's selection, made before create().
-        manifest_path = self.file_facts.get("manifest_path")
-        return File.for_path(
-            Path(self.path), file_type=self.layout or "",
-            file_manifest_id=self.file_manifest_id,
-            file_mutation_id=self.file_mutation_id,
-            classification=self.file_facts.get("classification"),
-            base_path=self.file_facts.get("base_path"),
-            # The original file's facts (backlog 624), from the same rows.
-            inbox=str(Path(manifest_path).parent) if manifest_path else None,
-            original_path=self.file_facts.get("original_path"),
-            original_mutation_id=self.file_facts.get("original_mutation_id"),
-            # What the selected state is, and the file's profile group
-            # (backlog 630): the facts kinds used to read off a template row.
-            record_type=self.file_facts.get("record_type"),
-            conversion=self.file_facts.get("conversion"),
-            data_profile_key=self.file_facts.get("manifest_data_profile_key"),
-            **settings,
-        )
+        return File.file(self._rows, **settings)
 
     def data_profile(self) -> DataProfile:
         """The existing DataProfile, populated from the returned field rows.
@@ -781,9 +694,7 @@ class ManifestSource:
         path's name, by the rule the file selectors applied
         (regexp_replace(path, '^.*/', '')).
         """
-        if not self.path:
-            return None
-        return re.sub(r"^.*/", "", self.path)
+        return FileManifest.working_file_name(self._rows)
 
     @property
     def working_base_name(self) -> Optional[str]:
@@ -792,10 +703,7 @@ class ManifestSource:
         The selectors' rule exactly -- regexp_replace(name, '\\.[^.]*$', '') --
         not ``Path.stem``, which keeps a leading-dot name whole.
         """
-        name = self.working_file_name
-        if name is None:
-            return None
-        return re.sub(r"\.[^.]*$", "", name)
+        return FileManifest.working_base_name(self._rows)
 
     def template_context(self) -> dict[str, Any]:
         """The fields a configured destination template may name.
@@ -805,17 +713,7 @@ class ManifestSource:
         ``<base_path>`` and ``<classification.*>`` are the file's current
         classification. Facts of what the file IS, read once with the context.
         """
-        return {
-            "file_manifest_id": self.file_manifest_id,
-            "file_mutation_id": self.file_mutation_id,
-            "path": self.path,
-            "file_name": self.working_file_name,
-            "base_name": self.working_base_name,
-            "base_path": self.file_facts.get("base_path"),
-            "classification": self.file_facts.get("classification"),
-            "record_type": self.file_facts.get("record_type"),
-            "conversion": self.file_facts.get("conversion"),
-        }
+        return FileManifest.template_context(self._rows)
 
     def governed_context(self) -> dict[str, Any]:
         """The governed facts a canonical Source holds as read-only context.
@@ -914,31 +812,6 @@ class ManifestSource:
                 _as_int(row["column_ordinal"]) for row in self._transform_columns
             ],
         })
-
-
-#: File facts the contract returns, carried as read-only context.
-#:
-#: Named rather than "every column that is not something else": a list that
-#: absorbed whatever arrived would silently acquire meaning from a contract
-#: change nobody read.
-_FILE_FACTS: tuple[str, ...] = (
-    "base_path", "file_name", "file_extension", "checksum_sha256",
-    "size_bytes", "source_name", "record_type", "action", "status",
-    "result", "mutated_ts", "classification", "is_classified",
-    "file_type_key", "file_type_name", "signature", "type_header_definition",
-    "key_fields", "filename_match", "data_profile_key", "profile_row_count",
-    # The working mutation's conversion provenance -- sanitize reads its
-    # operator to tell an Excel-generated CSV from a delivered one -- and the
-    # MANIFEST's data profile key, which profiling builds on. Not the
-    # same-named data_profile_key above: that is the file type's profile and
-    # is empty until a profile exists (backlog 619).
-    "conversion", "manifest_data_profile_key",
-    # The ORIGINAL file (backlog 624): where it was inventoried -- its inbox is
-    # that path's directory -- and where it physically is now, at which state.
-    # Carried on the DataFile so a failing operation can move the original
-    # without reaching back here.
-    "manifest_path", "original_path", "original_mutation_id",
-)
 
 
 def _column_declaration(row: Mapping[str, Any]) -> dict[str, Any]:
