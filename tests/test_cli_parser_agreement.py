@@ -321,7 +321,9 @@ def _drift(
 
     listed = cli.get("shared_parameters")
     if isinstance(listed, list):
-        compare("shared", shared, {one["name"] for one in listed})
+        # The shared arguments this parser accepts: all of them where it takes
+        # add_config_args, only those it declares itself where it does not (rey_bff).
+        compare("shared", parser["options"] & shared, {one["name"] for one in listed})
     compare("commands", set(parser["commands"]) | parser["choices"],
             {one.name for one in commands})
 
