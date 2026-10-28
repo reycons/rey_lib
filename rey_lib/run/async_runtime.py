@@ -80,15 +80,23 @@ class Loop:
 
 
 class MessageStream:
-    """Plain JSON objects over one connection, one per line."""
+    """Plain JSON objects over one connection, one per line.
+
+    Its writes are its own to keep whole: messages sent together -- one per
+    request thread relaying through the loop -- are written one after another,
+    never interleaved and never refused for another write in flight (#1280).
+    """
 
     def __init__(self, stream: SocketStream) -> None:
         self._stream = stream
         self._received = BufferedByteReceiveStream(stream)
+        self._writing = anyio.Lock()
 
     async def send(self, message: Mapping[str, Any]) -> None:
-        """Send one message."""
-        await self._stream.send(json.dumps(dict(message)).encode("utf-8") + b"\n")
+        """Send one message, once any message already being written is done."""
+        line = json.dumps(dict(message)).encode("utf-8") + b"\n"
+        async with self._writing:
+            await self._stream.send(line)
 
     async def receive(self) -> Optional[dict[str, Any]]:
         """The next message, or None once the other end has closed."""
