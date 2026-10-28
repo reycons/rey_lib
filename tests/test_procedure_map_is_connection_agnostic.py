@@ -109,7 +109,7 @@ class TestTheCallerTakesTheConnection:
     """Selection is by name, against the shared objects, never through a map."""
 
     def test_a_named_connection_resolves_to_its_shared_object(self) -> None:
-        ctx = _ctx(connections=[_connection("control"), _connection("rey_loader")])
+        ctx = _ctx(connections=[_connection("control"), _connection("data_engine")])
 
         assert shared_connection(ctx, "control") is ctx.shared_connections["control"]
         assert shared_connection(ctx, "control").name == "control"

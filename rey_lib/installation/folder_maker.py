@@ -101,8 +101,8 @@ _APP_DEFS: dict[str, dict] = {
         "subfolders": ["data_feeds"],
         "extra_files": [],
     },
-    "rey_loader": {
-        "subfolders": ["data_sources", "diagnostics"],
+    "data_engine": {
+        "subfolders": ["data_sources", "diagnostics", "redact"],
         "extra_files": [],
     },
     "rey_analyzer": {
@@ -111,10 +111,6 @@ _APP_DEFS: dict[str, dict] = {
     },
     "rey_console": {
         "subfolders": [],
-        "extra_files": [],
-    },
-    "file_operator": {
-        "subfolders": ["redact"],
         "extra_files": [],
     },
 }
@@ -345,7 +341,7 @@ Creates (folder contract):
         _draft/  _approved/  _archive/
         <app_name>/app.yaml
         <app_name>/<subfolder>/
-        rey_loader/diagnostics/default.yaml
+        data_engine/diagnostics/default.yaml
 
     Args:
         config_root: Path to the config root, e.g. installations/ccc/configs/v01.
@@ -393,8 +389,8 @@ Creates (folder contract):
             _ensure_dir(sub_path, result)
             _ensure_gitkeep(sub_path, result)
 
-        # rey_loader diagnostics placeholder.
-        if app_name == "rey_loader":
+        # data_engine diagnostics placeholder.
+        if app_name == "data_engine":
             diag_default = app_path / "diagnostics" / "default.yaml"
             _ensure_yaml(diag_default, _diagnostics_default_yaml(), result, force=force)
 

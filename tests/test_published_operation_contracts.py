@@ -20,14 +20,14 @@ from rey_lib.config.registration import discover_registrations
 
 #: The operations each application publishes, as traced (backlog 932).
 _PUBLISHED = {
-    "file_operator": {"prepare_rule_set_inputs"},
+    "data_engine": {"inventory_source_files", "classify_source_files", "excel_conversion",
+                    "sanitize_file", "profile_csv_record_types", "create_prepared_files",
+                    "file_operation", "sql_operation", "validate", "etl_operation",
+                    "transform_files", "load_files", "validate_load", "sql_apply",
+                    "prepare_rule_set_inputs"},
     "rey_analyzer": {"analysis"},
     "rey_db_admin": {"export_database_ddl", "git_commit", "lint_sql", "assist_sql",
                      "recreate_objects", "verify_diff"},
-    "rey_loader": {"inventory_source_files", "classify_source_files", "excel_conversion",
-                   "sanitize_file", "profile_csv_record_types", "create_prepared_files",
-                   "file_operation", "sql_operation", "validate", "etl_operation",
-                   "transform_files", "load_files", "validate_load", "sql_apply"},
     "rey_repository_map": {"index", "publish-database", "publish-capability-generation",
                            "publish-architecture-generation", "index-synopsis"},
 }
@@ -39,8 +39,8 @@ _RETIRED = {"procedure", "restore_mappings", "config_ref", "selections", "kickou
 #: Per operation: ``values`` is an alias only for sql_operation's params; a
 #: classification variable's ``values`` is canonical.
 _ALIASES = {
-    ("rey_loader", "inventory_source_files"): {"file_pattern"},
-    ("rey_loader", "sql_operation"): {"values", "routine_name"},
+    ("data_engine", "inventory_source_files"): {"file_pattern"},
+    ("data_engine", "sql_operation"): {"values", "routine_name"},
 }
 
 @pytest.fixture(scope="module")
@@ -96,13 +96,13 @@ def test_the_workflow_engine_vocabulary_is_never_published(operations) -> None:
 
 
 def test_unsupported_keys_are_not_published_where_nothing_reads_them(operations) -> None:
-    profile = operations[("rey_loader", "profile_csv_record_types")].contract_definition
+    profile = operations[("data_engine", "profile_csv_record_types")].contract_definition
     assert set(profile["properties"]["file_selection"]["properties"]) == {"operation"}
-    assert "kickouts" not in operations[("file_operator", "prepare_rule_set_inputs")].contract_definition["properties"]
+    assert "kickouts" not in operations[("data_engine", "prepare_rule_set_inputs")].contract_definition["properties"]
 
 
 def test_keyed_maps_remain_maps(operations) -> None:
-    sanitize = operations[("rey_loader", "sanitize_file")].contract_definition
+    sanitize = operations[("data_engine", "sanitize_file")].contract_definition
     feeds = sanitize["properties"]["sanitization"]["properties"]["feeds"]
     assert feeds["type"] == "object" and feeds["additionalProperties"] == {"$ref": "#/$defs/policy"}
     policy = sanitize["$defs"]["policy"]["properties"]
@@ -110,12 +110,12 @@ def test_keyed_maps_remain_maps(operations) -> None:
         assert policy[table]["type"] == "object"
         assert policy[table]["propertyNames"] == {"pattern": "^U\\+[0-9A-F]{4,6}$"}
     assert policy["line_repair"]["type"] == "object" and "additionalProperties" in policy["line_repair"]
-    params = operations[("rey_loader", "sql_operation")].contract_definition["properties"]["params"]
+    params = operations[("data_engine", "sql_operation")].contract_definition["properties"]["params"]
     assert params["type"] == "object" and "additionalProperties" in params
 
 
 def test_a_dispatchers_variants_stay_one_operation(operations) -> None:
-    file_operation = operations[("rey_loader", "file_operation")].contract_definition
+    file_operation = operations[("data_engine", "file_operation")].contract_definition
     chosen = [variant["properties"]["operation"]["const"] for variant in file_operation["oneOf"]]
     assert chosen == ["discover", "discover_file", "move", "delete"]
     assert file_operation["properties"]["operation"]["enum"] == chosen

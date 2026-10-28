@@ -530,7 +530,7 @@ def _move_group(ctx: Any, files: list[Path], dest_dir: Path, label: str) -> None
     for file_path in files:
         try:
             dest = move_file(
-                file_path, dest_dir, state_ctx=ctx, app="file_operator",
+                file_path, dest_dir, state_ctx=ctx, app="data_engine",
                 pipeline=getattr(ctx, "pipeline_name", None), reason=label,
             )
             _log.info("moved to %s: %s", label, dest)
@@ -554,13 +554,13 @@ def _write_profile_outputs(
     Each file creates its destination directory as it writes, so no direct
     mkdir is needed here.
     """
-    state = {"state_ctx": ctx, "app": "file_operator",
+    state = {"state_ctx": ctx, "app": "data_engine",
              "pipeline": getattr(ctx, "pipeline_name", None), "reason": "profiled"}
     sample_path = output_dir / f"{stem}.redacted.sample{ext}"
     File.for_path(sample_path).write_text("\n".join(sample_lines))
     record_file_write(sample_path, **state)
     log_artifact_reference(run_log, str(sample_path), role="redacted_sample", producer="redactor",
-        artifact_group="profiles", producing_app="file_operator",
+        artifact_group="profiles", producing_app="data_engine",
         artifact_type="redacted_file", viewer_type="file", safe_to_preview=True,
     )
     profile_path = output_dir / f"{stem}.profile.json"
@@ -568,7 +568,7 @@ def _write_profile_outputs(
         profile, sort_keys=False, atomic=False, trailing_newline=False)
     record_file_write(profile_path, **state)
     log_artifact_reference(run_log, str(profile_path), role="profile", producer="redactor",
-        artifact_group="profiles", producing_app="file_operator",
+        artifact_group="profiles", producing_app="data_engine",
         artifact_type="profile", viewer_type="file", safe_to_preview=True,
     )
     _log.info("wrote profile: %s", profile_path)

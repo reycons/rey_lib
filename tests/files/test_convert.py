@@ -212,7 +212,7 @@ def _entry(tmp_path: Path, **overrides: object) -> SimpleNamespace:
 
 def _ctx(tmp_path: Path, *entries: object) -> SimpleNamespace:
     return SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         # The move kind routes within the governed root.
         paths=SimpleNamespace(resolve=lambda name: str(tmp_path)),
         excel_conversions=list(entries or [_entry(tmp_path)]),
@@ -1215,7 +1215,7 @@ def test_conversion_values_reach_the_canonical_sections(run_log,
     assert created["conversion"]["source"]["sheet_name"] == "Sheet 1"
     # The producer is the runtime context's application (row 589, step 3).
     assert created["producer"] == {
-        "application": "rey_loader",
+        "application": "data_engine",
         "operation": "excel_conversion",
     }
     for legacy in ("mutation_kind", "created_file_extension", "origin_path",

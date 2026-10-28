@@ -55,9 +55,9 @@ class _Adapter:
 def _indexed() -> list[IndexedRepository]:
     return [
         IndexedRepository(
-            repository="rey_loader",
+            repository="data_engine",
             header={
-                "repository_key": "rey_loader",
+                "repository_key": "data_engine",
                 "revision": "abc123",
                 "branch": "main",
                 "working_tree_status": "clean",

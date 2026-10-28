@@ -58,7 +58,7 @@ def _ctx(tmp_path: Path, *selected: tuple[int, Path],
         for mutation_id, path in selected
     ]
     return SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         paths=SimpleNamespace(resolve=lambda name: tmp_path),
         shared_control=control,
     )
@@ -68,7 +68,7 @@ def _run_log(tmp_path: Path, ctx: Any) -> Any:
     """A run log that commits, which is what governed evidence requires."""
     from tests.conftest import make_run_log
 
-    return make_run_log(tmp_path, app="rey_loader", destination="both", control=ctx.shared_control)
+    return make_run_log(tmp_path, app="data_engine", destination="both", control=ctx.shared_control)
 
 
 def _profiles(ctx: Any) -> list[dict]:

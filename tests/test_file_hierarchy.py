@@ -49,7 +49,7 @@ class _Store:
             path=path, file_name=file_name, base_name=file_name.split(".")[0],
             file_extension=file_name.rsplit(".", 1)[-1],
             checksum_sha256=f"sha-{name}", size_bytes=1, source_name=feed,
-            producer={"application": "file_operator"},
+            producer={"application": "data_engine"},
         )
         return self.ids[name]
 

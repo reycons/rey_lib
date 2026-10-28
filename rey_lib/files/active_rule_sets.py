@@ -44,7 +44,7 @@ __all__ = [
     "resolve_active_rule_set_for_file",
 ]
 
-_RULE_SET_CONFIG_PATH = "file_operator_rule_sets_config"
+_RULE_SET_CONFIG_PATH = "data_engine_rule_sets_config"
 
 
 @dataclass(frozen=True)
@@ -85,8 +85,8 @@ def activate_generated_rule_set(
         raise InputError(f"Generated rule-set YAML not found: '{generated_path}'.")
     destination = _installation_rule_set_path(ctx)
     generated_root = _read_yaml_mapping(generated_path, "generated rule-set YAML")
-    _exact_keys(generated_root, {"file_operator_rule_sets"}, "generated YAML")
-    generated_entries = generated_root["file_operator_rule_sets"]
+    _exact_keys(generated_root, {"data_engine_rule_sets"}, "generated YAML")
+    generated_entries = generated_root["data_engine_rule_sets"]
     if not isinstance(generated_entries, list) or len(generated_entries) != 1:
         raise InputError("Generated YAML must contain exactly one rule-set item.")
     incoming_item = _mapping(generated_entries[0], "generated rule-set item")
@@ -135,7 +135,7 @@ def activate_generated_rule_set(
         )
 
     rendered = dump_yaml(
-        {"file_operator_rule_sets": promoted_items},
+        {"data_engine_rule_sets": promoted_items},
         sort_keys=False,
     )
     if not rendered.endswith("\n"):
@@ -143,18 +143,18 @@ def activate_generated_rule_set(
     reparsed = parse_yaml(rendered)
     if not isinstance(reparsed, dict):
         raise InputError("Promoted File Operator YAML root is not a mapping.")
-    _resolve_items(reparsed["file_operator_rule_sets"])
+    _resolve_items(reparsed["data_engine_rule_sets"])
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(destination, rendered)
     if ctx is not None:
         log_artifact_reference(run_log,
             str(destination),
-            role="active_file_operator_rule_sets",
-            producer="file_operator",
+            role="active_data_engine_rule_sets",
+            producer="data_engine",
             artifact_group="rule_sets",
-            producing_app="file_operator",
-            artifact_type="file_operator_rule_sets",
+            producing_app="data_engine",
+            artifact_type="data_engine_rule_sets",
             viewer_type="file",
             safe_to_preview=True,
             active_rule_set_name=incoming.name,
@@ -351,9 +351,9 @@ def execute_active_rule_set(
             log_artifact_reference(run_log,
                 str(destination),
                 role="structural_normalization_output",
-                producer="file_operator",
+                producer="data_engine",
                 artifact_group="normalized_outputs",
-                producing_app="file_operator",
+                producing_app="data_engine",
                 artifact_type="normalized_csv",
                 viewer_type="file",
                 safe_to_preview=False,
@@ -367,9 +367,9 @@ def execute_active_rule_set(
         log_artifact_reference(run_log,
             str(evidence_path),
             role="structural_normalization_application",
-            producer="file_operator",
+            producer="data_engine",
             artifact_group="normalized_outputs",
-            producing_app="file_operator",
+            producing_app="data_engine",
             artifact_type="structural_normalization_application",
             viewer_type="file",
             safe_to_preview=True,
@@ -413,10 +413,10 @@ def _load_installation_items(destination: Path) -> list[dict[str, Any]]:
     if not destination.exists():
         return []
     root = _read_yaml_mapping(destination, "installation rule-set YAML")
-    _exact_keys(root, {"file_operator_rule_sets"}, "installation rule-set YAML")
-    entries = root["file_operator_rule_sets"]
+    _exact_keys(root, {"data_engine_rule_sets"}, "installation rule-set YAML")
+    entries = root["data_engine_rule_sets"]
     if not isinstance(entries, list):
-        raise InputError("Installation file_operator_rule_sets must be a list.")
+        raise InputError("Installation data_engine_rule_sets must be a list.")
     return [
         deepcopy(dict(_mapping(item, "installation rule-set item"))) for item in entries
     ]
@@ -427,7 +427,7 @@ def _resolve_items(items: list[Mapping[str, Any]]) -> tuple[FileOperatorRuleSet,
         return ()
     try:
         return resolve_file_operator_rule_sets(
-            SimpleNamespace(file_operator_rule_sets=items)
+            SimpleNamespace(data_engine_rule_sets=items)
         )
     except RedactorError as exc:
         raise InputError(
@@ -441,7 +441,7 @@ def _resolve_one(item: Mapping[str, Any]) -> FileOperatorRuleSet:
         raise InputError("Generated rule-set item is missing its name.")
     try:
         return resolve_file_operator_rule_set(
-            SimpleNamespace(file_operator_rule_sets=[item]),
+            SimpleNamespace(data_engine_rule_sets=[item]),
             name,
         )
     except RedactorError as exc:

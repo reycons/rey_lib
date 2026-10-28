@@ -156,11 +156,11 @@ class TestLoadAnalysisContract:
         text = _analysis_contract_text(extra_yaml=(
             "output:\n"
             "  format: raw\n"
-            "  artifact_type: rey_loader_yaml\n"
+            "  artifact_type: data_engine_yaml\n"
         ))
         contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.output_format == "raw"
-        assert contract.spec.artifact_type == "rey_loader_yaml"
+        assert contract.spec.artifact_type == "data_engine_yaml"
 
     def test_invalid_source_type_raises(self, tmp_path: Path) -> None:
         """An unrecognised source_type raises AIConfigurationError."""
@@ -527,14 +527,14 @@ class TestAnalyzerEndToEnd:
         contract = _contract(extra_yaml=(
                 "output:\n"
                 "  format: raw\n"
-                "  artifact_type: rey_loader_yaml\n"
+                "  artifact_type: data_engine_yaml\n"
             ),
         )
         generated = "data_sources:\n  - name: example\n    enabled: true"
         analyzer = Analyzer(
             contract=contract,
             ai=_runtime(
-                '{"artifact_type":"rey_loader_yaml","content":'
+                '{"artifact_type":"data_engine_yaml","content":'
                 '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
             ),
             profile_id="mock",

@@ -103,7 +103,7 @@ def _pipeline_step_app(run_log, ctx: Namespace) -> None:
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="load")
     run_log.set_nest_level("app")
-    log_run_record(run_log, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="data_engine")
 
 
 # -- scenario 1 ---------------------------------------------------------------
@@ -121,7 +121,7 @@ def test_pipeline_step_app_chain(tmp_path: Path) -> None:
     assert _shape(_records(tmp_path)) == [
         "RUN_START(demo_pipeline)",
         "  STEP_START(load)",
-        "    RUN_START(rey_loader)",
+        "    RUN_START(data_engine)",
     ]
 
 
@@ -188,18 +188,18 @@ def test_app_workflow_workflow_step(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("app")
-    log_run_record(run_log, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="data_engine")
     run_log.set_nest_level("workflow")
-    log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
+    log_run_record(run_log, "RUN_START", app="data_engine", workflow="daily_load")
     run_log.set_nest_level("workflow_step")
-    log_run_record(run_log, "STEP_START", app="rey_loader", step_name="extract")
+    log_run_record(run_log, "STEP_START", app="data_engine", step_name="extract")
 
     app, workflow, step = _records(tmp_path)
     assert _identity(app) == (1, _ROOT, 3)
     assert _identity(workflow) == (2, 1, 4)
     assert _identity(step) == (3, 2, 5)
     assert _shape(_records(tmp_path)) == [
-        "RUN_START(rey_loader)",
+        "RUN_START(data_engine)",
         "  RUN_START(daily_load)",
         "    STEP_START(extract)",
     ]
@@ -212,7 +212,7 @@ def test_direct_app_execution(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("app")
-    log_run_record(run_log, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="data_engine")
 
     (app,) = _records(tmp_path)
     # No pipeline exists, so the app anchors on the synthetic root without
@@ -245,7 +245,7 @@ def test_return_from_app_to_pipeline_step(tmp_path: Path) -> None:
     _pipeline_step_app(run_log, ctx)
     # The app descends and never returns, as a real app body may leave it.
     run_log.set_nest_level("workflow")
-    log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
+    log_run_record(run_log, "RUN_START", app="data_engine", workflow="daily_load")
     # The coordinator re-asserts the step base on app return.
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_END", step_name="load", status="success")
@@ -284,7 +284,7 @@ def test_failure_return_follows_ownership_reset(tmp_path: Path) -> None:
     run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(run_log, ctx)
     run_log.set_nest_level("workflow")
-    log_run_record(run_log, "ERROR", app="rey_loader", message="boom")
+    log_run_record(run_log, "ERROR", app="data_engine", message="boom")
     # Failure return re-asserts the same base the success path re-asserts.
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_FAILURE", step_name="load", status="failed")
@@ -304,9 +304,9 @@ def test_record_sequence_is_continuous_and_parents_precede_children(tmp_path: Pa
     run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(run_log, ctx)
     run_log.set_nest_level("workflow")
-    log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
+    log_run_record(run_log, "RUN_START", app="data_engine", workflow="daily_load")
     run_log.set_nest_level("workflow_step")
-    log_run_record(run_log, "STEP_START", app="rey_loader", step_name="extract")
+    log_run_record(run_log, "STEP_START", app="data_engine", step_name="extract")
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_END", step_name="load", status="success")
     run_log.set_nest_level("pipeline")

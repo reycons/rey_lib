@@ -175,7 +175,7 @@ class TestTheBootstrapLifecycle:
 
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.return_value = SimpleNamespace(close=lambda: None)
-            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
+            with app_runtime("cfg", "data_engine", "run") as (ctx, _run_log):
                 ctx.shared_connections["control"].handle()
                 assert ctx.shared_connections["control"].is_open is True
 
@@ -183,12 +183,12 @@ class TestTheBootstrapLifecycle:
         assert registered_runtime_objects(ctx) == []
 
     def test_multiple_shared_connections_are_all_collected(self, monkeypatch) -> None:
-        app_runtime = self._shared(monkeypatch, "control", "rey_loader", "reporting")
+        app_runtime = self._shared(monkeypatch, "control", "data_engine", "reporting")
 
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.side_effect = (
                 lambda cfg, ctx=None: SimpleNamespace(close=lambda: None))
-            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
+            with app_runtime("cfg", "data_engine", "run") as (ctx, _run_log):
                 for connection in ctx.shared_connections.values():
                     connection.handle()
 
@@ -200,7 +200,7 @@ class TestTheBootstrapLifecycle:
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.side_effect = (
                 lambda cfg, ctx=None: SimpleNamespace(close=lambda: None))
-            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
+            with app_runtime("cfg", "data_engine", "run") as (ctx, _run_log):
                 ctx.shared_connections["control"].handle()
 
         assert not any(c.is_open for c in ctx.shared_connections.values())
@@ -297,8 +297,8 @@ class TestEveryEntryPointAdoptedTheBoundary:
     """The mechanism is only the architecture of record once apps use it."""
 
     _ENTRY_POINTS = (
-        "file_operator/main.py",
-        "rey_loader/main.py",
+        "data_engine/data_engine/file_main.py",
+        "data_engine/data_engine/loader_main.py",
         "rey_analyzer/main.py",
         "rey_messaging/rey_messaging/cli.py",
         "rey_db_admin/main.py",

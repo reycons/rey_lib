@@ -35,7 +35,7 @@ def test_transform_outputs_group_under_loader(tmp_path: Path) -> None:
     log_path = tmp_path / "run_log.20260708_000000.jsonl"
     run_log = make_run_log(tmp_path, path=str(log_path))
     ctx = SimpleNamespace(run_log_path=str(log_path), run_id="r1",
-                          run_timestamp="20260708_000000", app_name="rey_loader")
+                          run_timestamp="20260708_000000", app_name="data_engine")
     source = tmp_path / "trades.raw.csv"
     # Emit exactly what file_loader now logs at its two output points.
     log_artifact_reference(run_log, str(tmp_path / "trades.canonical.csv"), role="prepared",

@@ -125,7 +125,7 @@ def test_launch_operation_launches_the_applications_own_invocation(
     launched: list[list[str]] = []
     monkeypatch.setattr(LaunchedApp, "launch", classmethod(
         lambda cls, command, **_: launched.append(list(command)) or "handle"))
-    other = Application(name="rey_loader", commands=(SERVE,))
+    other = Application(name="data_engine", commands=(SERVE,))
 
     handle = LaunchedApp.launch_operation(_ctx(other, _application()), "workflow_app", "serve",
                                           {"workflow_id": 15})

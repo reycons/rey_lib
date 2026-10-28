@@ -66,46 +66,46 @@ def _open(application_id: str, request_id: str) -> dict[str, Any]:
 
 def test_each_open_holds_a_new_object_under_an_opaque_id() -> None:
     hosted = HostedObjects(_construct)
-    channel = _Channel([_open("file_operator", "r1"), _open("ai_app", "r2")])
+    channel = _Channel([_open("data_engine", "r1"), _open("ai_app", "r2")])
 
     hosted.serve(channel)
 
     first, second = channel.emitted
     assert first["object"] != second["object"]
-    assert first["projection"]["application_id"] == "file_operator"
+    assert first["projection"]["application_id"] == "data_engine"
     assert (first["request_id"], second["request_id"]) == ("r1", "r2")
 
 
 def test_an_objects_own_command_is_answered_by_it_and_names_it() -> None:
     hosted = HostedObjects(_construct)
     channel = _Channel([])
-    object_id, _ = hosted.open("application.settings", {"application_id": "file_operator"},
+    object_id, _ = hosted.open("application.settings", {"application_id": "data_engine"},
                                channel.emit)
     channel._commands.append({"command": "rename", "object": object_id, "to": "fo",
                               "request_id": "r2"})
 
     hosted.serve(channel)
 
-    assert channel.emitted == [{"projection": {"application_id": "file_operator",
+    assert channel.emitted == [{"projection": {"application_id": "data_engine",
                                                "renamed": "fo"},
                                 "request_id": "r2", "object": object_id}]
 
 
 def test_releasing_an_object_ends_that_object_only_and_serving_ending_releases_the_rest() -> None:
     hosted = HostedObjects(_construct)
-    first, _ = hosted.open("application.settings", {"application_id": "file_operator"},
+    first, _ = hosted.open("application.settings", {"application_id": "data_engine"},
                            lambda message: None)
     second, _ = hosted.open("application.settings", {"application_id": "ai_app"},
                             lambda message: None)
 
     hosted.release(first)
-    assert _Settings.released == ["file_operator"] and len(hosted) == 1
+    assert _Settings.released == ["data_engine"] and len(hosted) == 1
     assert hosted.projection(second)["application_id"] == "ai_app"
     with pytest.raises(ConfigError, match="No object is held"):
         hosted.projection(first)
 
     hosted.serve(_Channel([{"command": "close"}]))
-    assert _Settings.released == ["file_operator", "ai_app"] and len(hosted) == 0
+    assert _Settings.released == ["data_engine", "ai_app"] and len(hosted) == 0
 
 
 def test_a_refusal_is_answered_and_serving_goes_on() -> None:

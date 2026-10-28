@@ -129,7 +129,7 @@ def test_producer_falls_back_to_app_then_unknown() -> None:
     records = [
         _artifact("/a/1.json", app="rey_analyzer"),       # app -> analyzer
         _artifact("/a/2.json"),                            # neither -> unknown
-        _artifact("/a/3.json", producer="messaging", app="rey_loader"),  # explicit wins
+        _artifact("/a/3.json", producer="messaging", app="data_engine"),  # explicit wins
     ]
     producers = {a["path"]: a["producer"] for a in normalize_artifacts(records)}
     assert producers["/a/1.json"] == "analyzer"
@@ -187,7 +187,7 @@ def test_log_artifact_reference_tags_producer_fields(tmp_path: Path) -> None:
     log_path = tmp_path / "run_log.20260708_000000.jsonl"
     run_log = make_run_log(tmp_path, path=str(log_path))
     ctx = SimpleNamespace(run_log_path=str(log_path), run_id="r1",
-                          run_timestamp="20260708_000000", owner_app_name="file_operator")
+                          run_timestamp="20260708_000000", owner_app_name="data_engine")
     log_artifact_reference(run_log, "/artifacts/customers.redacted.csv", role="output",
         producer="redactor", artifact_type="redacted_file",
         source_path="/processing/customers.csv", safe_to_preview=True,

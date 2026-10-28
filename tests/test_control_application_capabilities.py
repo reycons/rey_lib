@@ -40,14 +40,14 @@ def _answering(rows: list[dict[str, Any]]) -> tuple[Control, list[tuple[str, dic
 def test_control_reads_an_applications_declarations_by_its_name_alone() -> None:
     control, calls = _answering(_ROWS)
 
-    declarations = control.get_application_capabilities("file_operator")
+    declarations = control.get_application_capabilities("data_engine")
 
     # Carried back exactly as the routine answered, in its order.
     assert declarations == _ROWS
     # Only the application's name is sent -- the declarations are estate-wide, so
     # no installation -- and the read is required by default: a missing binding is
     # a configuration fault, and an owner reading its capabilities fails closed.
-    assert calls == [("get_application_capabilities", {"application": "file_operator"}, True)]
+    assert calls == [("get_application_capabilities", {"application": "data_engine"}, True)]
 
 
 def test_an_application_declaring_nothing_reads_as_no_declarations() -> None:

@@ -33,9 +33,9 @@ def _ctx(**extra: Any) -> SimpleNamespace:
     """A context carrying two configured connections."""
     ctx = SimpleNamespace(
         run_id="R1",
-        app_name="rey_loader",
-        connections=[_config("control"), _config("rey_loader")],
-        db_connections=[_config("control"), _config("rey_loader")],
+        app_name="data_engine",
+        connections=[_config("control"), _config("data_engine")],
+        db_connections=[_config("control"), _config("data_engine")],
         control=SimpleNamespace(procedure_map="control", connection="control",
                                 enabled=True),
         logging=SimpleNamespace(db_connection="control"),
@@ -66,13 +66,13 @@ class TestOneObjectPerConfiguredConnection:
     def test_each_configured_connection_becomes_one_object(self) -> None:
         shared = _ctx().shared_connections
 
-        assert sorted(shared) == ["control", "rey_loader"]
+        assert sorted(shared) == ["control", "data_engine"]
         assert all(isinstance(c, Connection) for c in shared.values())
 
     def test_different_connections_are_different_objects(self) -> None:
         shared = _ctx().shared_connections
 
-        assert shared["control"] is not shared["rey_loader"]
+        assert shared["control"] is not shared["data_engine"]
 
     def test_a_duplicate_name_is_a_configuration_error(self) -> None:
         # Two records under one name is how a consumer ends up on a different

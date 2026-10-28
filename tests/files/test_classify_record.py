@@ -67,7 +67,7 @@ def test_classified_record_copies_generic_configured_classification_type() -> No
         run_log_id=123,
         recorded_at="2026-07-30T07:15:00.000Z",
         # The producer is the recording application, the runtime context's.
-        application="rey_loader",
+        application="data_engine",
     )
 
     assert record == {
@@ -92,7 +92,7 @@ def test_classified_record_copies_generic_configured_classification_type() -> No
             "values": {"captured_name": "Example"},
         },
         "producer": {
-            "application": "rey_loader",
+            "application": "data_engine",
             "operation": "classification",
         },
     }
@@ -361,7 +361,7 @@ def test_both_reducer_inputs_expose_the_same_path_address() -> None:
         status="success",
         destination_path="/data/northern_trust/work/converted_csv/PREPATran.csv",
         run_log_id=2,
-        application_name="file_operator",
+        application_name="data_engine",
         file_id=7,
         conversion={"operator": "excel_conversion", "name": "all"},
     )

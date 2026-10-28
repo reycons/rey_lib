@@ -32,9 +32,9 @@ def _capability(**overrides: Any) -> dict[str, Any]:
 
 
 def _built(*capabilities: dict[str, Any]) -> Any:
-    registrations = {"file_operator": {"name": "file_operator",
+    registrations = {"data_engine": {"name": "data_engine",
                                        "capabilities": list(capabilities)}}
-    ctx = SimpleNamespace(apps=[{"name": "file_operator", "app_path": "/apps/file_operator"}])
+    ctx = SimpleNamespace(apps=[{"name": "data_engine", "app_path": "/apps/data_engine"}])
     return build_applications(ctx, registrations=registrations)[0]
 
 

@@ -175,7 +175,7 @@ def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="step_two")
     run_log.set_nest_level("app")
-    log_run_record(run_log, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="data_engine")
 
     pipeline, first_step, _file_op, second_step, app = _records(tmp_path)
     # Both steps are siblings anchored on the pipeline.
@@ -225,9 +225,9 @@ def test_set_then_write_orders_the_scope_spine(tmp_path: Path) -> None:
     run_log.set_nest_level("pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
     log_run_record(run_log, "FILE_OPERATION", path="prepare.ctx.json")
-    log_run_record(run_log, "APP_EXECUTION", app="rey_loader")
+    log_run_record(run_log, "APP_EXECUTION", app="data_engine")
     run_log.set_nest_level("app")
-    log_run_record(run_log, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="data_engine")
 
     records = _records(tmp_path)
     pipeline, _config, step, _file_op, _app_exec, app = records

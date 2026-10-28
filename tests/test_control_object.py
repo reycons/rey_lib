@@ -93,11 +93,11 @@ def _ctx(**extra: Any) -> SimpleNamespace:
     """A context carrying the control map plus one unrelated map."""
     return SimpleNamespace(
         run_id="R1",
-        app_name="rey_loader",
+        app_name="data_engine",
         control=SimpleNamespace(procedure_map="control", connection="control",
                                 enabled=True),
         logging=SimpleNamespace(db_connection="control"),
-        procedure_maps=[_map(), _map("rey_loader")],
+        procedure_maps=[_map(), _map("data_engine")],
         db_connections=[SimpleNamespace(name="control", provider="postgres",
                                         database="rey_apps")],
         **extra,
@@ -121,7 +121,7 @@ class TestMapOwnership:
 
         _built(ctx)
 
-        assert [m.name for m in ctx.procedure_maps] == ["rey_loader"]
+        assert [m.name for m in ctx.procedure_maps] == ["data_engine"]
 
     def test_only_the_control_map_is_taken(self) -> None:
         # Other maps have their own owners and are none of Control's business.
@@ -129,7 +129,7 @@ class TestMapOwnership:
 
         _built(ctx)
 
-        assert any(m.name == "rey_loader" for m in ctx.procedure_maps)
+        assert any(m.name == "data_engine" for m in ctx.procedure_maps)
 
     def test_the_map_cannot_be_taken_twice(self) -> None:
         """Proof the removal is real: a second Control finds nothing to take."""

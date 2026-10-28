@@ -29,7 +29,7 @@ def _workflow_file(process_name: str, config: dict) -> dict:
         "workflows": [
             {
                 "name": "inventory_and_prepare_files",
-                "app": "file_operator",
+                "app": "data_engine",
                 "processes": {process_name: config},
             }
         ]
@@ -58,7 +58,7 @@ def test_a_split_entry_keeps_the_keys_only_one_file_declares() -> None:
         "workflows": [
             {
                 "name": "inventory_and_prepare_files",
-                "app": "file_operator",
+                "app": "data_engine",
                 "tokens": {"ccc_data": "/data/ccc"},
                 "steps": [{"id": "inventory_source_files"}],
             }
@@ -80,7 +80,7 @@ def test_identical_repeated_declarations_are_not_a_conflict() -> None:
 
     workflow = _deep_merge(one, two)["workflows"][0]
 
-    assert workflow["app"] == "file_operator"
+    assert workflow["app"] == "data_engine"
 
 
 def test_a_section_declared_empty_is_where_the_split_files_merge() -> None:
@@ -95,7 +95,7 @@ def test_a_section_declared_empty_is_where_the_split_files_merge() -> None:
         "workflows": [
             {
                 "name": "inventory_and_prepare_files",
-                "app": "file_operator",
+                "app": "data_engine",
                 "processes": None,
             }
         ]
@@ -112,7 +112,7 @@ def test_an_empty_declaration_never_erases_content_already_merged() -> None:
     process = _workflow_file("inventory_source_files", {"sources": [{"name": "feed_inbox"}]})
     skeleton = {
         "workflows": [
-            {"name": "inventory_and_prepare_files", "app": "file_operator", "processes": None}
+            {"name": "inventory_and_prepare_files", "app": "data_engine", "processes": None}
         ]
     }
 
@@ -141,7 +141,7 @@ def test_a_contradiction_names_the_key_it_was_found_under() -> None:
 
 def test_entries_with_different_names_still_concatenate() -> None:
     """The ordinary case is unchanged: separate names stay separate entries."""
-    mine = {"workflows": [{"name": "one", "app": "file_operator"}]}
-    theirs = {"workflows": [{"name": "two", "app": "file_operator"}]}
+    mine = {"workflows": [{"name": "one", "app": "data_engine"}]}
+    theirs = {"workflows": [{"name": "two", "app": "data_engine"}]}
 
     assert [w["name"] for w in _deep_merge(mine, theirs)["workflows"]] == ["one", "two"]

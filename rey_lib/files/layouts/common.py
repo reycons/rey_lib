@@ -45,7 +45,7 @@ __all__: list[str] = [
     "DEFAULT_MAX_SAMPLE_VALUES",
 ]
 
-_log = AppLogger("file_operator.layouts")
+_log = AppLogger("data_engine.layouts")
 
 # Code-level fallbacks used only when neither the YAML nor CLI specifies a value.
 DEFAULT_MAX_SAMPLE_ROWS: int = 500
@@ -160,7 +160,7 @@ def write_outputs(
     ext  = file_path.suffix.lower()
     _state = {
         "state_ctx": ctx,
-        "app": "file_operator",
+        "app": "data_engine",
         "pipeline": getattr(ctx, "pipeline_name", None),
         "reason": "profiled",
     }
@@ -175,7 +175,7 @@ def write_outputs(
     # console prefers it over the original source file
     # (SGC_Rey_Console_Run_Artifact_Evidence_And_File_Inspector).
     log_artifact_reference(run_log, str(sample_path), role="redacted_sample", producer="redactor",
-        artifact_group="profiles", producing_app="file_operator",
+        artifact_group="profiles", producing_app="data_engine",
         artifact_type="redacted_file", source_path=source_path,
         viewer_type="file", safe_to_preview=True,
     )
@@ -186,7 +186,7 @@ def write_outputs(
     record_file_write(profile_path, **_state)
     _log.info("wrote profile: %s", profile_path)
     log_artifact_reference(run_log, str(profile_path), role="profile", producer="redactor",
-        artifact_group="profiles", producing_app="file_operator",
+        artifact_group="profiles", producing_app="data_engine",
         artifact_type="profile", source_path=source_path,
         viewer_type="file", safe_to_preview=True,
     )

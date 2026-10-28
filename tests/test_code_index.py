@@ -90,7 +90,7 @@ def _edge(path: str, target: str, kind: str = "call") -> dict[str, object]:
 
 def _snapshot(records: list[dict[str, object]]) -> CodeIndexSnapshot:
     return CodeIndexSnapshot(
-        maps={"rey_loader": RepositoryMap(header=_header("rey_loader"), records=records)},
+        maps={"data_engine": RepositoryMap(header=_header("data_engine"), records=records)},
     )
 
 
@@ -117,7 +117,7 @@ class TestTheRowsADestinationReceives:
         index(_snapshot([_file("app.py")]), recorder)
 
         assert recorder.replaced[0].header == {
-            "repository_key": "rey_loader",
+            "repository_key": "data_engine",
             "revision": "abc123",
             "branch": "main",
             "working_tree_status": "clean",
@@ -151,7 +151,7 @@ class TestTheRowsADestinationReceives:
         index(_snapshot([_file("app.py")]), recorder)
 
         assert len(recorder.calls) == 1
-        assert [entry.repository for entry in recorder.calls[0]] == ["rey_loader"]
+        assert [entry.repository for entry in recorder.calls[0]] == ["data_engine"]
 
     def test_position_is_carried_but_is_not_identity(self) -> None:
         """Line and column describe a symbol; nothing addresses one by them."""

@@ -181,7 +181,7 @@ class TestTheRealFeeds:
 
         from rey_lib.config import config_utils
 
-        path = Path("/workspaces/installations/lupo/rey_loader/data_feeds") / feed
+        path = Path("/workspaces/installations/lupo/data_engine/data_feeds") / feed
         if not path.exists():
             pytest.skip("installation config not present in this environment")
 

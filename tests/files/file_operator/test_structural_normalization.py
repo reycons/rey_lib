@@ -43,7 +43,7 @@ def _resolved_rule_set(**overrides: object):
         },
     ]
     entry["canonicalization"]["rule_sha256"] = canonical_rule_sha256(entry)
-    ctx = SimpleNamespace(file_operator_rule_sets=[entry])
+    ctx = SimpleNamespace(data_engine_rule_sets=[entry])
     return resolve_file_operator_rule_set(ctx, entry["name"])
 
 
@@ -229,7 +229,7 @@ def test_fails_before_writing_when_regions_or_outputs_are_invalid(run_log,
     mutate(entry)  # type: ignore[operator]
     entry["canonicalization"]["rule_sha256"] = canonical_rule_sha256(entry)
     rule_set = resolve_file_operator_rule_set(
-        SimpleNamespace(file_operator_rule_sets=[entry]),
+        SimpleNamespace(data_engine_rule_sets=[entry]),
         entry["name"],
     )
     source = tmp_path / "statement.csv"

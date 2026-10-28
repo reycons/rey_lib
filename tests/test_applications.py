@@ -481,7 +481,7 @@ class TestDeclaredChoices:
             "rey_lib/config/applications.py"
         ).read_text(encoding="utf-8")
 
-        assert "rey_loader" not in source
+        assert "data_engine" not in source
 
 
 class TestResolvedOnce:

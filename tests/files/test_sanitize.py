@@ -44,7 +44,7 @@ def _ctx(tmp_path: Path, *rows: object) -> SimpleNamespace:
     control = SelectingControl()
     control.selected = [dict(row) for row in rows]
     return SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         paths=_Paths(tmp_path),
         pipeline_step_name="sanitize_received_files",
         pipeline_step_id="step-4",

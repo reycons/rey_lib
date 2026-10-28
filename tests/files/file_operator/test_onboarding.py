@@ -641,4 +641,4 @@ def test_identical_rerun_reuses_revision_without_activation(tmp_path: Path) -> N
     assert result.reused is True
     assert not generated_path.exists()
     assert captured[0].version == 2
-    assert captured[0].approved_by == "file_operator_rule_set_onboarding"
+    assert captured[0].approved_by == "data_engine_rule_set_onboarding"

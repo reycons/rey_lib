@@ -33,12 +33,12 @@ from rey_lib.config.registration import discover_registrations
 #: the name. Recorded on the backlog (cli_declarations_drift_from_parsers);
 #: a row leaves this table when its declaration is fixed.
 _KNOWN_DRIFT: set[tuple[str, str, str, str]] = {
-    ('file_operator', '', 'generated-yaml', 'parser'),
-    ('file_operator', '', 'max-sample-rows', 'parser'),
-    ('file_operator', '', 'review-dir', 'parser'),
-    ('file_operator', 'shared', 'connection-alias', 'parser'),
-    ('file_operator', 'shared', 'log-level', 'parser'),
-    ('file_operator', 'shared', 'run-id', 'parser'),
+    ('data_engine', '', 'generated-yaml', 'parser'),
+    ('data_engine', '', 'max-sample-rows', 'parser'),
+    ('data_engine', '', 'review-dir', 'parser'),
+    ('data_engine', 'shared', 'connection-alias', 'parser'),
+    ('data_engine', 'shared', 'log-level', 'parser'),
+    ('data_engine', 'shared', 'run-id', 'parser'),
     ('ftp_sync', 'shared', 'connection-alias', 'parser'),
     ('ftp_sync', 'shared', 'log-level', 'parser'),
     ('ftp_sync', 'shared', 'run-id', 'parser'),
@@ -65,9 +65,9 @@ _KNOWN_DRIFT: set[tuple[str, str, str, str]] = {
     ('rey_db_admin', 'shared', 'connection-alias', 'parser'),
     ('rey_db_admin', 'shared', 'log-level', 'parser'),
     ('rey_db_admin', 'shared', 'run-id', 'parser'),
-    ('rey_loader', 'shared', 'connection-alias', 'parser'),
-    ('rey_loader', 'shared', 'log-level', 'parser'),
-    ('rey_loader', 'shared', 'run-id', 'parser'),
+    ('data_engine', 'shared', 'connection-alias', 'parser'),
+    ('data_engine', 'shared', 'log-level', 'parser'),
+    ('data_engine', 'shared', 'run-id', 'parser'),
     ('rey_messaging', '', 'no-dry-run', 'registration'),
     ('rey_messaging', 'shared', 'connection-alias', 'parser'),
     ('rey_messaging', 'shared', 'log-level', 'parser'),
@@ -86,6 +86,15 @@ _KNOWN_DRIFT: set[tuple[str, str, str, str]] = {
 
 #: The positional parameter whose values are an application's commands.
 _COMMAND = "command"
+
+#: Applications whose one declared surface is implemented by several delegated
+#: parsers, each an entry point of its own beneath the application root. Its
+#: main.py hands an invocation to one of them, so the parser that main.py
+#: reaches under pytest is only part of the surface; every one is captured and
+#: their union is compared (#1110: data_engine's loader and file parsers).
+_DELEGATED_PARSERS: dict[str, tuple[str, ...]] = {
+    "data_engine": ("data_engine/loader_main.py", "data_engine/file_main.py"),
+}
 
 
 class _Captured(Exception):
@@ -141,12 +150,43 @@ def _scope(parser: argparse.ArgumentParser) -> dict[str, Any]:
 
 
 def _parser(name: str, registration: dict[str, Any], monkeypatch: Any) -> dict[str, Any]:
-    """The application's own parser, captured before it parses anything."""
+    """The application's own parser surface, captured before anything is parsed.
+
+    One parser for an application whose entry point builds it; for one whose
+    surface is delegated (``_DELEGATED_PARSERS``), every delegate's, combined.
+    """
     root = Path(importlib.import_module(f"{name}.registration").__file__).parents[1]
-    entry = root / str(registration.get("entry_point") or "main.py")
     monkeypatch.syspath_prepend(str(root))
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", _capture)
-    spec = importlib.util.spec_from_file_location(f"_cli_agreement_{name}", entry)
+    delegates = _DELEGATED_PARSERS.get(name)
+    if delegates is None:
+        entry = root / str(registration.get("entry_point") or "main.py")
+        return _captured_scope(name, entry, name)
+    return _combined(name, {
+        one: _captured_scope(name, root / one, f"{name}_{Path(one).stem}") for one in delegates
+    })
+
+
+def _combined(name: str, scopes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Several delegated parsers as one surface; a command two of them take conflicts."""
+    owners: dict[str, list[str]] = {}
+    for delegate, scope in scopes.items():
+        for command in set(scope["commands"]) | scope["choices"]:
+            owners.setdefault(command, []).append(delegate)
+    conflicts = {command: found for command, found in owners.items() if len(found) > 1}
+    if conflicts:
+        pytest.fail(f"{name}: commands claimed by more than one delegated parser: {conflicts}")
+    return {
+        "options": set().union(*(one["options"] for one in scopes.values())),
+        "groups": set().union(*(one["groups"] for one in scopes.values())),
+        "commands": {k: v for one in scopes.values() for k, v in one["commands"].items()},
+        "choices": set().union(*(one["choices"] for one in scopes.values())),
+    }
+
+
+def _captured_scope(name: str, entry: Path, module_name: str) -> dict[str, Any]:
+    """One entry point's parser, captured at ``parse_args``."""
+    spec = importlib.util.spec_from_file_location(f"_cli_agreement_{module_name}", entry)
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)

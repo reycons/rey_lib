@@ -63,7 +63,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         # fixture does the same so code reading the path as a fact about the
         # execution sees the file the owner writes.
         run_log_path=str(tmp_path / "app.scan.jsonl"),
-        owner_app_name="rey_loader",
+        owner_app_name="data_engine",
         workflow_name="transform_load",
     )
     start_test_run(ctx)
@@ -78,7 +78,7 @@ def _log(ctx: SimpleNamespace, tmp_path: Path):
     """
     return make_db_run_log(
         tmp_path,
-        app=str(getattr(ctx, "owner_app_name", "") or "rey_loader"),
+        app=str(getattr(ctx, "owner_app_name", "") or "data_engine"),
         run_id=ctx.run_id,
         run_timestamp=str(ctx.run_timestamp),
         path=str(getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None)),
@@ -160,7 +160,7 @@ def test_append_only_accumulates(tmp_path: Path) -> None:
 
 def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     """The shared app-run helper owns public command lifecycle records."""
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     result = lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)
@@ -184,7 +184,7 @@ def test_run_app_operation_records_what_it_was_asked_to_do(tmp_path: Path) -> No
     "--table names a destination with no way to reach it" is readable only
     beside a connection the record shows was empty.
     """
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
@@ -207,7 +207,7 @@ def test_run_app_operation_records_no_settings_when_given_none(
     tmp_path: Path,
 ) -> None:
     """An app that passes none records exactly what it recorded before."""
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)
@@ -255,7 +255,7 @@ def test_run_app_operation_failure_records_error_and_reraises(
     run_app_operation re-raises, so the AppError boundary in app_runtime
     reports the error once (rule 79) -- this records the lifecycle only.
     """
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
@@ -289,7 +289,7 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(
     """A nonzero integer return is failed evidence but still returned unchanged."""
     from rey_lib.errors.error_utils import AppError
 
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
@@ -334,7 +334,7 @@ def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> N
     ctx = _ctx(tmp_path)
     run_log = _log(ctx, tmp_path)
     bind_step(step_id="prepare", step_name="Prepare", step_sequence=2,
-              app="rey_loader", workflow_name="transform_load")
+              app="data_engine", workflow_name="transform_load")
     bind_correlation("corr-1")
     try:
         log_input_discovered(run_log, input_name="trades", path=str(tmp_path / "trades.csv"),
@@ -353,7 +353,7 @@ def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> N
     assert record["step_name"] == "Prepare"
     assert record["step_sequence"] == 2
     assert record["correlation_id"] == "corr-1"
-    assert record["app"] == "rey_loader"
+    assert record["app"] == "data_engine"
 
 
 def test_write_side_sanitizer_masks_secret_like_keys(tmp_path: Path) -> None:
@@ -361,7 +361,7 @@ def test_write_side_sanitizer_masks_secret_like_keys(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = _log(ctx, tmp_path)
     log_app_execution(run_log,
-        app="rey_loader",
+        app="data_engine",
         entrypoint="python -m rey_loader",
         arguments_redacted=["--config-path", "safe.yaml"],
         working_directory=str(tmp_path),
@@ -446,7 +446,7 @@ def test_discover_runs_lists_newest_first_without_raw_data(tmp_path: Path) -> No
         (tmp_path / f"daily.{ts}.jsonl").write_text(
             "\n".join(json.dumps(record) for record in [
                 {"record_type": "RUN_START", "run_id": f"r-{ts}", "run_timestamp": ts,
-                 "timestamp": "2026-07-06T00:00:00+00:00", "app": "rey_loader"},
+                 "timestamp": "2026-07-06T00:00:00+00:00", "app": "data_engine"},
                 {"record_type": "WARNING", "run_id": f"r-{ts}", "run_timestamp": ts},
                 {"record_type": "RUN_COMPLETE", "run_id": f"r-{ts}", "run_timestamp": ts,
                  "timestamp": "2026-07-06T00:05:00+00:00", "status": status},
@@ -759,7 +759,7 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
 
 def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> None:
     """A nested app operation never writes a RUN_RESTORE_POLICY (run owner only)."""
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="data_engine")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)

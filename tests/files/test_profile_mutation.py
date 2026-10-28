@@ -36,7 +36,7 @@ def _run_log(tmp_path: Path, control: Any) -> Any:
     """A run log that commits, which is what governed evidence requires."""
     from tests.conftest import make_run_log
 
-    return make_run_log(tmp_path, app="file_operator", destination="both", control=control)
+    return make_run_log(tmp_path, app="data_engine", destination="both", control=control)
 
 
 def _ctx(tmp_path: Path, **extra: Any) -> SimpleNamespace:
@@ -48,8 +48,8 @@ def _ctx(tmp_path: Path, **extra: Any) -> SimpleNamespace:
         run_log_path=str(tmp_path / "run_log.20260810_163217.jsonl"),
         run_id="r1",
         run_timestamp="20260810_163217",
-        owner_app_name="file_operator",
-        app_name="rey_loader",
+        owner_app_name="data_engine",
+        app_name="data_engine",
         **extra,
     )
     ctx.shared_control = SelectingControl()
@@ -217,7 +217,7 @@ def test_an_existing_schema_5_sidecar_is_ignored_by_workflow_profiling(
     # gets them for free; this one is built for the boundary directly.
     # The producer is the runtime context's application (row 589, step 5).
     assert profile["producer"] == {
-        "application": "rey_loader", "operation": "record_type_profiling",
+        "application": "data_engine", "operation": "record_type_profiling",
     }
     assert profile["result"] == "record_type_profile"
     stored = _profile_row(ctx)

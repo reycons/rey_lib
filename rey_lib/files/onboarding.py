@@ -67,7 +67,7 @@ __all__ = [
 ]
 
 _INLINE_ONBOARDINGS_FIELD = "onboardings"
-_SYSTEM_APPROVER = "file_operator_rule_set_onboarding"
+_SYSTEM_APPROVER = "data_engine_rule_set_onboarding"
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _VERSIONED_FILE = re.compile(r"^(?P<name>.+)__v(?P<version>[0-9]{4,})[.]yaml$")
@@ -525,11 +525,11 @@ def _materialize_prepared_group(
     )
     log_artifact_reference(run_log,
         str(published.path),
-        role="generated_file_operator_rule_set",
-        producer="file_operator",
+        role="generated_data_engine_rule_set",
+        producer="data_engine",
         artifact_group="rule_sets",
-        producing_app="file_operator",
-        artifact_type="file_operator_rule_set",
+        producing_app="data_engine",
+        artifact_type="data_engine_rule_set",
         viewer_type="file",
         safe_to_preview=True,
         rule_set_name=published.rule_set.name,
@@ -768,9 +768,9 @@ def _write_preparation_manifest(
     log_artifact_reference(run_log,
         str(path),
         role="rule_set_input_manifest",
-        producer="file_operator",
+        producer="data_engine",
         artifact_group="rule_set_preparation",
-        producing_app="file_operator",
+        producing_app="data_engine",
         artifact_type="json",
         viewer_type="json",
         safe_to_preview=True,
@@ -875,9 +875,9 @@ def _write_trusted_total_evidence(
     log_artifact_reference(run_log,
         str(path),
         role="trusted_control_totals",
-        producer="file_operator",
+        producer="data_engine",
         artifact_group="rule_set_preparation",
-        producing_app="file_operator",
+        producing_app="data_engine",
         artifact_type="json",
         viewer_type="json",
         safe_to_preview=True,
@@ -1131,7 +1131,7 @@ def _stage_analyzer_input(
         surface.inbox,
         dest_name=dest_name,
         state_ctx=ctx,
-        app="file_operator",
+        app="data_engine",
         pipeline=getattr(ctx, "pipeline_name", None),
         reason="analyzer_input",
     )
@@ -1194,7 +1194,7 @@ def _preserve_analyzer_artifacts(
         artifacts.candidate_path,
         destination,
         state_ctx=ctx,
-        app="file_operator",
+        app="data_engine",
         pipeline=getattr(ctx, "pipeline_name", None),
         reason="analyzer_candidate_lineage",
     )
@@ -1202,7 +1202,7 @@ def _preserve_analyzer_artifacts(
         artifacts.context_path,
         destination,
         state_ctx=ctx,
-        app="file_operator",
+        app="data_engine",
         pipeline=getattr(ctx, "pipeline_name", None),
         reason="analyzer_context_lineage",
     )
@@ -1411,7 +1411,7 @@ def _materialize_revision(
         generated.yaml_path,
         config.output_root,
         state_ctx=ctx,
-        app="file_operator",
+        app="data_engine",
         pipeline=getattr(ctx, "pipeline_name", None),
         reason="validated_rule_set_publication",
     )
@@ -1436,14 +1436,14 @@ def _load_history(
         value = parse_yaml(read_text_file(path, encoding="utf-8"))
         if not isinstance(value, dict):
             raise InputError(f"Historical rule-set YAML is invalid: '{path}'.")
-        entries = value.get("file_operator_rule_sets")
+        entries = value.get("data_engine_rule_sets")
         if not isinstance(entries, list) or len(entries) != 1:
             raise InputError(
                 f"Historical rule-set YAML must contain one item: '{path}'."
             )
         item = entries[0]
         resolved = resolve_file_operator_rule_set(
-            SimpleNamespace(file_operator_rule_sets=[item]),
+            SimpleNamespace(data_engine_rule_sets=[item]),
             str(_mapping(item, str(path)).get("name") or ""),
         )
         history.append((resolved, path))

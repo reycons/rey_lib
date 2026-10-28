@@ -67,7 +67,7 @@ def _base_record(ctx, record_type: str, message: str) -> dict:
 
 def _ctx(**fields: object) -> SimpleNamespace:
     """A context carrying the standard identity every record already reads."""
-    base = {"run_id": "R102", "run_timestamp": "20260821_101500", "app_name": "rey_loader"}
+    base = {"run_id": "R102", "run_timestamp": "20260821_101500", "app_name": "data_engine"}
     base.update(fields)
     return SimpleNamespace(**base)
 
@@ -88,7 +88,7 @@ class TestLineageIsGeneric:
                 run_id="R102",
                 parent_run_id="R101",
                 subject_type="app",
-                subject_id="rey_loader",
+                subject_id="data_engine",
                 subject_name="Rey Loader",
             ),
             "RUN_START",
@@ -98,7 +98,7 @@ class TestLineageIsGeneric:
         assert record["run_id"] == "R102"
         assert record["parent_run_id"] == "R101"
         assert record["subject_type"] == "app"
-        assert record["subject_id"] == "rey_loader"
+        assert record["subject_id"] == "data_engine"
 
     def test_any_leaf_walks_back_to_the_root(self) -> None:
         # R100 pipeline -> R101 workflow -> R102 app, and R104 directly under
@@ -235,7 +235,7 @@ class TestAmbientRecordsCarryTheSameLineage:
 
         from rey_lib.logs.file_records import record_file_operation
 
-        ambient = make_run_log(tmp_path, path=str(log), app="rey_loader",
+        ambient = make_run_log(tmp_path, path=str(log), app="data_engine",
                                run_id="R102", run_timestamp="20260821_101500")
         ambient.bind_lineage(parent_run_id="R101", subject_type="app",
                              pipeline_run_id="R100")

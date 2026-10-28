@@ -87,7 +87,7 @@ def _log(log_path: Path):
     return make_run_log(
         path.parent,
         path=str(path),
-        app=str(identity.get("app") or "rey_loader"),
+        app=str(identity.get("app") or "data_engine"),
         run_id=str(identity.get("run_id")
                    or "00000000-0000-4000-8000-000000000001"),
         run_timestamp=str(identity.get("run_timestamp") or "20260822_000000"),

@@ -63,7 +63,7 @@ def _resolved_rule_set(expected_total: str = "30.00"):
     )
     entry["canonicalization"]["rule_sha256"] = canonical_rule_sha256(entry)
     return resolve_file_operator_rule_set(
-        SimpleNamespace(file_operator_rule_sets=[entry]),
+        SimpleNamespace(data_engine_rule_sets=[entry]),
         entry["name"],
     )
 

@@ -85,13 +85,13 @@ def run_batch(files: list[Path], ctx: Any, run_log, args: Any) -> int:
             path=str(file_path),
             exists=file_path.exists(),
             safe_to_preview=False,
-            source="file_operator",
+            source="data_engine",
         )
 
     log_row_count(run_log,
         count_name="files_queued",
         count=len(files),
-        subject="file_operator",
+        subject="data_engine",
     )
 
     for file_path in files:
@@ -123,12 +123,12 @@ def run_batch(files: list[Path], ctx: Any, run_log, args: Any) -> int:
     log_row_count(run_log,
         count_name="files_processed",
         count=success,
-        subject="file_operator",
+        subject="data_engine",
     )
     log_row_count(run_log,
         count_name="files_failed",
         count=failed,
-        subject="file_operator",
+        subject="data_engine",
     )
     return 0 if failed == 0 else 1
 
@@ -196,7 +196,7 @@ def _move(ctx: Any, run_log: Any, file_path: Path, dest_dir: Path,
             dest_dir,
             state_ctx=ctx,
             run_log=run_log,
-            app="file_operator",
+            app="data_engine",
             pipeline=getattr(ctx, "pipeline_name", None),
             reason=label,
             metadata={

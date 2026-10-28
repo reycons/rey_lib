@@ -431,6 +431,10 @@ _MOVE_OPERATIONS = {
 
 
 _APP_TO_PRODUCER = {
+    # A record data_engine wrote with no producer of its own; one it declared,
+    # redactor included, is kept as declared.
+    "data_engine": "loader",
+    # Read-only, for persisted logs the retired applications wrote (history).
     "file_operator": "redactor",
     # Read-only compatibility for persisted logs written before the app rename.
     "file_redactor": "redactor",

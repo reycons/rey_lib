@@ -83,7 +83,7 @@ class TestItSerializesAsAnOrdinaryMutation:
             recovery_path="",
             previous_version_path="",
             run_log_id=3,
-            application_name="file_operator",
+            application_name="data_engine",
             file_id="17",
         )
 
@@ -101,7 +101,7 @@ class TestItSerializesAsAnOrdinaryMutation:
             recovery_path="",
             previous_version_path="",
             run_log_id=3,
-            application_name="file_operator",
+            application_name="data_engine",
             file_id="17",
         )
 

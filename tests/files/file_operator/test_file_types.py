@@ -17,7 +17,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         run_log_path=str(tmp_path / "run.jsonl"),
         run_id="run-1",
         run_timestamp="20260723_120000",
-        owner_app_name="file_operator",
+        owner_app_name="data_engine",
     )
 
 

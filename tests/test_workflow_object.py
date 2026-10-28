@@ -533,7 +533,7 @@ class _Watching:
         self.seen: list[tuple[str, tuple[str, ...]]] = []
         graph.observe(self)
 
-    def changed(self, workflow: Workflow) -> None:
+    def changed(self, workflow: Workflow, notification: str | None) -> None:
         assert workflow is self.graph
         self.seen.append((workflow.state, tuple(one.state for one in workflow.steps.values())))
 
@@ -562,7 +562,7 @@ def test_a_released_step_holds_its_runs_outcome_and_an_unreleased_one_its_state(
     assert {key: one.state for key, one in graph.steps.items()} == {
         "s1": "PENDING", "s2": "PENDING", "s3": "SUCCEEDED", "s4": "PENDING"}
     assert graph.steps["s3"].current_run.parent_run_id == application_run.run_id
-    assert graph.state == "IDLE"
+    assert graph.state == "SUCCEEDED"
 
 
 def test_the_workflow_is_reusable(tmp_path: Path) -> None:
@@ -598,7 +598,30 @@ def test_each_step_is_running_while_its_run_executes_and_the_observer_is_told(
         ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "PENDING")),
         ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "RUNNING")),
         ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "SUCCEEDED")),
-        ("IDLE", ("PENDING", "PENDING", "SUCCEEDED", "SUCCEEDED")),
+        ("SUCCEEDED", ("PENDING", "PENDING", "SUCCEEDED", "SUCCEEDED")),
+    ]
+
+
+def test_the_workflow_states_each_event_as_it_happens(tmp_path: Path) -> None:
+    """#1277: entering a state and each step completing are told as the Workflow words them."""
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    told: list[str] = []
+
+    class _Told:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
+            if notification is not None:
+                told.append(notification)
+
+    graph.observe(_Told())
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, from_step="s3")
+
+    assert told == [
+        "Workflow state: RUNNING",
+        "Step s3: SUCCEEDED",
+        "Step s4: SUCCEEDED",
+        "Workflow state: SUCCEEDED",
     ]
 
 
@@ -628,7 +651,7 @@ def test_a_run_while_running_is_refused(tmp_path: Path) -> None:
     _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
 
     assert len(refused) == 1
-    assert graph.state == "IDLE"
+    assert graph.state == "SUCCEEDED"
 
 
 def test_the_projection_carries_each_steps_state_and_run(tmp_path: Path) -> None:
@@ -769,7 +792,7 @@ def test_the_projection_states_the_released_step_and_its_run(tmp_path: Path) -> 
     seen: list[Any] = []
 
     class _Watching:
-        def changed(self, workflow: Workflow) -> None:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
             seen.append(workflow.projection(ctx)["released"])
 
     graph.observe(_Watching())
@@ -786,7 +809,7 @@ def _errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
-@pytest.mark.parametrize("failing_state", ["RUNNING", "IDLE"])
+@pytest.mark.parametrize("failing_state", ["RUNNING", "SUCCEEDED"])
 def test_a_failing_workflow_observer_is_reported_and_does_not_decide_the_direction(
     tmp_path: Path, failing_state: str, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -800,7 +823,7 @@ def test_a_failing_workflow_observer_is_reported_and_does_not_decide_the_directi
     class FailOnce:
         failed = False
 
-        def changed(self, workflow: Workflow) -> None:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
             if workflow.state == failing_state and not self.failed:
                 self.failed = True
                 raise failure
@@ -811,7 +834,7 @@ def test_a_failing_workflow_observer_is_reported_and_does_not_decide_the_directi
 
     assert result == "SUCCEEDED"
     assert calls == ["p1"]
-    assert graph.state == "IDLE"
+    assert graph.state == "SUCCEEDED"
     errors = _errors(caplog)
     assert len(errors) == 1
     assert errors[0].exc_info[1].__cause__ is failure
@@ -820,7 +843,7 @@ def test_a_failing_workflow_observer_is_reported_and_does_not_decide_the_directi
     result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
     assert result == "SUCCEEDED"
     assert calls[-1] == "p2"
-    assert graph.state == "IDLE"
+    assert graph.state == "SUCCEEDED"
 
 
 def test_an_observer_failing_as_a_step_starts_does_not_stop_the_step(
@@ -836,7 +859,7 @@ def test_an_observer_failing_as_a_step_starts_does_not_stop_the_step(
     class FailWhenAStepRuns:
         failed = False
 
-        def changed(self, workflow: Workflow) -> None:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
             running = any(one.state == "RUNNING" for one in workflow.steps.values())
             if running and not self.failed:
                 self.failed = True
@@ -880,7 +903,7 @@ def test_a_failure_escaping_a_released_step_leaves_no_run_bound(
 
     assert raised.value is failure
     assert current_run() is None
-    assert graph.state == "IDLE"
+    assert graph.state == "FAILED"
 
     monkeypatch.undo()
     result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
@@ -903,7 +926,7 @@ def test_non_release_replaces_previous_step_outcome_and_notifies_projection(
     seen = []
 
     class Watching:
-        def changed(self, workflow: Workflow) -> None:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
             seen.extend(step for process in workflow.projection(ctx)["processes"]
                         for step in process["steps"] if step["id"] == "s2")
 
@@ -978,7 +1001,7 @@ def test_direction_projects_pending_active_and_completed_paths_and_resets(tmp_pa
     snapshots: list[list[dict[str, str]]] = []
 
     class Watching:
-        def changed(self, workflow: Workflow) -> None:
+        def changed(self, workflow: Workflow, notification: str | None) -> None:
             snapshots.append(workflow.relationships())
 
     graph.observe(Watching())

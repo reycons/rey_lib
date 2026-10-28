@@ -28,7 +28,7 @@ from tests.load.test_manifest_source import _row
 def _ctx(root: Path) -> SimpleNamespace:
     """The runtime a move needs: an application name and the governed root."""
     return SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         paths=SimpleNamespace(resolve=lambda name: str(root)),
     )
 

@@ -48,7 +48,7 @@ def start_test_run(ctx: Any, run_id: int | None = None) -> Any:
 def make_run_log(
     tmp_path: Path | str,
     *,
-    app: str = "rey_loader",
+    app: str = "data_engine",
     run_id: str = "00000000-0000-4000-8000-000000000001",
     run_timestamp: str = "20260822_000000",
     destination: str = "jsonl",

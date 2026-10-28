@@ -179,10 +179,10 @@ def test_legacy_actions_normalize_inside_db_utils():
 # ---------------------------------------------------------------------------
 
 def test_sql_binding_lookup():
-    m = {"name": "rey_loader", "sql_bindings": [
+    m = {"name": "data_engine", "sql_bindings": [
         _sb(name="load_staging", sql="INSERT ... RETURNING staging_id",
             result_mode="scalar_result", output={"variable": "staging_id"})]}
-    b = resolve_sql_binding(m, "rey_loader", "load_staging")
+    b = resolve_sql_binding(m, "data_engine", "load_staging")
     assert b["execution_target"] == "mapped_sql"
     assert b["sql"] == "INSERT ... RETURNING staging_id"
     assert b["result_mode"] == "scalar_result"
@@ -413,7 +413,7 @@ def test_a_routine_that_does_not_exist_is_refused_at_creation():
 
 def test_operation_mapped_sql_scalar(run_log):
     conn = object()
-    m = {"name": "rey_loader", "sql_bindings": [
+    m = {"name": "data_engine", "sql_bindings": [
         _sb(name="load_staging", sql="INSERT INTO staging VALUES (:row_key) RETURNING staging_id",
             result_mode="scalar_result",
             output={"variable": "staging_id", "load_to_ctx": "staging_id"},
@@ -422,7 +422,7 @@ def test_operation_mapped_sql_scalar(run_log):
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = 99
-        result = execute_operation(object(), run_log, conn, "rey_loader",
+        result = execute_operation(object(), run_log, conn, "data_engine",
                                    {"execution_target": "mapped_sql", "binding": "load_staging"},
                                    {"row_key": "K"}, run_ctx)
     db.execute_sql.assert_called_once_with(
@@ -458,13 +458,13 @@ def test_operation_adhoc_dataset_returns_rows(run_log):
 def test_mapped_sql_logs_dataset_row_count_without_raw_sql(run_log, tmp_path: Path):
     ctx = _log_ctx(tmp_path)
     conn = object()
-    m = {"name": "rey_loader", "sql_bindings": [
+    m = {"name": "data_engine", "sql_bindings": [
         _sb(name="find_rows", sql="SELECT secret_value FROM t WHERE id = :row_key",
             result_mode="dataset_result", inp={"row_key": "row_key"})]}
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = [{"id": 1}, {"id": 2}]
-        execute_operation(ctx, run_log, conn, "rey_loader",
+        execute_operation(ctx, run_log, conn, "data_engine",
                           {"execution_target": "mapped_sql", "binding": "find_rows"},
                           {"row_key": 5})
 
@@ -764,7 +764,7 @@ def test_apps_do_not_parse_operation_map_internals():
     apps_dir = Path(__file__).resolve().parents[2]  # .../apps
     forbidden = ("routine_bindings", "sql_bindings", "return_variable", "call_type")
     checked = 0
-    for app in ("rey_loader/rey_loader", "rey_db_admin/rey_db_admin"):
+    for app in ("data_engine/data_engine", "rey_db_admin/rey_db_admin"):
         root = apps_dir / app
         if not root.exists():
             continue

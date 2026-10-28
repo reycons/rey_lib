@@ -39,8 +39,8 @@ RUN_LOG = LOGS / "run_log.py"
 
 # The applications that enter through the shared process boundary.
 ENTRY_POINTS = (
-    "file_operator/main.py",
-    "rey_loader/main.py",
+    "data_engine/data_engine/file_main.py",
+    "data_engine/data_engine/loader_main.py",
     "rey_analyzer/main.py",
     "rey_messaging/rey_messaging/cli.py",
     "rey_db_admin/main.py",
@@ -433,8 +433,8 @@ class TestAdoptionIsAMove:
         from rey_lib.config.config_utils import Namespace
 
         ctx = Namespace({
-            "run_id": "R1", "run_timestamp": "ts", "app_name": "rey_loader",
-            "owner_app_name": "rey_loader", "run_log_dir": str(tmp_path),
+            "run_id": "R1", "run_timestamp": "ts", "app_name": "data_engine",
+            "owner_app_name": "data_engine", "run_log_dir": str(tmp_path),
             "log_file": str(tmp_path / "a.jsonl"),
             "parent_run_id": "R0", "subject_type": "app", "subject_id": "s",
             "subject_name": "S", "pipeline_run_id": "P1", "workflow_run_id": "W1",
@@ -458,7 +458,7 @@ class TestAdoptionIsAMove:
         from rey_lib.config.config_utils import Namespace
 
         ctx = Namespace({
-            "run_id": "R1", "run_timestamp": "ts", "app_name": "rey_loader",
+            "run_id": "R1", "run_timestamp": "ts", "app_name": "data_engine",
             "log_file": str(tmp_path / "a.jsonl"),
             "runtime": Namespace({"pipeline_run_id": "P1"}),
         })

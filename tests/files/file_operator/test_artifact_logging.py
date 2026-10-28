@@ -22,7 +22,7 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
         run_log_path=str(tmp_path / "run_log.20260708_000000.jsonl"),
         run_id="r1",
         run_timestamp="20260708_000000",
-        owner_app_name="file_operator",
+        owner_app_name="data_engine",
     )
 
 

@@ -620,7 +620,7 @@ class TestTheCodeIndexIsAskedThroughItsOwner:
                                  repository_key="rey_lib", relative_path="rey_lib/control.py",
                                  qualified_name="Control.end", binding_name="end_step"),
                 IndexedCodeReach(installation="local", map_name="loader",
-                                 repository_key="rey_loader", relative_path="main.py",
+                                 repository_key="data_engine", relative_path="main.py",
                                  qualified_name="run", binding_name="end_step"),
             ),
         )

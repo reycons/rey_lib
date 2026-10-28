@@ -228,10 +228,10 @@ class TestTheRulesThemselvesStillWork:
         held = ColumnTransform(
             _declaration({"name": "who",
                           "transform": {"type": "constant", "value": "{app_name}"}}),
-            context=SimpleNamespace(app_name="rey_loader"),
+            context=SimpleNamespace(app_name="data_engine"),
         )
 
-        assert held.transform([{}]) == [{"who": "rey_loader"}]
+        assert held.transform([{}]) == [{"who": "data_engine"}]
 
     def test_a_hash_is_taken_across_finished_columns(self) -> None:
         """Deferred to a second pass, which is the declaration's meaning.

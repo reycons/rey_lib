@@ -116,7 +116,7 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
 
     run_id = extra.pop("run_id", "00000000-0000-4000-8000-000000000001")
     run_log = RunLog(
-        app="rey_loader",
+        app="data_engine",
         run_id=run_id,
         run_timestamp="20260822_000000",
         writer=make_log_writer(
@@ -125,7 +125,7 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
             database=_RecordingDatabase(),
         ),
         builder=LogRecordBuilder(run_id=run_id, run_timestamp="20260822_000000",
-                                 app="rey_loader"),
+                                 app="data_engine"),
         control=control,
     )
     for key, value in extra.items():

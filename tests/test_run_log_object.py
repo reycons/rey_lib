@@ -38,12 +38,12 @@ class TestItTakesNoContext:
         assert reads == []
 
     def test_a_record_is_built_from_owned_state(self, tmp_path: Path) -> None:
-        run_log = make_db_run_log(tmp_path, app="rey_loader", workflow="transform")
+        run_log = make_db_run_log(tmp_path, app="data_engine", workflow="transform")
 
         run_log.append("ROW_COUNT", count_name="loaded", count=7)
 
         row = _rows(run_log)[0]
-        assert row["app"] == "rey_loader"
+        assert row["app"] == "data_engine"
         assert row["workflow_name"] == "transform"
         assert row["run_id"] == run_log.run_id
 

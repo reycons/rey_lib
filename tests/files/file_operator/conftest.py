@@ -53,7 +53,7 @@ def row_dicts() -> list[dict]:
 def make_run_log(
     tmp_path,
     *,
-    app: str = "file_operator",
+    app: str = "data_engine",
     run_id: str = "00000000-0000-4000-8000-000000000001",
     run_timestamp: str = "20260822_000000",
     path: str | None = None,

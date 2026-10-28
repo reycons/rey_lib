@@ -70,7 +70,7 @@ def _control(tmp_path: Path) -> SelectingControl:
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
     ctx = SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         paths=_Paths(tmp_path),
         pipeline_step_name="create_prepared_files",
         pipeline_step_id="step-6",
@@ -145,7 +145,7 @@ def _profile(
     shared = {
         "profile_schema_version": 1,
         "source_hash": source_hash or sha256_file(source),
-        "profiler": {"application": "file_operator"},
+        "profiler": {"application": "data_engine"},
         "sampling_strategy": "random_without_replacement_v1",
         "requested_sample_rows": 500,
         "sampled_rows": 1,
@@ -186,7 +186,7 @@ def _profile(
         file_id,
         source_hash=shared["source_hash"],
         profile_schema_version=1,
-        profile_method="file_operator",
+        profile_method="data_engine",
         distribution={},
     )
     for representation in ("clear", "redacted"):

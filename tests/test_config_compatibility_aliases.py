@@ -140,7 +140,7 @@ data_sources:
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        build_ctx_from_args(args, app_name="rey_loader")
+        build_ctx_from_args(args, app_name="data_engine")
 
     assert "FATAL: failed to load config" in str(exc_info.value)
     assert "trades" in str(exc_info.value)

@@ -75,7 +75,7 @@ def test_two_instances_of_one_application_do_not_share_configuration() -> None:
                             config=governed, steps=[])
     second = WorkflowProcess(name="app", ordinal=2, application=application,
                              config=governed, steps=[])
-    first.config["app"]["repositories"].append("rey_loader")
+    first.config["app"]["repositories"].append("data_engine")
 
     assert second.config == {"app": {"repositories": ["rey_lib"]}}
     assert governed == {"app": {"repositories": ["rey_lib"]}}

@@ -46,7 +46,7 @@ REJECTION_PREFIX = "REJECTED"
 # fencing and no leftover JSON-envelope wrapper. Other types (markdown, text,
 # html) pass through unvalidated.
 _STRICT_ARTIFACT_TYPES = frozenset(
-    {"sql", "ddl_commented_sql", "python", "shell", "yaml", "rey_loader_yaml",
+    {"sql", "ddl_commented_sql", "python", "shell", "yaml", "data_engine_yaml",
      "json", "xml", "csv"}
 )
 

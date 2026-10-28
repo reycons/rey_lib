@@ -209,7 +209,7 @@ def materialize_file_operator_rule_set(
 
     item["lineage"]["validation_evidence_sha256"] = validation.evidence_sha256
     final_rule_set = _resolve_generated_item(item, versioned_name)
-    wrapper = {"file_operator_rule_sets": [item]}
+    wrapper = {"data_engine_rule_sets": [item]}
     yaml_text = dump_yaml(wrapper, sort_keys=False)
     if not yaml_text.endswith("\n"):
         yaml_text += "\n"
@@ -217,7 +217,7 @@ def materialize_file_operator_rule_set(
     if not isinstance(reparsed, dict):
         raise InputError("Generated File Operator YAML root is not a mapping.")
     round_trip = _resolve_generated_item(
-        reparsed["file_operator_rule_sets"][0],
+        reparsed["data_engine_rule_sets"][0],
         versioned_name,
     )
     if round_trip.rule_sha256 != final_rule_set.rule_sha256:
@@ -229,11 +229,11 @@ def materialize_file_operator_rule_set(
     if ctx is not None:
         log_artifact_reference(run_log,
             str(yaml_path),
-            role="generated_file_operator_rule_set",
-            producer="file_operator",
+            role="generated_data_engine_rule_set",
+            producer="data_engine",
             artifact_group="rule_sets",
-            producing_app="file_operator",
-            artifact_type="file_operator_rule_set",
+            producing_app="data_engine",
+            artifact_type="data_engine_rule_set",
             viewer_type="file",
             safe_to_preview=True,
             rule_set_name=versioned_name,
@@ -943,7 +943,7 @@ def _resolve_generated_item(
 ) -> FileOperatorRuleSet:
     try:
         return resolve_file_operator_rule_set(
-            SimpleNamespace(file_operator_rule_sets=[item]),
+            SimpleNamespace(data_engine_rule_sets=[item]),
             versioned_name,
         )
     except Exception as exc:

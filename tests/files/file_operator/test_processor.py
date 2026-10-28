@@ -31,7 +31,7 @@ def _make_run_ctx(tmp_path: Path) -> types.SimpleNamespace:
         run_log_path=str(tmp_path / "run_log.20260709_000000.jsonl"),
         run_id="r1",
         run_timestamp="20260709_000000",
-        owner_app_name="file_operator",
+        owner_app_name="data_engine",
     )
 
 
@@ -45,7 +45,7 @@ def _make_state_ctx(tmp_path: Path) -> types.SimpleNamespace:
         run_log_path=str(tmp_path / "logs" / "daily.20260713_120000.jsonl"),
         run_id="run-1",
         run_timestamp="20260713_120000",
-        owner_app_name="file_operator",
+        owner_app_name="data_engine",
         pipeline_name="daily",
         pipeline_run_id="run-1",
         pipeline_step_name="redact",
@@ -196,7 +196,7 @@ class TestRunBatch:
         # The run log owns where records land, so it is opened on the log this
         # test reads rather than on the fixture's default.
         batch_log = make_run_log(
-            tmp_path, app="file_operator", run_id="run-1",
+            tmp_path, app="data_engine", run_id="run-1",
             run_timestamp="20260713_120000", path=str(log_path),
         )
 

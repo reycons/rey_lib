@@ -27,10 +27,10 @@ from typing import Any
 from rey_lib.run import state
 
 PLAN: list[dict[str, Any]] = [
-    {"index": 1, "name": "read_source", "app": "file_operator"},
-    {"index": 2, "name": "classify", "app": "file_operator"},
-    {"index": 3, "name": "sanitize", "app": "file_operator"},
-    {"index": 4, "name": "load", "app": "rey_loader"},
+    {"index": 1, "name": "read_source", "app": "data_engine"},
+    {"index": 2, "name": "classify", "app": "data_engine"},
+    {"index": 3, "name": "sanitize", "app": "data_engine"},
+    {"index": 4, "name": "load", "app": "data_engine"},
 ]
 
 

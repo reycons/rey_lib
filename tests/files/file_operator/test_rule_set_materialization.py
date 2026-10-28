@@ -360,7 +360,7 @@ def test_materializes_only_after_two_full_sample_executions(run_log,
     assert second.validation.evidence_path.read_bytes() == first_validation
 
     parsed = parse_yaml(first_yaml.decode("utf-8"))
-    item = parsed["file_operator_rule_sets"][0]
+    item = parsed["data_engine_rule_sets"][0]
     assert item["name"] == "monthly_statement__v0001"
     assert item["file_references"] == [
         {
@@ -530,6 +530,6 @@ def test_resolver_rejects_tampered_executable_content(run_log, tmp_path: Path) -
         match="does not match the canonical executable rule content",
     ):
         resolve_file_operator_rule_set(
-            SimpleNamespace(file_operator_rule_sets=[item]),
+            SimpleNamespace(data_engine_rule_sets=[item]),
             item["name"],
         )

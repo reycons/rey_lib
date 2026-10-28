@@ -38,7 +38,7 @@ def _tree(tmp_path: Path) -> Path:
         {"record_type": "RUN_START", "run_id": "R101", "parent_run_id": "R100",
          "subject_type": "workflow", "subject_id": "load_only", "timestamp": "t2"},
         {"record_type": "RUN_START", "run_id": "R102", "parent_run_id": "R101",
-         "subject_type": "app", "subject_id": "rey_loader", "timestamp": "t3"},
+         "subject_type": "app", "subject_id": "data_engine", "timestamp": "t3"},
         {"record_type": "ERROR", "run_id": "R102", "timestamp": "t4"},
         {"record_type": "RUN_COMPLETE", "run_id": "R102", "status": "failed",
          "timestamp": "t5"},
@@ -83,7 +83,7 @@ class TestTheExecutionTreeIsReadable:
 
         assert runs["R100"]["subject_type"] == "pipeline"
         assert runs["R101"]["subject_type"] == "workflow"
-        assert runs["R102"]["subject_id"] == "rey_loader"
+        assert runs["R102"]["subject_id"] == "data_engine"
         assert runs["R104"]["subject_id"] == "ftp_sync"
 
     def test_counts_are_each_run_s_own(self, tmp_path: Path) -> None:

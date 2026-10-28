@@ -60,7 +60,7 @@ from rey_lib.logs import (
     log_run_start,
     log_step_failure,
 )
-from rey_lib.run.run import FAILED, SUCCEEDED
+from rey_lib.run.run import FAILED, NOT_RUN, SKIPPED, SUCCEEDED
 from rey_lib.workflow.workflow_process import WorkflowProcess
 from rey_lib.workflow.workflow_step import RUNNING, WorkflowStep
 
@@ -69,8 +69,11 @@ __all__ = ["Workflow"]
 _logger = AppLogger(__name__)
 
 
-#: A Workflow's state when no ``direct`` is executing.
+#: A Workflow's state before its first ``direct``, and after a refused one.
 IDLE = "IDLE"
+
+#: A step's states that are the outcome of its Run: what it completed as.
+_STEP_OUTCOMES = frozenset({SUCCEEDED, FAILED, SKIPPED, NOT_RUN})
 
 
 class Workflow:
@@ -94,7 +97,9 @@ class Workflow:
         The steps of every process, keyed by ``WorkflowStep.id``, in
         workflow-wide ordinal order.
     state : str
-        ``RUNNING`` while ``direct`` executes, else ``IDLE``.
+        ``RUNNING`` while ``direct`` executes; then the direction's outcome,
+        ``SUCCEEDED`` or ``FAILED``, until the next one. ``IDLE`` before the first
+        direction and after a refused one.
     released : WorkflowStep | None
         The step this Workflow last released -- the one running while it directs.
     run_id : int | None
@@ -423,18 +428,26 @@ class Workflow:
         self._observers.append(observer)
 
     def step_changed(self, step: WorkflowStep) -> None:
-        """One of this Workflow's steps changed its state: so has this Workflow."""
+        """One of this Workflow's steps changed its state: so has this Workflow.
+
+        A step that has completed is announced with its outcome.
+        """
         if step in self._direction_steps:
             self._observed_steps.add(step)
-        self._changed()
+        completed = step.state in _STEP_OUTCOMES
+        self._changed(f"Step {step.id}: {step.state}" if completed else None)
 
     def _become(self, state: str) -> None:
         """Take ``state``, and tell the observers."""
         self.state = state
-        self._changed()
+        self._changed(f"Workflow state: {state}")
 
-    def _changed(self) -> None:
+    def _changed(self, notification: Optional[str] = None) -> None:
         """Tell every display observer this Workflow changed (backlog 1045).
+
+        ``notification`` is the event, as this Workflow states it, when the change
+        is one: the Workflow entering a state, or a step completing. None for a
+        change that is not (a step starting, say). The observer is told both.
 
         The boundary where the Workflow calls external display behaviour: an
         observer cannot decide whether the domain execution succeeds. Each
@@ -444,7 +457,7 @@ class Workflow:
         """
         for observer in list(self._observers):
             try:
-                observer.changed(self)
+                observer.changed(self, notification)
             except Exception as exc:  # noqa: BLE001 — canonical notification boundary
                 error = exc if isinstance(exc, AppError) else AppError(
                     f"workflow '{self.name}': display observer failed")
@@ -671,15 +684,19 @@ class Workflow:
         """
         if not self._running.acquire(blocking=False):
             raise AppError(f"workflow '{self.name}' is already running.")
+        outcome: Optional[str] = FAILED
         try:
             self._direction_steps = ()
             self._observed_steps.clear()
             self._become(RUNNING)
-            return self._direct(self.runtime, apply=apply, step=step,
-                             from_step=from_step, to_step=to_step, metadata=metadata)
+            outcome = self._direct(self.runtime, apply=apply, step=step,
+                                   from_step=from_step, to_step=to_step, metadata=metadata)
+            return outcome
         finally:
             try:
-                self._become(IDLE)
+                # The direction's outcome is this Workflow's state until the next
+                # one; a direction that raised failed. A refused one ran nothing.
+                self._become(IDLE if outcome is None else outcome)
             finally:
                 self._running.release()
 

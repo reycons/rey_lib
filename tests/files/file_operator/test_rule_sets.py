@@ -215,7 +215,7 @@ def _rule_set() -> dict[str, object]:
 
 
 def _ctx(*entries: object) -> SimpleNamespace:
-    return SimpleNamespace(file_operator_rule_sets=list(entries))
+    return SimpleNamespace(data_engine_rule_sets=list(entries))
 
 
 def _refresh_rule_hash(item: dict[str, object]) -> dict[str, object]:
@@ -355,8 +355,8 @@ def test_rejects_duplicate_rule_set_revision() -> None:
 @pytest.mark.parametrize(
     ("ctx", "message"),
     [
-        (SimpleNamespace(), "missing required 'file_operator_rule_sets'"),
-        (SimpleNamespace(file_operator_rule_sets={}), "must be a list"),
+        (SimpleNamespace(), "missing required 'data_engine_rule_sets'"),
+        (SimpleNamespace(data_engine_rule_sets={}), "must be a list"),
         (_ctx(), "must not be empty"),
     ],
 )

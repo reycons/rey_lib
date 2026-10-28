@@ -46,7 +46,7 @@ class TestScaffoldConfigRoot:
         result = scaffold_config_root(cr)
 
         assert result.success
-        for app in ["ftp_sync", "rey_loader", "rey_analyzer", "rey_console", "file_operator"]:
+        for app in ["ftp_sync", "data_engine", "rey_analyzer", "rey_console"]:
             assert (cr / app).is_dir(), f"missing: {app}"
             assert (cr / app / "app.yaml").exists(), f"missing app.yaml: {app}"
 
@@ -67,19 +67,19 @@ class TestScaffoldConfigRoot:
         scaffold_config_root(cr)
 
         assert (cr / "ftp_sync" / "data_feeds").is_dir()
-        assert (cr / "rey_loader" / "data_sources").is_dir()
+        assert (cr / "data_engine" / "data_sources").is_dir()
         # No hook SQL folder: the Loader hook mechanism is gone (backlog 243).
-        assert not (cr / "rey_loader" / "sql_configs").exists()
-        assert (cr / "rey_loader" / "diagnostics").is_dir()
+        assert not (cr / "data_engine" / "sql_configs").exists()
+        assert (cr / "data_engine" / "diagnostics").is_dir()
         assert (cr / "rey_analyzer" / "analysis_configs").is_dir()
         assert (cr / "rey_analyzer" / "llm_configs").is_dir()
         assert (cr / "rey_analyzer" / "contracts").is_dir()
-        assert (cr / "file_operator" / "redact").is_dir()
+        assert (cr / "data_engine" / "redact").is_dir()
 
     def test_creates_diagnostics_default_yaml(self, tmp_path):
         cr = tmp_path / "v01"
         scaffold_config_root(cr)
-        diag = cr / "rey_loader" / "diagnostics" / "default.yaml"
+        diag = cr / "data_engine" / "diagnostics" / "default.yaml"
         assert diag.exists()
         data = yaml.safe_load(diag.read_text())
         assert "diagnostics" in data

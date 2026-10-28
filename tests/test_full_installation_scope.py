@@ -55,16 +55,16 @@ config_loading:
   apps:
     rey_console:
       include:
-        - '{{configs}}/sources/rey_loader'
-    rey_loader:
+        - '{{configs}}/sources/data_engine'
+    data_engine:
       include:
-        - '{{configs}}/sources/rey_loader'
+        - '{{configs}}/sources/data_engine'
     rey_db_admin:
       include:
         - '{{configs}}/sources/rey_db_admin'
 """)
 
-    _write(cfg / "sources" / "rey_loader" / "internal_etl.yaml", """\
+    _write(cfg / "sources" / "data_engine" / "internal_etl.yaml", """\
 data_sources:
   - name: transform_load
   - name: sql_apply

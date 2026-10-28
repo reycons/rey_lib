@@ -63,7 +63,7 @@ def _hosted(published: tuple[ApplicationCapability, ...] = (_TEXT, _FACTS),
             catalogue: dict[str, Any] | None = None,
             kind: str = "configured_file") -> tuple[HostedCapabilities, _Control]:
     control = _Control([_row(one) for one in published] if rows is None else rows)
-    application = Application(name="file_operator", capabilities=published)
+    application = Application(name="data_engine", capabilities=published)
     held = {"text": "hello"}
     if catalogue is None:
         catalogue = {
@@ -79,7 +79,7 @@ def test_an_agreed_capability_calls_the_catalogue_over_the_held_object() -> None
     assert hosted.invoke("file.text", {"max_bytes": 4}) == "hell"
     assert hosted.invoke("file.facts", {}) == {"file_type": "text"}
     # The governed read asks by the application's own name, once.
-    assert control.asked == ["file_operator"]
+    assert control.asked == ["data_engine"]
 
 
 @pytest.mark.parametrize("field,value", [
@@ -128,7 +128,7 @@ def test_an_unknown_key_is_refused_by_name() -> None:
 
 
 def test_a_failed_governed_read_leaves_no_key_invocable() -> None:
-    application = Application(name="file_operator", capabilities=(_TEXT, _FACTS))
+    application = Application(name="data_engine", capabilities=(_TEXT, _FACTS))
     catalogue = {"file.facts": lambda inputs: {}}
     # Construction does not fail: the application still hosts its object.
     hosted = HostedCapabilities(application, _Control(None), catalogue, "configured_file")

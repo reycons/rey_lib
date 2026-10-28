@@ -98,9 +98,9 @@ class TestIdentityIsTheConfiguredConnection:
 
     def test_two_names_in_one_installation_are_two_objects(self) -> None:
         path = "/installations/wolff_popper/config.yaml"
-        ctx = _ctx(path, "control", "rey_loader")
+        ctx = _ctx(path, "control", "data_engine")
 
-        assert shared_connection(ctx, "control") is not shared_connection(ctx, "rey_loader")
+        assert shared_connection(ctx, "control") is not shared_connection(ctx, "data_engine")
 
     def test_an_unconfigured_name_says_what_is_configured(self) -> None:
         ctx = _ctx("/installations/wolff_popper/config.yaml", "control")
@@ -113,7 +113,7 @@ class TestTheRuntimeOwnsTheLifetime:
     """Held until the runtime ends, then closed once."""
 
     def test_collecting_the_owner_closes_what_it_built(self) -> None:
-        ctx = _ctx("/installations/wolff_popper/config.yaml", "control", "rey_loader")
+        ctx = _ctx("/installations/wolff_popper/config.yaml", "control", "data_engine")
         opened: list[str] = []
 
         class _Handle:
@@ -123,7 +123,7 @@ class TestTheRuntimeOwnsTheLifetime:
             def close(self) -> None:
                 opened.remove(self.name)
 
-        for name in ("control", "rey_loader"):
+        for name in ("control", "data_engine"):
             connection = shared_connection(ctx, name)
             opened.append(name)
             connection._handle = _Handle(name)

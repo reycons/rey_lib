@@ -33,8 +33,8 @@ from rey_lib.tree.collection import CollectionDataObject
 APPLICATIONS = [
     {"id": "rey_console", "label": "Rey Console", "icon": "app.rey_console",
      "application_id": "rey_console"},
-    {"id": "file_operator", "label": "File Operator", "icon": "",
-     "application_id": "file_operator"},
+    {"id": "data_engine", "label": "File Operator", "icon": "",
+     "application_id": "data_engine"},
 ]
 
 TOOLS = [{"id": "rebuild_index", "label": "Rebuild Index"}]
@@ -115,7 +115,7 @@ def test_a_feeder_carries_the_identity_and_names_no_action() -> None:
     made = CollectionDataObject().children(object(), APPLICATION_ROOT, APPLICATIONS)
 
     assert made[0]["node_type"] == "application"
-    assert made[0]["application_id"] == "file_operator"
+    assert made[0]["application_id"] == "data_engine"
     assert "reference" not in made[0]
     assert "text_click" not in made[0]
     assert "buttons" not in made[0]
@@ -150,7 +150,7 @@ def test_a_member_s_published_node_type_is_its_own() -> None:
     """Backlog 1098: ai_app's node is its own node type; every other stays an application."""
     members = [
         {"id": "ai_app", "label": "AI", "node_type": "ai_application", "application_id": "ai_app"},
-        {"id": "rey_loader", "label": "Loader", "node_type": "", "application_id": "rey_loader"},
+        {"id": "data_engine", "label": "Loader", "node_type": "", "application_id": "data_engine"},
     ]
 
     made = CollectionDataObject().children(object(), APPLICATION_ROOT, members)
@@ -163,7 +163,7 @@ def test_an_opening_member_s_row_carries_its_subject_key() -> None:
     """#1240: the row data holds its tree.subject_panel key; a tool's row holds none."""
     members = [
         {"id": "ai_app", "label": "AI", "node_type": "ai_application", "application_id": "ai_app"},
-        {"id": "rey_loader", "label": "Loader", "node_type": "", "application_id": "rey_loader"},
+        {"id": "data_engine", "label": "Loader", "node_type": "", "application_id": "data_engine"},
     ]
 
     made = CollectionDataObject().children(object(), APPLICATION_ROOT, members)

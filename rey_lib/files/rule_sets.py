@@ -1,7 +1,7 @@
 """Validation and resolution for durable File Operator rule sets.
 
 The application context is already assembled by ``rey_lib.config``.  This
-module validates that resolved ``ctx.file_operator_rule_sets`` surface and
+module validates that resolved ``ctx.data_engine_rule_sets`` surface and
 returns immutable values for later inspection and execution stages.  It does
 not read YAML, classify files, execute rules, or select Rey Loader transforms.
 """
@@ -32,7 +32,7 @@ __all__ = [
     "resolve_file_operator_rule_sets",
 ]
 
-_SECTION = "file_operator_rule_sets"
+_SECTION = "data_engine_rule_sets"
 _VERSIONED_NAME = re.compile(
     r"^(?P<base>[A-Za-z0-9][A-Za-z0-9_.-]*)__v(?P<version>[0-9]{4,})$"
 )
@@ -186,26 +186,26 @@ class FileOperatorRuleSet:
 
 
 def resolve_file_operator_rule_sets(ctx: Any) -> tuple[FileOperatorRuleSet, ...]:
-    """Validate and return every resolved ``ctx.file_operator_rule_sets`` item."""
+    """Validate and return every resolved ``ctx.data_engine_rule_sets`` item."""
 
     entries = getattr(ctx, _SECTION, None)
     if entries is None:
         raise RedactorError(
             "Resolved context is missing required "
-            "'file_operator_rule_sets' configuration."
+            "'data_engine_rule_sets' configuration."
         )
     if not isinstance(entries, list):
-        raise RedactorError("Resolved ctx.file_operator_rule_sets must be a list.")
+        raise RedactorError("Resolved ctx.data_engine_rule_sets must be a list.")
     if not entries:
-        raise RedactorError("Resolved ctx.file_operator_rule_sets must not be empty.")
+        raise RedactorError("Resolved ctx.data_engine_rule_sets must not be empty.")
 
     resolved = tuple(
         _parse_rule_set(entry, index) for index, entry in enumerate(entries)
     )
     names = [rule_set.name for rule_set in resolved]
-    _require_unique(names, "file_operator_rule_sets names")
+    _require_unique(names, "data_engine_rule_sets names")
     revisions = [(item.rule_set_name, item.version) for item in resolved]
-    _require_unique(revisions, "file_operator_rule_sets revisions")
+    _require_unique(revisions, "data_engine_rule_sets revisions")
     return resolved
 
 
@@ -221,7 +221,7 @@ def resolve_file_operator_rule_set(ctx: Any, name: str) -> FileOperatorRuleSet:
     if not matches:
         raise RedactorError(
             f"File Operator rule set '{requested}' was not found in "
-            "ctx.file_operator_rule_sets."
+            "ctx.data_engine_rule_sets."
         )
     return matches[0]
 
@@ -236,11 +236,11 @@ def canonical_rule_sha256(entry: Any) -> str:
     excluded to avoid hashing the digest into itself.
     """
 
-    value = _mapping(entry, "file_operator_rule_set")
+    value = _mapping(entry, "data_engine_rule_set")
     missing = [key for key in _CANONICAL_RULE_KEYS if key not in value]
     if missing:
         raise _error(
-            "file_operator_rule_set",
+            "data_engine_rule_set",
             "is missing canonical fields: " + ", ".join(missing),
         )
     projection = {key: _canonical_plain(value[key]) for key in _CANONICAL_RULE_KEYS}

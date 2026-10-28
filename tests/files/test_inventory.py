@@ -126,8 +126,8 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         run_log_dir=str(run_dir),
         installation=SimpleNamespace(name="test_installation"),
-        app_name="rey_loader",
-        name="rey_loader",
+        app_name="data_engine",
+        name="data_engine",
         # The governed manifest is a table in the control database, so a
         # context that reaches it carries the Control it is reached through.
         shared_control=_InsertingControl(),
@@ -414,7 +414,7 @@ def test_manifest_record_carries_every_required_field(run_log, tmp_path: Path) -
         "size_bytes",
         "source_name",
     ]
-    assert row["producer"]["application"] == "rey_loader"
+    assert row["producer"]["application"] == "data_engine"
     assert row["file_name"] == "AcmeHoldMay26.xlsx"
     assert row["file_extension"] == "xlsx"
     assert row["path"] == str(inbox / "AcmeHoldMay26.xlsx")

@@ -84,7 +84,7 @@ def _ctx(tmp_path: Path) -> tuple[SimpleNamespace, SelectingControl]:
     """A context that persists through the control database it carries."""
     control = SelectingControl()
     ctx = SimpleNamespace(
-        app_name="rey_loader",
+        app_name="data_engine",
         paths=SimpleNamespace(resolve=lambda name: tmp_path),
         shared_control=control,
     )

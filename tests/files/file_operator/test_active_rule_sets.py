@@ -27,7 +27,7 @@ class _Paths:
     def __init__(self, configs: Path, destination: Path) -> None:
         self._values = {
             "configs": configs,
-            "file_operator_rule_sets_config": destination,
+            "data_engine_rule_sets_config": destination,
         }
 
     def resolve(self, name: str) -> Path:
@@ -39,10 +39,10 @@ def _activation_ctx(
     entries: list[dict[str, object]] | None = None,
 ) -> SimpleNamespace:
     configs = tmp_path / "installation"
-    destination = configs / "work" / "file_operator" / "file_operator_rule_sets.yaml"
+    destination = configs / "work" / "data_engine" / "data_engine_rule_sets.yaml"
     return SimpleNamespace(
         paths=_Paths(configs, destination),
-        file_operator_rule_sets=entries or [],
+        data_engine_rule_sets=entries or [],
         shared_control=_Control(),
     )
 
@@ -66,7 +66,7 @@ def _materialized(
 
 def _installed_items(path: Path) -> list[dict[str, object]]:
     root = parse_yaml(path.read_text(encoding="utf-8"))
-    return root["file_operator_rule_sets"]
+    return root["data_engine_rule_sets"]
 
 
 def test_activation_preserves_versions_and_atomically_switches_active_version(run_log, 
@@ -154,7 +154,7 @@ def test_exactly_one_active_matching_identity_is_required(run_log, tmp_path: Pat
     source = request.source_paths[0]
 
     exact = resolve_active_rule_set_for_file(
-        SimpleNamespace(file_operator_rule_sets=[item]),
+        SimpleNamespace(data_engine_rule_sets=[item]),
         source,
     )
     assert exact.name == "monthly_statement__v0001"
@@ -164,7 +164,7 @@ def test_exactly_one_active_matching_identity_is_required(run_log, tmp_path: Pat
     disabled["canonicalization"]["rule_sha256"] = canonical_rule_sha256(disabled)
     with pytest.raises(InputError, match="found 0"):
         resolve_active_rule_set_for_file(
-            SimpleNamespace(file_operator_rule_sets=[disabled]),
+            SimpleNamespace(data_engine_rule_sets=[disabled]),
             source,
         )
 
@@ -174,7 +174,7 @@ def test_exactly_one_active_matching_identity_is_required(run_log, tmp_path: Pat
     overlapping["canonicalization"]["rule_sha256"] = canonical_rule_sha256(overlapping)
     with pytest.raises(InputError, match="found 2"):
         resolve_active_rule_set_for_file(
-            SimpleNamespace(file_operator_rule_sets=[item, overlapping]),
+            SimpleNamespace(data_engine_rule_sets=[item, overlapping]),
             source,
         )
 
@@ -196,14 +196,14 @@ def test_file_reference_requires_filename_and_header_when_both_are_present(run_l
 
     with pytest.raises(InputError, match="found 0"):
         resolve_active_rule_set_for_file(
-            SimpleNamespace(file_operator_rule_sets=[item]),
+            SimpleNamespace(data_engine_rule_sets=[item]),
             source,
         )
 
     item["file_references"][0]["file_pattern"] = "statement_*.csv"
     item["canonicalization"]["rule_sha256"] = canonical_rule_sha256(item)
     matched = resolve_active_rule_set_for_file(
-        SimpleNamespace(file_operator_rule_sets=[item]),
+        SimpleNamespace(data_engine_rule_sets=[item]),
         source,
     )
     assert matched.name == "monthly_statement__v0001"
@@ -213,7 +213,7 @@ def test_future_file_executes_active_yaml_and_publishes_separate_tables(run_log,
     tmp_path: Path,
 ) -> None:
     request, generated = _materialized(tmp_path, run_log)
-    ctx = SimpleNamespace(file_operator_rule_sets=[generated.rule_set_item])
+    ctx = SimpleNamespace(data_engine_rule_sets=[generated.rule_set_item])
     source = next(
         path for path in request.source_paths if path.name == "statement_a.csv"
     )
@@ -244,7 +244,7 @@ def test_future_validation_failure_routes_review_without_outputs(run_log,
     tmp_path: Path,
 ) -> None:
     request, generated = _materialized(tmp_path, run_log)
-    ctx = SimpleNamespace(file_operator_rule_sets=[generated.rule_set_item])
+    ctx = SimpleNamespace(data_engine_rule_sets=[generated.rule_set_item])
     source = next(
         path for path in request.source_paths if path.name == "statement_a.csv"
     )
@@ -269,7 +269,7 @@ def test_zero_match_routes_identity_failure_for_controlled_review(run_log,
     tmp_path: Path,
 ) -> None:
     _request, generated = _materialized(tmp_path, run_log)
-    ctx = SimpleNamespace(file_operator_rule_sets=[generated.rule_set_item])
+    ctx = SimpleNamespace(data_engine_rule_sets=[generated.rule_set_item])
     source = tmp_path / "unknown.csv"
     source.write_text("Wrong,Header\n1,2\n", encoding="utf-8")
     output_dir = tmp_path / "future_outputs"
