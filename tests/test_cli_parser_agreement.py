@@ -18,6 +18,8 @@ import argparse
 import importlib
 import importlib.util
 import inspect
+import sys
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +97,24 @@ _COMMAND = "command"
 _DELEGATED_PARSERS: dict[str, tuple[str, ...]] = {
     "data_engine": ("data_engine/loader_main.py", "data_engine/file_main.py"),
 }
+
+#: Declared exclusive groups a parser enforces once it has parsed -- its own check,
+#: not an argparse group (#1236) -- by application and command: the entry point
+#: whose parser it is, what every invocation of the command carries, and what a
+#: member needs beside it. Each is verified by running that parser: every member
+#: alone is accepted, any two are refused, and none is refused when required.
+_ENFORCED_AFTER_PARSING: dict[tuple[str, str], dict[str, Any]] = {
+    # loader_main._check_serve_arguments: exactly one Load identity, a statement
+    # with the connection it runs on, always on the selected subject.
+    ("data_engine", "serve_load"): {
+        "entry": "data_engine/loader_main.py",
+        "given": ["--subject", "file"],
+        "companions": {"statement": ["--source-connection", "warehouse"]},
+    },
+}
+
+#: argparse's own parse_args, which ``_parser`` replaces with a capture.
+_PARSE_ARGS = argparse.ArgumentParser.parse_args
 
 
 class _Captured(Exception):
@@ -222,6 +242,44 @@ def registrations() -> dict[str, dict[str, Any]]:
     return discover_registrations()
 
 
+def _refused(entry: Path, argv: list[str], monkeypatch: Any) -> bool:
+    """Whether the entry point's own parser refuses ``argv`` -- run for real."""
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", _PARSE_ARGS)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--config-path", "/c", *argv])
+    spec = importlib.util.spec_from_file_location(f"_cli_enforced_{entry.stem}", entry)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        module._parse_args()
+    except SystemExit:
+        return True
+    return False
+
+
+def _enforced_after_parsing(
+    name: str, command: str, group: tuple[bool, frozenset[str]], monkeypatch: Any,
+) -> bool:
+    """Whether the command's parser enforces this declared group by its own check."""
+    declared = _ENFORCED_AFTER_PARSING.get((name, command))
+    if declared is None:
+        return False
+    root = Path(importlib.import_module(f"{name}.registration").__file__).parents[1]
+    entry = root / declared["entry"]
+    required, members = group
+
+    def invocation(*chosen: str) -> list[str]:
+        argv = [command]
+        for member in chosen:
+            argv += [f"--{member}", "1", *declared["companions"].get(member, [])]
+        return [*argv, *declared["given"]]
+
+    alone = all(not _refused(entry, invocation(one), monkeypatch) for one in sorted(members))
+    together = all(_refused(entry, invocation(*two), monkeypatch)
+                   for two in combinations(sorted(members), 2))
+    neither = _refused(entry, invocation(), monkeypatch) if required else True
+    return alone and together and neither
+
+
 @pytest.mark.parametrize("name", _NAMES)
 def test_parameter_groups_agree_with_the_parser(name, registrations, monkeypatch) -> None:
     parser = _parser(name, registrations[name], monkeypatch)
@@ -231,6 +289,12 @@ def test_parameter_groups_agree_with_the_parser(name, registrations, monkeypatch
     actual.update({command: scope["groups"] for command, scope in parser["commands"].items()})
     declared = {"": _exclusive(groups)}
     declared.update({one.name: _exclusive(one.parameter_groups) for one in commands})
+    # A group the parser enforces once it has parsed agrees when running the parser
+    # shows it holding; it is then not looked for among the argparse groups.
+    for command, held in declared.items():
+        found = actual.get(command, set())
+        declared[command] = {one for one in held if one in found
+                             or not _enforced_after_parsing(name, command, one, monkeypatch)}
     assert ({scope: one for scope, one in declared.items() if one}
             == {scope: one for scope, one in actual.items() if one})
 
