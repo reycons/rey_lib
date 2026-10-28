@@ -30,7 +30,6 @@ from rey_lib.logs import AppLogger
 
 if TYPE_CHECKING:
     from rey_lib.config.applications import Application, ApplicationCapability
-    from rey_lib.control.control import Control
 
 __all__ = ["HostedCapabilities"]
 
@@ -52,7 +51,7 @@ class HostedCapabilities:
     def __init__(
         self,
         application: Application,
-        control: Control,
+        control: Any,
         catalogue: Mapping[str, Callable[[Mapping[str, Any]], Any]],
         hosted_kind: str,
     ) -> None:
