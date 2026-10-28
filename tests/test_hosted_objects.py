@@ -149,3 +149,22 @@ def test_an_object_a_held_objects_behaviour_established_is_held_like_an_opened_o
 def test_nothing_is_held_by_hold_unless_serving() -> None:
     with pytest.raises(ConfigError, match="only while serving"):
         HostedObjects(_construct).hold(lambda emit: _Settings("made", emit))
+
+
+def test_launch_holds_and_projects_the_initial_object_before_reading_commands() -> None:
+    hosted = HostedObjects(_construct)
+
+    class _Initial(_Channel):
+        def commands(self):
+            first = self.emitted[0]
+            assert first["projection"]["application_id"] == "ai_app"
+            assert len(hosted) == 1
+            yield {"command": "rename", "object": first["object"], "to": "live"}
+            yield {"command": "projection", "object": first["object"]}
+
+    channel = _Initial([])
+    hosted.serve(channel, opening=("application.settings", {"application_id": "ai_app"}))
+    first, changed, projected = channel.emitted
+    assert first["object"] == changed["object"] == projected["object"]
+    assert projected["projection"]["renamed"] == "live"
+    assert _Settings.released == ["ai_app"]

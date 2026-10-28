@@ -305,6 +305,7 @@ class AI:
             )
         replaced = replace(current, text=str(text or ""))
         self._registry.replace_instruction(replaced)
+        self._replace(self._settings)
         return replaced
 
     def observe(self, listener: Callable[[AISettings], None]) -> Callable[[], None]:
@@ -408,6 +409,9 @@ class AI:
     def projection(self, control: Any, installation: str) -> dict[str, Any]:
         """What this AI offers an installation, as plain data (backlog 1041).
 
+        Includes a read-only survey of its held settings and instruction content.
+        Surveying a scope creates no task.
+
         The tasks its governed configuration offers, in configured order, each as
         its key, its label and whether it is composed before it runs. What an
         application session serving this AI sends its presentation, as a Workflow
@@ -418,14 +422,16 @@ class AI:
         overrides without reading configuration itself. Each in the governed
         reads' own order.
         """
+        configuration = control.ai_configuration(installation)
         return {
+            "settings": self._settings_projection(configuration),
             "tasks": [
                 {
                     "task_key": str(row.get("task_key") or ""),
                     "label": str(row.get("task_label") or row.get("task_key") or ""),
                     "composed_first": bool(row.get("composed_first") or False),
                 }
-                for row in control.ai_configuration(installation)
+                for row in configuration
                 if str(row.get("row_type")) == "task" and row.get("is_enabled") is not False
             ],
             "engines": [
@@ -444,6 +450,54 @@ class AI:
                 for row in control.ai_instructions()
             ],
         }
+
+    def _settings_projection(self, configuration: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        """Survey the settings this live AI holds, without creating execution tasks.
+
+        Values and inheritance remain this owner's responsibility. The view
+        receives plain settings and instruction content, never credentials or
+        a second settings resolver. This is not a persisted-configuration editor.
+        """
+        snapshot = self.snapshot()
+        labels = {str(row.get("task_key") or ""): str(row.get("task_label") or row.get("task_key") or "")
+                  for row in configuration if row.get("row_type") == "task"}
+
+        def values(selected: AISettings | AISettingsTask) -> dict[str, Any]:
+            return {"profile_id": selected.profile_id, "instruction_id": selected.instruction_id,
+                    "temperature": selected.temperature, "representation": selected.representation,
+                    "connection": selected.connection, "composed_first": selected.composed_first}
+
+        default = values(snapshot.settings)
+        scopes: list[dict[str, Any]] = []
+        for task in (None, *snapshot.settings.tasks):
+            stated = values(task) if task is not None else dict(default)
+            effective = dict(stated)
+            if task is not None:
+                for name in ("profile_id", "instruction_id", "representation"):
+                    effective[name] = stated[name] or default[name]
+                effective["temperature"] = (default["temperature"] if stated["temperature"] is None
+                                             else stated["temperature"])
+                effective["connection"] = self.connection_for(task=task.name)
+            profile = self.profile(str(effective["profile_id"])) if effective["profile_id"] else None
+            policy = profile.access_policy() if profile is not None else {"allowed": [], "default": ""}
+            instruction = self.instruction(str(effective["instruction_id"])) if effective["instruction_id"] else None
+            resource = None
+            if instruction is not None and instruction.kind is not AIInstructionKind.NONE:
+                resource = {"content": instruction.text,
+                            "language": "json" if instruction.kind is AIInstructionKind.CONTRACT else "text",
+                            "title": instruction.label, "read_only": True,
+                            "capabilities": {"edit": False, "save": False}}
+            scopes.append({"id": task.name if task is not None else "default",
+                           "label": labels.get(task.name, task.name) if task is not None else "Default",
+                           "is_default": task is None, "settings": stated, "effective": effective,
+                           "representations": list(policy["allowed"]), "instruction": resource})
+        return {"available": True, "read_only": True, "scopes": scopes,
+                "profiles": [{"id": profile.id, "label": f"{profile.provider} - {profile.model}",
+                              "provider": profile.provider, "model": profile.model,
+                              "access_policy": profile.access_policy()} for profile in snapshot.profiles],
+                "instructions": [{"id": instruction.id, "label": instruction.label,
+                                  "kind": instruction.kind.value} for instruction in snapshot.instructions],
+                "connections": list(self.connections())}
 
     def execute_task(
         self,

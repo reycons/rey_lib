@@ -286,7 +286,8 @@ class AppTransports:
         ref a consumer attaches to, and the projection. Nothing here reads it.
 
         Returns:
-            ``{"token": <transport ref>, "projection": <the first projection>}``.
+            ``{"token": <transport ref>, "projection": <the first projection>}``,
+            retaining its opaque ``object`` reference when the application names one.
 
         Raises:
             AppError: When the application cannot be launched, ends before sending a
@@ -314,7 +315,8 @@ class AppTransports:
                         ) from None
                     continue
                 if "projection" in message:
-                    return {"token": ref, "projection": message["projection"]}
+                    return {"token": ref, "projection": message["projection"],
+                            **({"object": message["object"]} if "object" in message else {})}
                 last_line = _last_line(message.get("stdout"), last_line)
         except AppError:
             self.close(ref)

@@ -157,16 +157,21 @@ class HostedObjects:
         """How many objects are held."""
         return len(self._held)
 
-    def serve(self, channel: Any) -> None:
+    def serve(self, channel: Any, *, opening: tuple[str, Mapping[str, Any]] | None = None) -> None:
         """Answer the protocol on ``channel`` until the launcher detaches or closes.
 
         Every object still held when serving ends is released.
 
         Args:
             channel: The application's end of the channel (AttachedApp.attach).
+            opening: An initial subject and its launch identity. It is held and
+                projected before commands, using the same opaque object contract.
         """
         self._emit = channel.emit
         try:
+            if opening is not None:
+                object_id, projection = self.open(*opening, channel.emit)
+                channel.emit({"object": object_id, "projection": projection})
             for command in channel.commands():
                 name = str(command.get("command") or "")
                 if name == "close":

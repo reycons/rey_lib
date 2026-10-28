@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Mapping
 
@@ -226,6 +226,8 @@ class ApplicationCommandParameter:
     description: str = ""
     positional: bool = False
     possible_values: tuple[str, ...] = ()
+    #: Retained by the owner so a live opening can refresh its governed choices.
+    _choice_source: str = field(default="", repr=False, compare=False)
     #: Which modes this parameter belongs to, keyed by mode group. Membership
     #: is a conjunction: every declared group must be on one of its named
     #: modes for the parameter to be active.
@@ -346,7 +348,7 @@ class ApplicationCommand:
                 arguments += ([rendered] if parameter.positional
                               else [f"--{parameter.name}", rendered])
                 continue
-            given = value is True or (bool(value) and str(value).lower() != "false")
+            given = value is not None and value != "" and str(value).lower() != "false"
             if not given:
                 if parameter.required:
                     raise ConfigError(
@@ -505,6 +507,166 @@ class Application:
     #: until #1151.
     PANEL_TYPE: ClassVar[str] = "application"
 
+    #: Transient settings belong to an independently opened Application, never to
+    #: its shared registration or the browser. Not configuration persistence.
+    _run_settings: dict[str, Any] = field(default_factory=dict, init=False,
+                                         repr=False, compare=False, hash=False)
+
+    def for_console(self, ctx: Any) -> "Application":
+        """An independent live Application for one Console opening (#1255)."""
+        opened = replace(self)
+        if not opened.commands:
+            # Application-level CLI parameters describe the root invocation,
+            # not a missing command and never an invented subcommand word.
+            object.__setattr__(opened, "commands", (ApplicationCommand(
+                name="", parameters=opened.parameters,
+                parameter_groups=opened.parameter_groups),))
+        opened.refresh_choices(ctx)
+        offered = [one for one in opened.commands if one.invocation == INVOCATION_RUN]
+        opened._run_settings.update(command=offered[0].name if offered else "",
+                                    values={}, modes={})
+        return opened
+
+    def refresh_choices(self, ctx: Any) -> None:
+        """Refresh declared choice sources through their existing configuration owners.
+
+        The declaration is retained by the Application, not sent to the panel to
+        resolve. This updates this opening only; it never writes configuration.
+        """
+        def refreshed(parameter: ApplicationCommandParameter) -> ApplicationCommandParameter:
+            if not parameter._choice_source:
+                return parameter
+            return replace(parameter, possible_values=_choices({
+                "name": parameter.name,
+                "possible_values_from": parameter._choice_source,
+            }, ctx, self.name))
+
+        object.__setattr__(self, "commands", tuple(
+            replace(command, parameters=tuple(refreshed(one) for one in command.parameters))
+            for command in self.commands))
+
+    def update_settings(self, changes: Mapping[str, Any]) -> None:
+        """Accept command, mode and parameter edits into this live Application.
+
+        Values are retained per command and per mode. Only the active parameters
+        enter a run request. Incomplete drafts are valid settings; Run validates
+        completeness, while unknown commands/fields/modes are refused here.
+        """
+        if not self._run_settings:
+            raise ConfigError("Application run settings require a live Console opening.")
+        if not isinstance(changes, Mapping):
+            raise ConfigError("Application settings changes must be a mapping.")
+        for section in ("modes", "values"):
+            if section in changes and not isinstance(changes[section], Mapping):
+                raise ConfigError(f"Application settings {section} must be a mapping.")
+        unknown = set(changes) - {"command", "modes", "values"}
+        if unknown:
+            raise ConfigError(f"Unknown Application settings: {', '.join(sorted(unknown))}.")
+        selected = str(changes.get("command", self._run_settings["command"]))
+        command = self.command(selected)
+        if command is None or command.invocation != INVOCATION_RUN:
+            raise ConfigError(f"Application '{self.name}' offers no runnable command '{selected}'.")
+        modes = self._settings_modes(command)
+        supplied_modes = dict(changes.get("modes") or {})
+        groups = {one.name: one for one in command.mode_groups}
+        for name, mode in supplied_modes.items():
+            if name not in groups or mode not in {one.name for one in groups[name].modes}:
+                raise ConfigError(f"Command '{selected}' offers no mode '{name}: {mode}'.")
+        modes.update(supplied_modes)
+        values = dict(self._run_settings["values"].get(selected, {}))
+        parameters = {one.name: one for one in command.parameters}
+        for name, value in dict(changes.get("values") or {}).items():
+            parameter = parameters.get(name)
+            if parameter is None:
+                raise ConfigError(f"Command '{selected}' publishes no parameter '{name}'.")
+            if parameter.value_type == "flag":
+                if not isinstance(value, bool) and value not in ("true", "false", ""):
+                    raise ConfigError(f"Parameter '{name}' takes a boolean value.")
+                value = value is True or value == "true"
+            try:
+                values[name] = json.loads(json.dumps(value, allow_nan=False))
+            except (ValueError, TypeError) as exc:
+                raise ConfigError(f"Parameter '{name}' must be a transportable value.") from exc
+        self._run_settings["command"] = selected
+        self._run_settings["values"][selected] = values
+        self._run_settings["modes"][selected] = modes
+
+    def _settings_modes(self, command: ApplicationCommand) -> dict[str, str]:
+        defaults = {group.name: group.default or (group.modes[0].name if group.modes else "")
+                    for group in command.mode_groups}
+        return {**defaults, **self._run_settings.get("modes", {}).get(command.name, {})}
+
+    def _settings_parameters(self, command: ApplicationCommand) -> tuple[ApplicationCommandParameter, ...]:
+        modes = self._settings_modes(command)
+        return tuple(replace(parameter, required=parameter.required or bool(
+            parameter.required_when and all(modes.get(group) in names
+                                            for group, names in parameter.required_when)),
+                             mode_membership=(), required_when=())
+                     for parameter in command.parameters
+                     if all(modes.get(group) in names
+                            for group, names in parameter.mode_membership))
+
+    def prepare_run(self) -> dict[str, Any]:
+        """The validated command and values the existing run owner may execute.
+
+        This does not launch, persist, build another argv or own a Run lifecycle.
+        Parameter validation and argument construction use the command's existing
+        public contract; a caller cannot select another Application through it.
+        """
+        command = self.command(str(self._run_settings.get("command") or ""))
+        if command is None or command.invocation != INVOCATION_RUN:
+            raise ConfigError("No runnable Application command is selected.")
+        active = self._settings_parameters(command)
+        values = self._run_settings["values"].get(command.name, {})
+        params: dict[str, Any] = {}
+        for parameter in active:
+            value = values.get(parameter.name)
+            present = value is not None and not (isinstance(value, str) and not value.strip())
+            if parameter.required and not present:
+                raise ConfigError(f"Command '{command.name}' requires '{parameter.name}'.")
+            if not present:
+                continue
+            if parameter.value_type == "choice" and str(value) not in parameter.possible_values:
+                raise ConfigError(f"Parameter '{parameter.name}' offers no choice '{value}'.")
+            if parameter.value_type == JSON_VALUE_TYPE and isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError) as exc:
+                    raise ConfigError(f"Parameter '{parameter.name}' takes JSON.") from exc
+            if parameter.value_type in ("integer", "float"):
+                try:
+                    value = int(value) if parameter.value_type == "integer" else float(value)
+                except (ValueError, TypeError) as exc:
+                    raise ConfigError(f"Parameter '{parameter.name}' takes {parameter.value_type}.") from exc
+            params[parameter.name.replace("-", "_")] = value
+        try:
+            json.dumps(params, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError("Application run settings contain an invalid numeric or structured value.") from exc
+        replace(command, parameters=active).arguments(params)
+        return json.loads(json.dumps({"command": command.name, "params": params}, allow_nan=False))
+
+    def settings_projection(self) -> dict[str, Any]:
+        """Current settings and applicability, decided here rather than by a panel."""
+        command = self.command(str(self._run_settings.get("command") or ""))
+        if command is None:
+            return {"command": "", "values": {}, "modes": {}, "parameters": [],
+                    "can_run": False, "error": "No runnable command is available."}
+        try:
+            self.prepare_run()
+            error = ""
+        except ConfigError as refused:
+            error = str(refused)
+        return {
+            "command": command.name,
+            "values": json.loads(json.dumps(self._run_settings["values"].get(command.name, {}))),
+            "modes": self._settings_modes(command),
+            "parameters": [{"name": one.name, "required": one.required}
+                           for one in self._settings_parameters(command)],
+            "can_run": not error,
+            "error": error,
+        }
+
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
         return next((one for one in self.commands if one.name == name), None)
@@ -523,10 +685,12 @@ class Application:
         return {
             "panel_type": self.PANEL_TYPE,
             "application_id": self.name,
+            **({"settings": self.settings_projection()} if self._run_settings else {}),
             "label": self.label,
             "commands": [
                 {
                     "name": command.name,
+                    "label": command.name or self.label or self.name,
                     "description": command.description,
                     "mode_groups": [
                         {
@@ -595,7 +759,7 @@ class Application:
             if not config_path:
                 raise ConfigError("config_path is required.")
             line += ["--config-path", str(Path(str(config_path)).expanduser())]
-        return line + [command.name, *command.arguments(inputs)]
+        return line + ([command.name] if command.name else []) + command.arguments(inputs)
 
     @property
     def command_names(self) -> tuple[str, ...]:
@@ -1301,6 +1465,7 @@ def _parameter(
         description=str(entry.get("description") or ""),
         positional=bool(entry.get("positional")),
         possible_values=_choices(entry, ctx, application),
+        _choice_source=str(entry.get("possible_values_from") or ""),
         mode_membership=_membership(
             entry, "mode_membership", application, command, name, groups,
         ),
