@@ -54,7 +54,7 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
                               config=None, steps=[step])
     control = RecordingControl()
     application_run = parent_run(control, run_id=42)
-    workflow = Workflow(name="wf", enabled=True, config=None,
+    workflow = Workflow(workflow_id=1, name="wf", enabled=True, config=None,
                         processes=[process], control=control, runtime=SimpleNamespace(),
                         log=make_run_log(sys.argv[1]), run_id=application_run.run_id)
     assert workflow.direct() == "SUCCEEDED"
