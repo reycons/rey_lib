@@ -1,42 +1,23 @@
-"""The canonical AI capability for one resolved runtime.
+"""The live AI: the one AI, hosted by ai_app (#1025).
 
-One ``AI`` per resolved runtime or installation context. Two installations never
-share one, because profiles, contracts and permissions are installation-scoped
-configuration and a shared object would make one installation's selection the
-other's.
+ai_app constructs it and retains it; no other application holds one, and
+another application reaches it only as ai_app's live object over the
+transports. It runs governed AITasks -- composed from the governed AI
+configuration, executed through the mechanism their engine states (Pydantic AI,
+or Claude tooling) -- and states, as plain data, what that configuration
+offers an installation.
 
 Constructed from explicit resolved inputs, and afterwards it reaches back for
-nothing: no ``ctx`` discovery, no ambient lookup, no module-level state. That is
-the lesson the estate's own runtime objects already teach -- ``RunLog`` owns its
-state and reads no context once built, ``ConnectionOwner`` owns one durable
-relationship, ``Run`` is handed its dependencies.
-
-It is the **aggregate root**, not the implementation. It owns the state and the
-domain -- what is available, what is selected, how a request resolves against
-that -- and delegates the mechanisms:
-
-    AI ─ settings, profiles, instructions, sessions, observation
-     └─ resolve(AIRequest) -> ResolvedAIRequest
-          └─ AIExecutor ─ orders one execution, delegating every mechanism:
-               TurnExecutor      transport retry, replay safety, fallback
-               ToolLoop          continuation through tool calls
-               OutputParser      validation
-               OutputNormalizer  the caller-facing payload
-
-``execute`` therefore reads as it should: resolve, then delegate. The provider,
-retry, tool, validation and normalization code is not here, and no
-``if provider ==`` ever will be.
+nothing: no ``ctx`` discovery, no ambient lookup, no module-level state.
 """
 
 from __future__ import annotations
 
 import threading
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-from rey_lib.ai.capabilities import AICapabilitySet
 from rey_lib.ai.content import AIContentKind
-from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import (
     AICancelled,
@@ -48,12 +29,8 @@ from rey_lib.ai.errors import (
     AIRequestError,
     AISelectionError,
 )
-from rey_lib.ai.execution import AIExecutor
-from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 from rey_lib.ai.output import OutputParser
-from rey_lib.ai.profiles import AIProfile
-from rey_lib.ai.registry import AIRegistry
-from rey_lib.ai.requests import AIOutputKind, AIRequest, AIRequestOptions, ResolvedAIRequest
+from rey_lib.ai.requests import AIOutputKind
 from rey_lib.ai.results import (
     AIExecutionInfo,
     AIFinishReason,
@@ -61,14 +38,9 @@ from rey_lib.ai.results import (
     AIResult,
     AIUsage,
 )
-from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
-from rey_lib.ai.objects import AIObject
-from rey_lib.ai.sessions import AISession
-from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.task import AITask
-from rey_lib.ai.tools import AITool, AIToolCall, AIToolResult, AIToolSet, Operation
-from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
+from rey_lib.ai.tools import AIToolCall, AIToolResult, AIToolSet, Operation
 from rey_lib.logs.app_logger import AppLogger
 
 if TYPE_CHECKING:
@@ -80,102 +52,55 @@ logger = AppLogger(__name__)
 #: tools are named ``mcp__rey__<tool>`` to the CLI (backlog 1136).
 _CLAUDE_TOOL_SERVER = "rey"
 
-__all__ = ["AI", "AISnapshot"]
+#: How many model requests one execution may make, tool turns included. The
+#: value the live path has always run with; governing it is #1063's.
+_MAX_TURNS = 8
+#: How many times a tool call the model got wrong is handed back to it.
+_MAX_TOOL_CORRECTIONS = 2
+#: How many times an answer that fails its contract is handed back to the model.
+_MAX_OUTPUT_CORRECTIONS = 0
 
+#: The two representations a configured engine may be permitted to receive.
+_ACCESS_MODES = frozenset({"redacted", "unredacted"})
 
-class AISnapshot:
-    """What this runtime offers and has selected, at one moment.
-
-    Immutable, and complete enough that a presentation layer renders from it
-    without interpreting configuration or asking a second question. It is the
-    whole of what a Console projection needs.
-    """
-
-    __slots__ = ("instructions", "profiles", "settings")
-
-    def __init__(
-        self,
-        *,
-        settings: AISettings,
-        profiles: tuple[AIProfile, ...],
-        instructions: tuple[AIInstruction, ...],
-    ) -> None:
-        self.settings = settings
-        self.profiles = profiles
-        self.instructions = instructions
+__all__ = ["AI"]
 
 
 class AI:
-    """The AI capability of one runtime.
+    """The live AI of the application that hosts it.
 
     Args:
-        registry: What this runtime offers -- its profiles, instructions and
-            provider adapters, already resolved from configuration.
-        settings: The starting selection. Validated on construction, so a
-            runtime cannot begin holding a selection it does not offer.
-        contracts: How a referenced contract's body is obtained.
-        parser: How a structured output is produced and checked.
-        policy: The control domains for this runtime -- turn budget, transport
-            retry, replay safety, fallback and the two correction budgets.
-        executor: Supplied only where a caller needs to substitute the execution
-            owner. Absent, one is built from the parts above.
         credentials: How a configured credential reference becomes its value at
             the moment a model is built. Holds no secret and no context.
+        connections: The names of the connections a task here may query
+            through -- each connection's own declaration, resolved by whatever
+            composed this AI. Nothing here opens or holds a connection.
         connection_operations: Per connection name, the operations runtime
             composition bound for it (``capability_key -> operation``), so a
             task's governed connection selects how its tools reach their owners
             (backlog 741). Callables only: no connection is held here.
+        parser: How a structured output is checked.
     """
 
     def __init__(
         self,
         *,
-        registry: AIRegistry,
-        settings: AISettings | None = None,
-        contracts: ContractResolver | None = None,
-        parser: OutputParser | None = None,
-        policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
-        executor: AIExecutor | None = None,
-        connections: Iterable[str] = (),
         credentials: CredentialResolver | None = None,
+        connections: Iterable[str] = (),
         connection_operations: Mapping[str, Mapping[str, Operation]] | None = None,
+        parser: OutputParser | None = None,
     ) -> None:
-        self._registry = registry
         self._credentials = credentials or CredentialResolver()
         self._connection_operations = {
             str(name): dict(operations)
             for name, operations in (connection_operations or {}).items()
         }
-        # Which connections a task here may query through, as **names**.
-        #
-        # Whether a connection may be used by a language model is the
-        # connection's own declaration, and connections are the database
-        # layer's. So what crosses into this one is the answer rather than the
-        # objects: a set of permitted names, supplied by whatever composed both.
-        # Nothing here opens, holds or imports a connection.
         self._connections = frozenset(
             str(name).strip() for name in connections if str(name).strip()
         )
-        # Kept, not only passed on. Resolution states a correction allowance
-        # for the mechanism it chooses, which it can only do against the
-        # posture this runtime was built with.
-        self._policy = policy
-        # The validator for a task this runtime executes through Pydantic AI
-        # (backlog 1020): OutputParser stays the owner of validation.
+        # The validator for a task this AI executes (backlog 1020): OutputParser
+        # stays the owner of validation.
         self._parser = parser or OutputParser()
-        self._executor = executor or AIExecutor(
-            registry=registry,
-            contracts=contracts,
-            parser=parser,
-            policy=policy,
-        )
-        self._observers: list[Callable[[AISettings], None]] = []
-        self._settings = self._validated(settings or AISettings())
-        # The asks composed against this runtime. Held here because this object
-        # owns domain state and an ask is domain state -- a surface holding
-        # them would be a second answer to what a reader is composing, and a
-        # second one per open panel.
-        self._objects: dict[str, AIObject] = {}
         # The session's AITasks by id (backlog 1037): composed, edited by
         # rehydration and executed here, within the lifetime of the application
         # session that holds this AI.
@@ -189,242 +114,23 @@ class AI:
         self._running: dict[str, Any] = {}
         self._running_lock = threading.Lock()
 
-    # -- what is available -------------------------------------------------
-
-    def profiles(self) -> tuple[AIProfile, ...]:
-        """Every profile this runtime offers."""
-        return self._registry.profiles()
-
-    def instructions(self) -> tuple[AIInstruction, ...]:
-        """Every instruction this runtime offers."""
-        return self._registry.instructions()
-
-    def capabilities(self, profile_id: str = "") -> AICapabilitySet:
-        """What an application actually gets from a profile.
-
-        The effective capability -- provider capability narrowed by installation
-        policy. Consumers ask this rather than reasoning from a provider or
-        model name, which is the inference this model exists to remove.
-        """
-        return self._registry.effective_capability(self._profile_for(profile_id))
-
-    def instruction(self, instruction_id: str) -> AIInstruction:
-        """One instruction this runtime offers, by id."""
-        return self._registry.instruction(str(instruction_id or ""))
-
-    def profile(self, profile_id: str = "") -> AIProfile:
-        """One profile this runtime offers, by id, or the selected one."""
-        return self._profile_for(profile_id)
-
-    def permitted_access(
-        self, profile_id: str = "", requested: str = "", task: str = "",
-    ) -> str:
-        """Which representation a configured model may receive.
-
-        Authorization, answered from AI-owned state that was consumed at
-        construction. Nothing re-reads an application context per request, which
-        is what the old ``resolve_profile_for_llm`` did on every call.
-
-        The representation itself is produced elsewhere: this says *which* one is
-        allowed, and ``rey_lib.logs.profile_library`` produces it. That
-        separation is why an operator inspecting both presentations does not
-        depend on this layer.
-
-        Settings choose which representation is *asked* for, with the same
-        precedence as everything else -- the caller's, then the task's, then the
-        default. They cannot widen what is permitted: the envelope is
-        ``profile_access.allowed`` on the profile, and the profile still refuses
-        anything outside it. That is why a settings mutation can change the
-        request and never the authorization.
-        """
-        configured = self._settings.task(task)
-        wanted = (
-            str(requested or "")
-            or (configured.representation if configured else "")
-            or self._settings.representation
-        )
-        return self._profile_for(profile_id, configured).permitted_access(wanted)
-
-    def snapshot(self) -> AISnapshot:
-        """Everything a presentation layer needs, in one immutable answer."""
-        return AISnapshot(
-            settings=self._settings,
-            profiles=self.profiles(),
-            instructions=self.instructions(),
-        )
-
-    # -- what is selected --------------------------------------------------
-
-    @property
-    def settings(self) -> AISettings:
-        """The one canonical answer to what is selected."""
-        return self._settings
-
-    def select_profile(self, profile_id: str) -> AISettings:
-        """Select a profile, or refuse one this runtime does not offer."""
-        if profile_id and not self._registry.has_profile(profile_id):
-            raise AISelectionError(
-                f"No AI profile is configured as '{profile_id}'."
-            )
-        return self._replace(self._settings.with_profile(profile_id))
-
-    def select_instruction(self, instruction_id: str) -> AISettings:
-        """Select an instruction, or refuse one this runtime does not offer."""
-        if instruction_id and not self._registry.has_instruction(instruction_id):
-            raise AISelectionError(
-                f"No AI instruction is configured as '{instruction_id}'."
-            )
-        return self._replace(self._settings.with_instruction(instruction_id))
-
-    def update_settings(self, settings: AISettings) -> AISettings:
-        """Replace the whole selection at once, validated as one change."""
-        return self._replace(self._validated(settings))
-
-    def set_instruction_text(self, instruction_id: str, text: str) -> AIInstruction:
-        """Replace what one offered instruction says.
-
-        The canonical instruction content is this runtime's. A consumer that
-        edited text and kept it would be a second answer to what the instruction
-        says, which is the state one owner exists to prevent.
-
-        ``AIInstruction`` is immutable, so this builds the replacement and puts
-        it in place of the old one rather than mutating anything.
-
-        Raises:
-            AISelectionError: when this runtime offers no such instruction, or
-                the instruction is not one whose text a caller may set. A
-                contract's body comes from the contract it references, and
-                overwriting it here would make the stored contract and what was
-                sent disagree.
-        """
-        current = self._registry.instruction(str(instruction_id or ""))
-        if current.kind is not AIInstructionKind.RAW:
-            raise AISelectionError(
-                f"AI instruction '{current.id}' is a {current.kind.value} "
-                "instruction, and its text is not a caller's to set."
-            )
-        replaced = replace(current, text=str(text or ""))
-        self._registry.replace_instruction(replaced)
-        self._replace(self._settings)
-        return replaced
-
-    def observe(self, listener: Callable[[AISettings], None]) -> Callable[[], None]:
-        """Watch the selection, and get back the way to stop.
-
-        An observer holds no state: it is told the new canonical value, and it
-        can always ask for the current one. There is no second owner, which is
-        the whole of the guarantee this offers.
-        """
-        self._observers.append(listener)
-
-        def stop() -> None:
-            if listener in self._observers:
-                self._observers.remove(listener)
-
-        return stop
-
-    # -- doing the work ----------------------------------------------------
-
-    def resolve(self, request: AIRequest, *, session_id: str = "") -> ResolvedAIRequest:
-        """What this request would actually execute as.
-
-        Explicit request settings beat the task's, which beat the defaults, so a
-        governed operation never silently depends on an operator's selection.
-        The request is not mutated: a resolved value is built beside it, which is
-        what makes an in-flight execution immune to a later settings change.
-
-        The task's settings are read here, once, and what they produced is what
-        executes. A later mutation reaches the next run and never this one.
-        """
-        effective = self._settings.task(request.task)
-        profile = self._profile_for(request.profile_id, effective)
-        instruction = self._instruction_for(request, effective)
-        resolved = ResolvedAIRequest(
-            input=request.input,
-            profile=profile,
-            instruction=instruction,
-            output=request.output,
-            tools=request.tools,
-            options=self._options_for(request, effective),
-            context=dict(request.context),
-            cancelled=request.cancelled,
-            tool_runner=request.tool_runner,
-            session_id=session_id,
-        )
-        # How the selected engine can carry this ask's tools. Decided here,
-        # where the engine is chosen, rather than inside execution: an ask that
-        # nothing can carry is refused before there is an execution to refuse,
-        # and execution obeys the answer instead of reaching a second one.
-        #
-        # Asked after the request is built because the answer branch of an
-        # emulated decision is the ask's own output shape, and ``schema``
-        # resolves where that shape comes from.
-        mechanism = resolve_tool_mechanism(
-            self._registry.effective_capability(profile),
-            resolved.tools,
-            answer_schema=resolved.schema,
-            # Every tool call spends a turn, and the last turn has to be the
-            # answer. So what the ask can afford is one fewer than the budget
-            # -- stated here, because resolution is where this runtime's
-            # posture and the chosen mechanism meet.
-            max_tool_calls=max(0, self._policy.budget.max_turns - 1),
-        )
-        logger.debug(
-            "AI resolved: profile=%s model=%s provider=%s instruction=%s(%s) "
-            "tools=%s mechanism=%s corrections=%s",
-            profile.id, profile.model, profile.provider,
-            instruction.id or "(none)", instruction.kind.value,
-            [tool.name for tool in resolved.tools] or "(none)",
-            type(mechanism.strategy).__name__,
-            getattr(mechanism.validation_correction, "max_corrections", "(runtime)"),
-        )
-        return replace(resolved, tool_mechanism=mechanism)
-
-    def tool_mechanism(
-        self, profile_id: str, tools: tuple[AITool, ...],
-    ) -> ToolMechanism:
-        """How a profile would carry these tools, without resolving an ask.
-
-        The same question ``resolve`` asks, answered by the same function, so a
-        surface saying whether a run is possible cannot drift from the rule
-        that admits one. It builds no request: painting a banner is not an
-        execution.
-
-        Raises:
-            AICapabilityError: when no mechanism can carry them.
-        """
-        return resolve_tool_mechanism(
-            self._registry.effective_capability(self._profile_for(profile_id)),
-            tuple(tools),
-        )
-
-    def execute(self, request: AIRequest, *, session_id: str = "") -> AIResult:
-        """Resolve this request and run it."""
-        return self._executor.execute(self.resolve(request, session_id=session_id))
-
-    def stream(self, request: AIRequest, *, session_id: str = "") -> Iterator[AIEvent]:
-        """Resolve this request and run it, reporting canonical events."""
-        return self._executor.stream(self.resolve(request, session_id=session_id))
-
     def projection(self, control: Any, installation: str) -> dict[str, Any]:
         """What this AI offers an installation, as plain data (backlog 1041).
 
-        Includes a read-only survey of its held settings and instruction content.
-        Surveying a scope creates no task.
+        Every section is read from the governed AI configuration through
+        ``control``, each read once. Surveying creates no task.
 
         The tasks its governed configuration offers, in configured order, each as
-        its key, its label and whether it is composed before it runs. What an
-        application session serving this AI sends its presentation, as a Workflow
-        projects itself for workflow_app: the AI states it, nobody re-derives it.
-
-        With them, the enabled engines and the instructions a task's choices may
-        name (backlog 1047, D2): what may be chosen, so a presentation offers
-        overrides without reading configuration itself. Each in the governed
-        reads' own order.
+        its key, its label and whether it is composed before it runs; the enabled
+        engines and the instructions a task's choices may name (backlog 1047,
+        D2); and ``settings``, the read-only survey of the defaults and each
+        configured task that the AI Settings presentation draws.
         """
         configuration = control.ai_configuration(installation)
+        engines = control.ai_engine_profiles()
+        instructions = control.ai_instructions()
         return {
-            "settings": self._settings_projection(configuration),
+            "settings": self._settings_projection(configuration, engines, instructions),
             "tasks": [
                 {
                     "task_key": str(row.get("task_key") or ""),
@@ -439,7 +145,7 @@ class AI:
                     "profile_key": str(row.get("profile_key") or ""),
                     "model_identifier": str(row.get("model_identifier") or ""),
                 }
-                for row in control.ai_engine_profiles()
+                for row in engines
                 if row.get("is_enabled") is not False
             ],
             "instructions": [
@@ -447,56 +153,96 @@ class AI:
                     "instruction_key": str(row.get("instruction_key") or ""),
                     "kind": str(row.get("kind") or ""),
                 }
-                for row in control.ai_instructions()
+                for row in instructions
             ],
         }
 
-    def _settings_projection(self, configuration: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-        """Survey the settings this live AI holds, without creating execution tasks.
+    def _settings_projection(
+        self,
+        configuration: Iterable[Mapping[str, Any]],
+        engines: Iterable[Mapping[str, Any]],
+        instructions: Iterable[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """The read-only survey of the governed AI settings, scope by scope.
 
-        Values and inheritance remain this owner's responsibility. The view
-        receives plain settings and instruction content, never credentials or
-        a second settings resolver. This is not a persisted-configuration editor.
+        The group row is the default scope and each task row one task scope. A
+        task states what it sets for itself, empty meaning inherit, and its
+        effective values are computed here -- a browser overlaying one on the
+        other would be a second resolver. Credentials never leave.
+
+        Raises:
+            AIConfigurationError: when a scope names an engine or instruction the
+                configuration does not offer, or a contract carries no body.
+            AISelectionError: when a scope names a connection no model may use,
+                or an engine's access policy is absent or invalid.
         """
-        snapshot = self.snapshot()
-        labels = {str(row.get("task_key") or ""): str(row.get("task_label") or row.get("task_key") or "")
-                  for row in configuration if row.get("row_type") == "task"}
+        profiles = {str(row.get("profile_key") or "").strip(): row for row in engines}
+        offered = _offered_instructions(instructions)
+        rows = list(configuration)
 
-        def values(selected: AISettings | AISettingsTask) -> dict[str, Any]:
-            return {"profile_id": selected.profile_id, "instruction_id": selected.instruction_id,
-                    "temperature": selected.temperature, "representation": selected.representation,
-                    "connection": selected.connection, "composed_first": selected.composed_first}
+        def values(row: Mapping[str, Any], where: str, task: str = "") -> dict[str, Any]:
+            profile_id = str(row.get("profile_key") or "").strip()
+            instruction_id = str(row.get("instruction_key") or "").strip()
+            connection = str(row.get("connection_name") or "").strip()
+            if profile_id and profile_id not in profiles:
+                raise AIConfigurationError(
+                    f"AI configuration{where} names profile '{profile_id}', "
+                    "which this runtime does not offer."
+                )
+            if instruction_id and instruction_id not in offered:
+                raise AIConfigurationError(
+                    f"AI configuration{where} names instruction '{instruction_id}', "
+                    "which this runtime does not offer."
+                )
+            if connection and connection not in self._connections:
+                raise AISelectionError(
+                    f"No connection is offered to AI as '{connection}'"
+                    f"{f' for task {task!r}' if task else ''}."
+                )
+            temperature = row.get("temperature")
+            return {"profile_id": profile_id, "instruction_id": instruction_id,
+                    "temperature": None if temperature is None else float(temperature),
+                    "representation": str(row.get("representation") or "").strip(),
+                    "connection": connection,
+                    "composed_first": bool(row.get("composed_first") or False)}
 
-        default = values(snapshot.settings)
+        group = next((row for row in rows if str(row.get("row_type")) == "group"), {})
+        tasks = [row for row in rows if str(row.get("row_type")) == "task"]
+        default = values(group, ".default")
         scopes: list[dict[str, Any]] = []
-        for task in (None, *snapshot.settings.tasks):
-            stated = values(task) if task is not None else dict(default)
+        for row in (None, *tasks):
+            name = str(row.get("task_key") or "").strip() if row is not None else ""
+            stated = values(row, f".tasks['{name}']", name) if row is not None else dict(default)
             effective = dict(stated)
-            if task is not None:
-                for name in ("profile_id", "instruction_id", "representation"):
-                    effective[name] = stated[name] or default[name]
+            if row is not None:
+                for field in ("profile_id", "instruction_id", "representation", "connection"):
+                    effective[field] = stated[field] or default[field]
                 effective["temperature"] = (default["temperature"] if stated["temperature"] is None
-                                             else stated["temperature"])
-                effective["connection"] = self.connection_for(task=task.name)
-            profile = self.profile(str(effective["profile_id"])) if effective["profile_id"] else None
-            policy = profile.access_policy() if profile is not None else {"allowed": [], "default": ""}
-            instruction = self.instruction(str(effective["instruction_id"])) if effective["instruction_id"] else None
+                                            else stated["temperature"])
+            engine = profiles.get(str(effective["profile_id"])) if effective["profile_id"] else None
+            policy = (_access_policy(engine) if engine is not None
+                      else {"allowed": [], "default": ""})
+            instruction = offered.get(str(effective["instruction_id"])) if effective["instruction_id"] else None
             resource = None
-            if instruction is not None and instruction.kind is not AIInstructionKind.NONE:
-                resource = {"content": instruction.text,
-                            "language": "json" if instruction.kind is AIInstructionKind.CONTRACT else "text",
-                            "title": instruction.label, "read_only": True,
+            if instruction is not None and instruction["kind"] != "none":
+                resource = {"content": instruction["text"],
+                            "language": "json" if instruction["kind"] == "contract" else "text",
+                            "title": instruction["label"], "read_only": True,
                             "capabilities": {"edit": False, "save": False}}
-            scopes.append({"id": task.name if task is not None else "default",
-                           "label": labels.get(task.name, task.name) if task is not None else "Default",
-                           "is_default": task is None, "settings": stated, "effective": effective,
-                           "representations": list(policy["allowed"]), "instruction": resource})
+            label = (str(row.get("task_label") or row.get("task_key") or "")
+                     if row is not None else "Default")
+            scopes.append({"id": name if row is not None else "default",
+                           "label": label, "is_default": row is None, "settings": stated,
+                           "effective": effective, "representations": list(policy["allowed"]),
+                           "instruction": resource})
         return {"available": True, "read_only": True, "scopes": scopes,
-                "profiles": [{"id": profile.id, "label": f"{profile.provider} - {profile.model}",
-                              "provider": profile.provider, "model": profile.model,
-                              "access_policy": profile.access_policy()} for profile in snapshot.profiles],
-                "instructions": [{"id": instruction.id, "label": instruction.label,
-                                  "kind": instruction.kind.value} for instruction in snapshot.instructions],
+                "profiles": [{"id": key, "label": f"{row.get('provider') or ''} - {row.get('model') or ''}",
+                              "provider": str(row.get("provider") or ""),
+                              "model": str(row.get("model") or ""),
+                              "access_policy": _access_policy(row)}
+                             for key, row in profiles.items()],
+                "instructions": [{"id": key, "label": one["label"], "kind": one["kind"]}
+                                 for key, one in offered.items()],
                 "connections": list(self.connections())}
 
     def execute_task(
@@ -720,8 +466,8 @@ class AI:
                 instructions=task.contract_body or None,
                 tools=toolset.pydantic_tools(),
                 retries={
-                    "output": self._policy.validation_correction.max_corrections,
-                    "tools": self._policy.tool_correction.max_corrections,
+                    "output": _MAX_OUTPUT_CORRECTIONS,
+                    "tools": _MAX_TOOL_CORRECTIONS,
                 },
             )
 
@@ -749,7 +495,7 @@ class AI:
             )
             run = agent.run_sync(
                 prompt, model_settings=settings or None,
-                usage_limits=UsageLimits(request_limit=self._policy.budget.max_turns),
+                usage_limits=UsageLimits(request_limit=_MAX_TURNS),
                 event_stream_handler=relay if tell is not None else None,
                 cancellation_token=token,
             )
@@ -846,7 +592,7 @@ class AI:
                 if tools else {}
             ),
             allowed_tools=[f"mcp__{_CLAUDE_TOOL_SERVER}__{tool.name}" for tool in tools],
-            max_turns=self._policy.budget.max_turns,
+            max_turns=_MAX_TURNS,
             output_format={"type": "json_schema", "schema": schema} if structured else None,
             include_partial_messages=tell is not None,
         )
@@ -859,7 +605,7 @@ class AI:
 
         async def converse(client: Any) -> tuple[AIOutput, AIUsage]:
             """Ask, then correct in the same session until the answer is valid."""
-            corrections = self._policy.validation_correction.max_corrections
+            corrections = _MAX_OUTPUT_CORRECTIONS
             used = AIUsage()
             message = prompt
             while True:
@@ -1050,9 +796,7 @@ class AI:
         Both, because both were asked: a prompt about a subject is not a prompt
         instead of one. Text only in this slice; anything else is refused.
         """
-        if task.input.messages or any(
-            part.kind is not AIContentKind.TEXT for part in task.input.content
-        ):
+        if any(part.kind is not AIContentKind.TEXT for part in task.input.content):
             raise AIRequestError(
                 f"AI task '{task.task_key or '(default)'}' carries input other than "
                 "text, which this execution does not send."
@@ -1161,63 +905,6 @@ class AI:
         if unknown:
             raise AIRequestError(f"An AI task takes no {', '.join(unknown)}.")
 
-    # -- composed asks -----------------------------------------------------
-
-    def create_object(
-        self, *, subject: str = "", subject_kind: str = "",
-        subject_id: str = "", task: str = "",
-    ) -> AIObject:
-        """Compose one ask against this runtime, and remember it.
-
-        **Seeded, not resolved.** The object carries no engine or instruction of
-        its own: absent means the task's, then the defaults', which is what
-        every override already means. So creating an ask cannot pin a model that
-        configuration would later have changed.
-
-        Args:
-            subject: What is being asked about, already trusted by the caller.
-                This runtime does not check it and never re-reads its source.
-            subject_kind: What that subject is, for whatever draws it.
-            subject_id: How the caller addresses that subject, if it has an
-                identity apart from its text. Carried, never read here.
-            task: Which configured task this ask is.
-
-        Returns:
-            The composed ask, addressable by its id.
-        """
-        composed = AIObject(
-            subject=subject, subject_kind=subject_kind,
-            # Where it began and what it is about start as the same thing, and
-            # part company the moment a reader points it somewhere else.
-            subject_id=subject_id, origin_id=subject_id, task=task,
-        )
-        self._objects[composed.id] = composed
-        return composed
-
-    def ai_object(self, object_id: str) -> AIObject | None:
-        """The ask one id addresses, or nothing.
-
-        Nothing is an ordinary answer -- an id from a page that has since been
-        replaced addresses no ask -- and is not a failure here.
-        """
-        return self._objects.get(str(object_id or ""))
-
-    def replace_object(self, composed: AIObject) -> AIObject:
-        """Hold a changed ask under the id it already had.
-
-        Every change is a new value, so this is how one becomes current. An ask
-        this runtime never composed is refused rather than adopted: an id it
-        does not know is a caller naming something that does not exist.
-        """
-        if composed.id not in self._objects:
-            raise AISelectionError(f"This runtime composed no AI object '{composed.id}'.")
-        self._objects[composed.id] = composed
-        return composed
-
-    def session(self, session_id: str = "") -> AISession:
-        """A conversation against this runtime."""
-        return AISession(self, session_id=session_id)
-
     # -- internals ---------------------------------------------------------
 
     def _model(
@@ -1256,24 +943,6 @@ class AI:
                 f"The engine '{model_identifier}' does not resolve to a model."
             ) from error
 
-    def _profile_for(
-        self, profile_id: str, task: AISettingsTask | None = None,
-    ) -> AIProfile:
-        """The profile a request named, then the task's, then the selected one."""
-        wanted = (
-            str(profile_id or "")
-            or (task.profile_id if task else "")
-            or self._settings.profile_id
-        )
-        if not wanted:
-            available = self._registry.profiles()
-            if not available:
-                raise AISelectionError("This runtime offers no AI profiles.")
-            raise AISelectionError(
-                "No AI profile is selected and the request named none."
-            )
-        return self._registry.profile(wanted)
-
     def connections(self) -> tuple[str, ...]:
         """Every connection a task here may be pointed at, in name order.
 
@@ -1282,117 +951,72 @@ class AI:
         """
         return tuple(sorted(self._connections))
 
-    def connection_for(self, connection: str = "", task: str = "") -> str:
-        """The connection an ask queries through: its own, its task's, the default.
 
-        Empty is an ordinary answer and means this ask queries nothing. The same
-        precedence the profile follows, so a reader overriding one setting is not
-        surprised by the other.
+def _offered_instructions(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    """The governed instructions by key, as a reader sees them, in offer order.
 
-        Named by task key rather than by a settings object, because that is what
-        an ask carries and the settings are this object's to look in.
-        """
-        configured = self._settings.task(task) if task else None
-        return (
-            str(connection or "")
-            or (configured.connection if configured else "")
-            or self._settings.connection
-        )
+    "None", then "Ad hoc text", then each contract as ``<contract> <version>``
+    carrying its body -- the order and the labels the settings survey has
+    always shown.
 
-    def _instruction_for(
-        self, request: AIRequest, task: AISettingsTask | None = None,
-    ) -> AIInstruction:
-        """The instruction that applies: the request's, then the selection's.
-
-        A request may carry an instruction outright rather than name one, which
-        is how a caller sends a one-off system instruction without configuring
-        it. Absent both, there is no instruction -- expressed as the value for
-        that, never as a magic string.
-        """
-        if request.instruction is not None:
-            return request.instruction
-        wanted = (
-            str(request.instruction_id or "")
-            or (task.instruction_id if task else "")
-            or self._settings.instruction_id
-        )
-        if not wanted:
-            return AIInstruction(kind=AIInstructionKind.NONE)
-        return self._registry.instruction(wanted)
-
-    def _options_for(
-        self, request: AIRequest, task: AISettingsTask | None,
-    ) -> AIRequestOptions:
-        """The request's options, with the effective temperature filled in.
-
-        ``None`` on the request means "unset", not "send no temperature", so it
-        is the point where a configured value applies. A request that states one
-        keeps it, including an explicit ``0`` -- which is why this tests for
-        ``None`` rather than falsiness, a configured zero being the value this
-        estate actually uses.
-        """
-        if request.options.temperature is not None:
-            return request.options
-        temperature = task.temperature if task else None
-        if temperature is None:
-            temperature = self._settings.temperature
-        if temperature is None:
-            return request.options
-        return replace(request.options, temperature=temperature)
-
-    def _validated(self, settings: AISettings) -> AISettings:
-        """Refuse a selection this runtime does not offer.
-
-        Every level, not only the defaults: a task override naming an absent
-        profile fails the same way a default does. Refusing one and accepting
-        the other would let a task be configured into a state that only fails
-        when that task next runs.
-        """
-        self._offered(
-            settings.profile_id, settings.instruction_id, "", settings.connection,
-        )
-        for task in settings.tasks:
-            self._offered(
-                task.profile_id, task.instruction_id,
-                f" for task '{task.name}'", task.connection,
+    Raises:
+        AIConfigurationError: when a contract carries no body, or two
+            instructions would show a reader the same label.
+    """
+    reserved: list[tuple[str, dict[str, str]]] = []
+    contracts: list[tuple[str, dict[str, str]]] = []
+    shown: dict[str, str] = {}
+    for row in rows:
+        key = str(row.get("instruction_key") or "").strip()
+        kind = str(row.get("kind") or "none")
+        if kind != "contract":
+            reserved.append((key, {"kind": kind, "text": "",
+                                   "label": "None" if kind == "none" else "Ad hoc text"}))
+            continue
+        body = row.get("body")
+        if not body:
+            raise AIConfigurationError(
+                f"AI instruction '{key}' is a contract and carries no body, so "
+                "nothing could be sent for it."
             )
-        return settings
+        label = f"{row.get('contract_key')} {row.get('contract_version')}"
+        if label in shown:
+            raise AIConfigurationError(
+                f"AI instructions '{key}' and '{shown[label]}' both show '{label}', "
+                "so a reader could not tell them apart."
+            )
+        shown[label] = key
+        contracts.append((key, {"kind": kind, "text": str(body), "label": label}))
+    reserved.sort(key=lambda item: 0 if item[1]["kind"] == "none" else 1)
+    return dict(reserved + contracts)
 
-    def _offered(
-        self,
-        profile_id: str,
-        instruction_id: str,
-        where: str,
-        connection: str = "",
-    ) -> None:
-        """Refuse a profile, instruction or connection this runtime does not offer."""
-        if connection and connection not in self._connections:
-            # Not "no such connection": one may well exist. It has not said a
-            # language model may use it, which is a different refusal and the
-            # one a reader needs to hear.
+
+def _access_policy(engine: Mapping[str, Any]) -> dict[str, Any]:
+    """Which representations an engine may receive, and the one it takes by default.
+
+    The engine's own declaration is the only authority, and an absent or
+    invalid one fails closed.
+
+    Raises:
+        AISelectionError: when the declaration is absent or invalid.
+    """
+    key = str(engine.get("profile_key") or "")
+    declared = engine.get("access_allowed") or []
+    if not isinstance(declared, (list, tuple)) or not declared:
+        raise AISelectionError(f"AI profile '{key}' requires profile_access.allowed.")
+    allowed: list[str] = []
+    for value in declared:
+        mode = str(value or "").strip()
+        if mode not in _ACCESS_MODES:
             raise AISelectionError(
-                f"No connection is offered to AI as '{connection}'{where}."
+                "profile_access.allowed may contain only "
+                f"{' or '.join(sorted(_ACCESS_MODES))}."
             )
-        if profile_id and not self._registry.has_profile(profile_id):
-            raise AISelectionError(
-                f"No AI profile is configured as '{profile_id}'{where}."
-            )
-        if instruction_id and not self._registry.has_instruction(instruction_id):
-            raise AISelectionError(
-                f"No AI instruction is configured as '{instruction_id}'{where}."
-            )
-
-    def _replace(self, settings: AISettings) -> AISettings:
-        """One canonical answer, replaced, and everyone interested told.
-
-        An observer that raises does not stop the change or the other
-        observers: the selection has already changed, and a listener's failure
-        is its own.
-        """
-        self._settings = settings
-        for listener in tuple(self._observers):
-            try:
-                listener(settings)
-            except Exception:  # noqa: BLE001 -- an observer cannot break the owner
-                continue
-        return settings
+        if mode not in allowed:
+            allowed.append(mode)
+    default = str(engine.get("access_default") or "").strip()
+    if default not in allowed:
+        raise AISelectionError(
+            "profile_access.default must be a member of profile_access.allowed."
+        )
+    return {"allowed": allowed, "default": default}

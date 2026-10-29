@@ -25,8 +25,7 @@ from rey_lib.ai.errors import (
     AIProviderError,
     AIRequestError,
 )
-from rey_lib.ai.policies import AIExecutionPolicy, ValidationCorrectionPolicy
-from rey_lib.ai.registry import AIRegistry
+from rey_lib.ai import ai as ai_module
 from rey_lib.ai.requests import AIOutputSpec
 from rey_lib.ai.task import AITask
 
@@ -72,12 +71,8 @@ class _Engine:
 
 
 def _ai(engine: _Engine, monkeypatch: pytest.MonkeyPatch, corrections: int = 0) -> AI:
-    ai = AI(
-        registry=AIRegistry(),
-        policy=AIExecutionPolicy(
-            validation_correction=ValidationCorrectionPolicy(max_corrections=corrections),
-        ),
-    )
+    monkeypatch.setattr(ai_module, "_MAX_OUTPUT_CORRECTIONS", corrections)
+    ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: engine.model)
     return ai
 

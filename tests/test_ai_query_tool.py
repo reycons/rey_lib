@@ -24,7 +24,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError, AIToolError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AITool, AIToolSet
 from rey_lib.config import bootstrap
@@ -91,7 +90,7 @@ def operations(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
     monkeypatch.setattr(bootstrap, "build_connections", lambda ctx: {
         "llm_reader": _Connection("llm_reader"), "warehouse": _Connection("warehouse"),
     })
-    return bootstrap._ai_query_operations(object(), ("llm_reader",))
+    return bootstrap.ai_query_operations(object(), ("llm_reader",))
 
 
 class TestGovernedFact:
@@ -166,7 +165,7 @@ class _Engine:
 
 
 def _ai(engine: _Engine, monkeypatch: pytest.MonkeyPatch, operations: dict) -> AI:
-    ai = AI(registry=AIRegistry(), connection_operations=operations)
+    ai = AI(connection_operations=operations)
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: engine.model)
     return ai
 

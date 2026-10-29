@@ -17,7 +17,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.results import AIOutputForm
 from rey_lib.ai.streaming import AIEvent, AIEventKind
@@ -39,7 +38,7 @@ def _task(output: AIOutputSpec) -> AITask:
 
 
 def _ai(model: FunctionModel, monkeypatch: pytest.MonkeyPatch) -> AI:
-    ai = AI(registry=AIRegistry())
+    ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
     return ai
 

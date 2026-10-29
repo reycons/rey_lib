@@ -18,7 +18,6 @@ from pydantic_ai.models import Model
 from rey_lib.ai.ai import AI
 from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import AIConfigurationError
-from rey_lib.ai.registry import AIRegistry
 
 #: The test's own environment variable, declared to the resolver as TEST_KEY.
 KEY_VARIABLE = "REY_AI_ENGINE_MODELS_TEST_KEY"
@@ -43,7 +42,6 @@ def ai(monkeypatch: pytest.MonkeyPatch) -> AI:
     """An AI holding the credential resolver construction would hand it."""
     monkeypatch.setenv(KEY_VARIABLE, "test-key-not-a-secret")
     return AI(
-        registry=AIRegistry(),
         credentials=CredentialResolver({"TEST_KEY": KEY_VARIABLE}),
     )
 

@@ -65,11 +65,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from rey_lib.ai.errors import AIConfigurationError
-from rey_lib.analysis.api import RunRequest, RunResponse
+from rey_lib.ai.errors import AIConfigurationError, AIUnavailableError
+from rey_lib.analysis.api import RunRequest
 from rey_lib.analysis.contract import Contract, parse_contract
 from rey_lib.analysis.datasource import DataSource
-from rey_lib.analysis.execution import run
 from rey_lib.analysis.preparation import PreparedInput, prepare
 from rey_lib.analysis.records import ExecutionRecord
 from rey_lib.artifacts import ArtifactStore
@@ -428,11 +427,8 @@ class Analyzer:
     ) -> AnalysisResult:
         """Run the full analysis lifecycle for one data source.
 
-        1. Extract raw data from ``source``.
-        2. Apply preparation pipeline (filter, sample, redact, render).
-        3. Call the LLM provider with the rendered prompt.
-        4. Validate output against the contract's output_schema.
-        5. Return an AnalysisResult with data, metadata, and audit record.
+        Refused: analysis contracts ran on the legacy AI executor, which #1025
+        removed. Running them on the live AI is #1283.
 
         Parameters
         ----------
@@ -442,86 +438,14 @@ class Analyzer:
             Identifier for this analysis run — stored in every audit record.
             Use a meaningful value such as a batch ID or timestamp slug.
 
-        Returns
-        -------
-        AnalysisResult
-            Structured output, preparation metadata, status, and audit record.
+        Raises
+        ------
+        AIUnavailableError
+            Always, naming backlog #1283.
         """
-        spec = self._contract.spec
-
-        _logger.info(
-            "analyzer: extracting data for analysis_id=%s source_type=%s",
-            analysis_id,
-            spec.source_type,
-        )
-        raw = source.extract(max_extract=self._max_extract)
-
-        _logger.info(
-            "analyzer: preparing %d rows from '%s'",
-            raw.row_count,
-            raw.source_ref,
-        )
-        prepared = prepare(
-            raw,
-            allowed_columns  = spec.allowed_columns,
-            required_filters = spec.required_filters,
-            max_rows         = spec.max_rows,
-            sampling_method  = spec.sampling_method,
-            sampling_seed    = spec.sampling_seed,
-            redaction_rules  = spec.redaction,
-        )
-
-        _logger.info(
-            "analyzer: prepared %d rows (extracted=%d, filtered=%d) — calling the AI runtime",
-            prepared.profile.rows_sampled,
-            prepared.profile.rows_extracted,
-            prepared.profile.rows_after_filter,
-        )
-
-        request = RunRequest(
-            pipeline_id       = analysis_id,
-            stage_id          = self._contract.name,
-            contract          = self._contract.base,
-            input_data        = prepared.rendered_text,
-            profile_id        = self._profile_id,
-            output_schema     = spec.output_schema,
-            log               = self._log,
-            requires_approval = self._requires_approval,
-            raw_output        = spec.output_format == "raw",
-            artifact_type     = spec.artifact_type,
-            artifact_processing = self._artifact_processing,
-            payload_id            = self._payload_id,
-        )
-
-        response: RunResponse = run(
-            request,
-            self._ai,
-            redactor       = self._redactor,
-            artifact_store = self._artifact_store,
-            run_log        = self._run_log,
-        )
-
-        if response.status == "failed":
-            _logger.warning(
-                "analyzer: analysis_id=%s failed run_id=%s errors=%s",
-                analysis_id,
-                response.run_id,
-                "; ".join(response.errors) if response.errors else "unknown",
-            )
-        else:
-            _logger.info(
-                "analyzer: analysis_id=%s status=%s run_id=%s",
-                analysis_id,
-                response.status,
-                response.run_id,
-            )
-
-        return AnalysisResult(
-            run_id   = response.run_id,
-            status   = response.status,
-            data     = response.parsed_response,
-            raw_text = response.raw_text,
-            prepared = prepared,
-            errors   = response.errors,
-            record   = response.record,
+        # Analysis contracts ran on the legacy AI executor, removed by #1025 with
+        # no replacement; refused here, before anything is extracted or sent.
+        raise AIUnavailableError(
+            f"Analysis contract '{self._contract.name}' cannot run: analysis "
+            "contracts do not run on the live AI yet (backlog #1283)."
         )

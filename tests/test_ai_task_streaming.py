@@ -17,7 +17,6 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIExecutionError, AIProviderError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.streaming import AIEvent, AIEventKind
 from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AITool
@@ -41,7 +40,7 @@ def _tool(name: str) -> AITool:
 
 
 def _ai(stream: Any, monkeypatch: pytest.MonkeyPatch) -> AI:
-    ai = AI(registry=AIRegistry())
+    ai = AI()
     model = FunctionModel(stream_function=stream)
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
     return ai
@@ -92,7 +91,7 @@ class TestText:
             from pydantic_ai.messages import ModelResponse, TextPart
             return ModelResponse(parts=[TextPart("plain")])
 
-        ai = AI(registry=AIRegistry())
+        ai = AI()
         model = FunctionModel(answers)
         monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
 

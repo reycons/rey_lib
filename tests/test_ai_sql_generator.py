@@ -24,7 +24,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.errors import AIConfigurationError, AIRequestError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.sql_generator import SQLGenerator
 from rey_lib.db import database_objects
 from rey_lib.db import database_query
@@ -133,7 +132,7 @@ def _generator(engine: _Engine, monkeypatch: pytest.MonkeyPatch,
                control: _Control | None = None) -> tuple[SQLGenerator, list[tuple]]:
     # Composed as bootstrap composes it: with the connections whose own
     # declaration lets a language model use them (backlog 1049, D-a).
-    ai = AI(registry=AIRegistry(), connections=("warehouse",))
+    ai = AI(connections=("warehouse",))
     built: list[tuple] = []
 
     def model(*engine_facts: Any) -> FunctionModel:

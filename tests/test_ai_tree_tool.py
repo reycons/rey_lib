@@ -17,7 +17,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.task import AITask
 
 TREE_EXPAND_ROW = {
@@ -64,7 +63,7 @@ def test_the_new_path_refuses_tree_children_as_unbound(
         asked.append(info)
         return ModelResponse(parts=[TextPart("never")])
 
-    ai = AI(registry=AIRegistry())
+    ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: FunctionModel(answer))
     task = _task()
 

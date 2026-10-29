@@ -1,31 +1,24 @@
-"""Focused tests for the log interpreter and the configured record analyses.
+"""Focused tests for run finalization and the log interpreter's package.
 
-Two different consumers live here. The log interpreter is a finalization stage
-that resolves no configuration -- it names the log_interpretation task and lets
-AI settings answer with the profile and instruction. The record analyses are
-still selected from log_analysis entries by the Console, which is why the
-installation fixture below still writes them.
+The log interpretation itself was removed with the legacy AI (#1025); #1284
+restores it on the live AI.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from tests.conftest import make_run_log
 
-from rey_lib.ai.errors import AIProviderError
 from rey_lib.logs import (
     create_llm_package,
     create_results_summary,
     finalize_run_log,
-    run_configured_log_analysis,
 )
 from rey_lib.logs.record_enrichment import log_run_record
-from rey_lib.ai.errors import AIRequestError
 from rey_lib.data.errors import DataStructureError
 
 
@@ -112,18 +105,6 @@ def _pkg(
 #: discovers it, so a test that patches _ask only needs something that is not
 #: None. A test of the no-AI path passes ai=None explicitly.
 _AN_AI = object()
-
-
-def _run(
-    log_path: Path,
-    package_record_type: str = "LLM_PACKAGE",
-    ai: object = _AN_AI,
-    task: str = "log_interpretation",
-) -> dict:
-    return run_configured_log_analysis(
-        _log(log_path), ai=ai,
-        package_record_type=package_record_type, task=task,
-    )
 
 
 def _configuration(
@@ -258,81 +239,34 @@ def _envelope(content: dict) -> str:
     return json.dumps({"artifact_type": "json", "content": content, "notes": []})
 
 
-def _patch_direct_ask(monkeypatch, *, response=None, capture=None, raises=None) -> None:
-    """Substitute the module's one AI entry point.
-
-    The signature follows what replaced ``direct_ask``: a prompt and an
-    execution profile. Provider, model and credential are no longer arguments
-    here -- the AI runtime owns those, chosen once at bootstrap -- so a test that
-    asserted on them is asserting about a decision this module no longer makes.
-    """
-    def fake(ctx, prompt, execution_profile, **_kwargs):
-        if capture is not None:
-            capture.update({
-                "prompt": prompt,
-                "execution_profile": execution_profile,
-                **_kwargs,
-            })
-        if raises is not None:
-            raise raises
-        return response
-    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
-
-
-def _stage_direct_ask(monkeypatch) -> None:
-    """The AI entry point returning the interpreter's single-pass result.
-
-    The configured contract renders the subject, html, and text in the same
-    response as the structured interpretation, so one call returns both and no
-    second stage is needed to produce the presentation fields.
-    """
-    def fake(_ctx, _prompt, _execution_profile, **_kwargs):
-        return _envelope({
-            "verdict": "ok",
-            "subject": "Run report",
-            "html": "<p>ok</p>",
-            "text": "ok",
-        })
-    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
-
-
 # ---------------------------------------------------------------------------
 # finalize_run_log lifecycle
 # ---------------------------------------------------------------------------
 
-def test_finalize_runs_one_llm_stage_producing_one_result_record(
-    tmp_path, monkeypatch,
-) -> None:
-    """Finalization is a single LLM stage; the interpretation is the final record.
+def test_finalize_writes_the_summary_and_package_and_no_interpretation(tmp_path) -> None:
+    """Finalization ends at the package: log interpretation was removed (#1025, #1284).
 
-    The configured contract renders the subject, html, and text in the same
-    response as the structured interpretation, so no second email-generation stage
-    exists to duplicate that work.
+    No interpretation is attempted, so neither an interpretation nor a failure
+    record is written, and the run's own records are left as they were.
     """
     log_path, _contract_path = _unfinalized_run(tmp_path)
-    _stage_direct_ask(monkeypatch)
+    before = [record["record_type"] for record in _records(log_path)]
 
-    finalize_run_log(_log(log_path))
+    result = finalize_run_log(_log(log_path))
 
-    assert _result_types(log_path) == [
-        "RESULTS_SUMMARY",
-        "LLM_PACKAGE",
-        "LLM_INTERPRETATION",
-    ]
-    interpretation = _records(log_path)[-1]
-    assert interpretation["record_type"] == "LLM_INTERPRETATION"
-    # One authoritative record carries the structured interpretation and the
-    # rendered presentation together, at the top level.
-    assert interpretation["verdict"] == "ok"
-    assert interpretation["subject"] == "Run report"
-    assert interpretation["html"] == "<p>ok</p>"
-    assert interpretation["text"] == "ok"
+    types = [record["record_type"] for record in _records(log_path)]
+    assert types[:len(before)] == before
+    assert types[len(before):] == ["RESULTS_SUMMARY", "LLM_PACKAGE"]
+    assert types.count("RUN_COMPLETE") == before.count("RUN_COMPLETE") == 1
+    assert "LLM_INTERPRETATION" not in types
+    assert "LLM_ANALYSIS_FAILURE" not in types
+    assert result["analysis"] is None
+    assert result["package"] is not None
 
 
-def test_finalize_produces_no_email_stage_records(tmp_path, monkeypatch) -> None:
+def test_finalize_produces_no_email_stage_records(tmp_path) -> None:
     """The duplicate email stage is gone: it leaves no records behind."""
     log_path, _contract_path = _unfinalized_run(tmp_path)
-    _stage_direct_ask(monkeypatch)
 
     result = finalize_run_log(_log(log_path))
 
@@ -431,244 +365,3 @@ def test_repeated_creation_of_the_package_is_idempotent(tmp_path: Path) -> None:
 
     types = [record["record_type"] for record in _records(log_path)]
     assert types.count("LLM_PACKAGE") == 1
-
-
-# ---------------------------------------------------------------------------
-# run_configured_log_analysis (parameterized)
-# ---------------------------------------------------------------------------
-
-def _analysis_config(
-    tmp_path: Path,
-    *,
-    name: str = "log_interpreter",
-    record_type: str = "LLM_INTERPRETATION",
-    enabled: bool = True,
-    fail_on_error: bool = False,
-    destination: str = "stdout",
-    output_path: Path | None = None,
-) -> Path:
-    installation = tmp_path / "installation"
-    shared = installation / "shared"
-    shared.mkdir(parents=True)
-    config_path = installation / "installation.yaml"
-    config_path.write_text("installation:\n  name: demo\n", encoding="utf-8")
-    output = (
-        f"      destination: {destination}\n"
-        "      format: JSON\n"
-        f"      record_type: {record_type}\n"
-        "      record_group: results\n"
-    )
-    if output_path is not None:
-        output += f'      path: "{output_path}"\n'
-    (shared / "log_analysis.yaml").write_text(
-        "log_analysis:\n"
-        f"  {name}:\n"
-        f"    enabled: {'true' if enabled else 'false'}\n"
-        "    engine: llm\n"
-        "    artifact_type: json\n"
-        "    llm_execution_profile: local_precision\n"
-        f"    fail_on_error: {'true' if fail_on_error else 'false'}\n"
-        "    output:\n" + output,
-        encoding="utf-8",
-    )
-    (shared / "llm_profiles.yaml").write_text(
-        "llm_profiles:\n"
-        "  - name: local_precision\n"
-        "    provider: mock\n"
-        "    model: mock-model\n"
-        '    api_key: ""\n',
-        encoding="utf-8",
-    )
-    return config_path
-
-
-def _package_log(
-    tmp_path: Path,
-    config_path: Path,
-    *,
-    with_package: bool = True,
-    record_type: str = "LLM_PACKAGE",
-    package_fields: dict | None = None,
-    extra_records: list[dict] | None = None,
-) -> Path:
-    log_path = tmp_path / "demo.20260714_120000.jsonl"
-    records = [
-        {"record_type": "RUN_START", "record_group": "execution", "run_id": "run-1",
-         "run_timestamp": "20260714_120000", "app": "demo", "pipeline_name": "demo_pipeline"},
-        {"record_type": "CONFIG_FILE_REFERENCE", "record_group": "files", "run_id": "run-1",
-         "run_timestamp": "20260714_120000", "path": str(config_path),
-         "configuration_layer": "installation", "config_type": "installation", "load_order": 0},
-        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "run-1",
-         "run_timestamp": "20260714_120000", "status": "success"},
-    ]
-    if with_package:
-        fields = package_fields or {
-            "analysis_name": "log_interpreter",
-            "source_record_type": "RESULTS_SUMMARY",
-            "instructions": {"name": "rey_log_interpreter"},
-            "source": {"status": "success"},
-        }
-        records.append({
-            "record_type": record_type, "record_group": "results", "run_id": "run-1",
-            "run_timestamp": "20260714_120000", **fields,
-        })
-    if extra_records:
-        records.extend(extra_records)
-    _write_jsonl(log_path, records)
-    return log_path
-
-
-def test_configured_analysis_reads_existing_package(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
-    captured: dict = {}
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
-    _run(log_path)
-    assert '"instructions"' in captured["prompt"]
-    assert '"source"' in captured["prompt"]
-
-
-def test_the_configured_analysis_selects_only_its_task(tmp_path, monkeypatch) -> None:
-    """It names what it is asking for, and nothing about how to answer.
-
-    Provider, model and instruction are the AI's, resolved from its own settings
-    as request override -> task override -> default. Naming a profile here would
-    be a second answer to a question the runtime already owns, so this chain
-    names none -- not even the analysis entry's llm_execution_profile.
-    """
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
-    captured: dict = {}
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
-
-    _run(log_path, task="log_interpretation")
-
-    assert captured["task"] == "log_interpretation"
-    assert captured["execution_profile"] == ""
-
-
-def test_configured_analysis_calls_existing_llm_executor(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
-    called = {"n": 0}
-
-    def fake(ctx, prompt, execution_profile, **_kwargs):
-        called["n"] += 1
-        return _envelope({"ok": True})
-
-    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
-    _run(log_path)
-    assert called["n"] == 1
-
-
-def test_package_record_type_controls_which_package_is_consumed(tmp_path, monkeypatch) -> None:
-    config = _analysis_config(tmp_path)
-    email_fields = {
-        "analysis_name": "email_results", "source_record_type": "LLM_INTERPRETATION",
-        "instructions": {"name": "email_results"}, "source": {"marker": "EMAIL_SOURCE"},
-    }
-    log_path = _package_log(
-        tmp_path, config,
-        extra_records=[{
-            "record_type": "LLM_EMAIL_PACKAGE", "record_group": "results",
-            "run_id": "run-1", **email_fields,
-        }],
-    )
-    captured: dict = {}
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
-
-    _run(log_path, package_record_type="LLM_EMAIL_PACKAGE")
-
-    assert "EMAIL_SOURCE" in captured["prompt"]
-    assert '"status": "success"' not in captured["prompt"]
-
-
-def test_stdout_result_uses_configured_record_type_and_group(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, destination="stdout"))
-    _patch_direct_ask(monkeypatch, response=_envelope({"verdict": "ok", "reasons": ["r"]}))
-    _run(log_path)
-    record = _records(log_path)[-1]
-    assert record["record_type"] == "LLM_INTERPRETATION"
-    assert record["record_group"] == "results"
-    assert record["verdict"] == "ok"
-    assert record["reasons"] == ["r"]
-
-
-def test_missing_package_record_fails_explicitly(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path), with_package=False)
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
-    with pytest.raises(DataStructureError, match="package record: LLM_PACKAGE"):
-        _run(log_path)
-
-
-def test_nonfatal_llm_failure_writes_failure_record(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
-    before = _records(log_path)
-    _patch_direct_ask(monkeypatch, raises=AIProviderError("boom"))
-    out = _run(log_path)
-    assert out["result"] is None
-    assert out["failures"]
-    after = _records(log_path)
-    # Prior records are preserved; one canonical failure record is appended, with the
-    # full error scope shaped by error_utils (type, message, exception, traceback).
-    assert after[:len(before)] == before
-    failure = after[-1]
-    # An exception is its own kind of record. output.record_type names the
-    # successful payload, and typing a failure as one left a reader unable to
-    # tell them apart.
-    assert failure["record_type"] == "LLM_ANALYSIS_FAILURE"
-    assert failure["record_group"] == "results"
-    assert failure["status"] == "failed"
-    # error_message carries the whole payload, because that is what the column
-    # is: control.run_log.error_message is jsonb and the detail reader ranks
-    # sanitized_exception, error_message, message and the tracebacks within that
-    # object. Flat siblings have no column and would take the record down.
-    assert failure["error_message"]["error_type"] == "AIProviderError"
-    assert failure["error_message"]["error_message"]
-    assert failure["error_message"]["sanitized_traceback"]
-    assert failure["analysis_name"] == "log_interpreter"
-
-
-def test_nonfatal_parse_failure_writes_failure_record(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
-    # A valid envelope whose json artifact is not decodable JSON triggers a parse failure.
-    _patch_direct_ask(
-        monkeypatch,
-        response=json.dumps({"artifact_type": "json", "content": "not-json", "notes": []}),
-    )
-    out = _run(log_path)
-    assert out["result"] is None
-    assert out["failures"]
-    assert _records(log_path)[-1]["status"] == "failed"
-
-
-def test_repeated_execution_does_not_duplicate_result(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
-    _run(log_path)
-    _run(log_path)
-    assert sum(1 for r in _records(log_path) if r["record_type"] == "LLM_INTERPRETATION") == 1
-
-
-def test_a_runtime_without_an_ai_records_the_failure_and_returns(tmp_path) -> None:
-    """No AI is an ordinary capability state, not a failed run.
-
-    The stage runs after the run has finished and fail_on_error is false, so the
-    absence is written down and the caller carries on. AIUnavailableError is a
-    sibling of AIConfigurationError rather than a subclass, so it once matched
-    nothing in the failure boundary and took the run down with it.
-
-    _ask is not patched here: the real one is what refuses when handed None.
-    """
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
-    before = _records(log_path)
-
-    out = _run(log_path, ai=None)
-
-    assert out["action"] == "failed"
-    assert out["result"] is None
-    assert any("no AI configured" in failure for failure in out["failures"])
-    after = _records(log_path)
-    assert after[:len(before)] == before
-    failure = after[-1]
-    assert failure["record_type"] == "LLM_ANALYSIS_FAILURE"
-    assert failure["error_message"]["error_type"] == "AIUnavailableError"
-
-

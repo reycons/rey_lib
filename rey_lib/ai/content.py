@@ -1,17 +1,7 @@
-"""What a request is made of.
+"""What an AI task sends.
 
-Content is content. A message sequence is not a kind of content -- it is how an
-input is organised -- so the two are separate and the model does not nest into
-itself:
-
-    AIInput     direct content, or messages
-    AIMessage   a role, its content parts, and metadata
+    AIInput     the task's content parts
     AIContent   one part: text, structured data, an image, a document, audio
-
-That separation is why a multimodal request needs no new object and why adding a
-part kind later changes nothing above it. A canonical API of
-``AIRequest(prompt: str)`` was rejected for the same reason: it is obsolete the
-first time an image is sent.
 
 Only the part kinds with established use are constructible today. The rest exist
 as a named kind so a provider adapter can refuse them precisely rather than a
@@ -24,14 +14,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from rey_lib.ai.tools import AIToolCall
-
 __all__ = [
     "AIContent",
     "AIContentKind",
     "AIInput",
-    "AIMessage",
-    "AIRole",
     "audio",
     "document",
     "image",
@@ -48,21 +34,6 @@ class AIContentKind(str, Enum):
     IMAGE = "image"
     DOCUMENT = "document"
     AUDIO = "audio"
-
-
-class AIRole(str, Enum):
-    """Who is speaking.
-
-    A role is added when something needs it, not in anticipation. ``TOOL`` was
-    added when tool continuation needed it: a continuation turn carries the
-    results of the calls the assistant asked for, and a provider distinguishes
-    that turn from a user turn.
-    """
-
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
-    TOOL = "tool"
 
 
 @dataclass(frozen=True)
@@ -107,55 +78,10 @@ def audio(reference: str, media_type: str = "") -> AIContent:
 
 
 @dataclass(frozen=True)
-class AIMessage:
-    """One turn: who said it, what it was made of, and anything about it.
-
-    ``tool_calls`` and ``tool_call_id`` are the two halves of a tool exchange,
-    kept as fields rather than buried in ``metadata`` because a continuation
-    turn is built from them and a reader that had to guess a metadata key would
-    be reconstructing the protocol.
-
-    ``tool_calls``   what an assistant turn asked for.
-    ``tool_call_id`` which call a ``TOOL`` turn is answering.
-    """
-
-    role: AIRole
-    content: tuple[AIContent, ...] = ()
-    tool_calls: tuple["AIToolCall", ...] = ()
-    tool_call_id: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @staticmethod
-    def of(role: AIRole, *parts: AIContent) -> "AIMessage":
-        """One message from its parts."""
-        return AIMessage(role=role, content=tuple(parts))
-
-    @staticmethod
-    def asked_for_tools(calls: tuple["AIToolCall", ...]) -> "AIMessage":
-        """The assistant turn that requested these tool calls."""
-        return AIMessage(role=AIRole.ASSISTANT, tool_calls=tuple(calls))
-
-    @staticmethod
-    def tool_answer(call_id: str, value: Any) -> "AIMessage":
-        """The turn that answers one tool call."""
-        return AIMessage(
-            role=AIRole.TOOL,
-            content=(structured(value),),
-            tool_call_id=str(call_id),
-        )
-
-
-@dataclass(frozen=True)
 class AIInput:
-    """What the caller is sending.
-
-    Either loose content or a sequence of messages. Both are allowed together --
-    a conversation with a fresh attachment is one request, not two -- and the
-    order is messages first, then the loose content as the final turn.
-    """
+    """What a task is sending: its content parts."""
 
     content: tuple[AIContent, ...] = ()
-    messages: tuple[AIMessage, ...] = ()
 
     @staticmethod
     def of(*parts: AIContent) -> "AIInput":
@@ -167,18 +93,10 @@ class AIInput:
         """The simple case, spelled out rather than made the canonical shape."""
         return AIInput(content=(text(value),))
 
-    @staticmethod
-    def conversation(*messages: AIMessage) -> "AIInput":
-        """An input that is a sequence of turns."""
-        return AIInput(messages=tuple(messages))
-
     def is_empty(self) -> bool:
         """Whether there is anything at all to send."""
-        return not self.content and not self.messages
+        return not self.content
 
     def kinds(self) -> frozenset[AIContentKind]:
         """Every part kind present, which is what capability is checked against."""
-        present = {part.kind for part in self.content}
-        for message in self.messages:
-            present.update(part.kind for part in message.content)
-        return frozenset(present)
+        return frozenset(part.kind for part in self.content)

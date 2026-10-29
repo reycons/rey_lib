@@ -58,7 +58,8 @@ AD_HOC_INSTRUCTION = "__ad_hoc__"
 NO_INSTRUCTION = "__none__"
 
 __all__ = [
-    "app_runtime", "build_ctx_for_app", "open_shared_ai", "open_shared_control",
+    "ai_connections", "ai_control", "ai_query_operations",
+    "app_runtime", "build_ctx_for_app", "open_shared_control",
 ]
 
 _logger = AppLogger(__name__)
@@ -391,7 +392,7 @@ def _open_control(ctx: Namespace) -> Any:
 def open_shared_control(ctx: Namespace) -> Namespace:
     """Make a resolved context into a runtime by giving it its one Control.
 
-    The sibling of ``open_shared_ai``, and the same seam: the assignment lives
+    One seam: the assignment lives
     here rather than at each caller, so ``ctx.shared_control`` is written in one
     place however many kinds of runtime exist -- an application's, and a Console
     page session's for the installation it is on.
@@ -438,7 +439,7 @@ def open_shared_control(ctx: Namespace) -> Namespace:
     return ctx
 
 
-def _ai_connections(ctx: Any) -> tuple[str, ...]:
+def ai_connections(ctx: Any) -> tuple[str, ...]:
     """The connections this installation lets a language model query through.
 
     Read here because this is what composes both halves: the connections are the
@@ -470,7 +471,7 @@ def _ai_connections(ctx: Any) -> tuple[str, ...]:
     return permitted
 
 
-def _ai_query_operations(
+def ai_query_operations(
     ctx: Any, permitted: tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
     """Per offered connection, the query operation a governed AI tool binds (backlog 741).
@@ -518,89 +519,7 @@ def _ai_query_operations(
     }
 
 
-def open_shared_ai(ctx: Namespace) -> Namespace:
-    """Make a resolved context into a runtime by giving it its one AI.
-
-    **Optional, unlike Control.** Not every estate has AI configured, and the
-    existence of an installation does not imply the existence of an AI. When no
-    engine profiles are stored, this returns ``None`` and the runtime simply has
-    no AI -- an ordinary capability state, not a failure. A non-AI application
-    boots and runs exactly as it did.
-
-    Built here for the same reason RunLog is: one object per runtime invocation,
-    from configuration read in one place, so the dependency surface is closed
-    rather than ctx exploded across callers. Consumers reach it through
-    ``ctx.shared_ai`` and never construct their own.
-
-    ctx is a construction input only. Nothing this returns retains a reference
-    to it -- a structural guard in the AI test suite enforces that the ``ctx``
-    identifier appears nowhere in ``rey_lib.ai`` outside its construction seam.
-
-    **Absent is not the same as broken.** No configuration returns ``None``;
-    configuration that cannot be built raises. An installation that names
-    providers has asked for an AI, and reporting that as "unavailable" would
-    turn a configuration defect into silent capability loss.
-
-    The assignment lives here rather than at each caller, so ``ctx.shared_ai``
-    is written in one place however many kinds of runtime exist -- an
-    application's, and a Console page session's for the installation it is on.
-
-    Returns
-    -------
-    Namespace
-        The same context, now carrying ``shared_ai`` -- ``None`` when no AI is
-        configured.
-
-    Raises
-    ------
-    ConfigError
-        When AI is configured and one could not be built.
-    """
-    from rey_lib.ai.construction import ai_from_ctx
-    from rey_lib.ai.errors import AIError
-
-    try:
-        # Whether this installation has an AI is now the engine set's answer,
-        # not a configuration block's. An estate with no engines has no AI,
-        # which is the ordinary state ctx.llm being absent used to mean.
-        control = _ai_control(ctx)
-        rows = control.ai_engine_profiles() if control is not None else []
-        if not rows:
-            ctx.shared_ai = None
-            return ctx
-        # Built in one order because the settings are validated against what
-        # this runtime offers: a selection naming an absent profile or
-        # instruction is a configuration defect, and the only way to say so is
-        # to know both first.
-        # One read, used for both the runtime's providers and the projections
-        # a reader selects between.
-        engines = _ai_engines(rows)
-        profiles = _ai_profiles(engines, rows)
-        instructions = _ai_instructions(ctx)
-        offered = _ai_connections(ctx)
-        ctx.shared_ai = ai_from_ctx(
-            ctx,
-            profiles=profiles,
-            instructions=instructions,
-            configured=engines,
-            connections=offered,
-            connection_operations=_ai_query_operations(ctx, offered),
-            settings=_ai_settings(
-                ctx, profiles=profiles, instructions=instructions,
-            ),
-        )
-        return ctx
-    except AIError as exc:
-        # Configured and broken is not the same as absent, and must not be
-        # reported as it. An installation that names providers has asked for an
-        # AI; failing to build one is a configuration defect, and swallowing it
-        # would show an operator "AI unavailable" for something they configured.
-        raise ConfigError(
-            f"This installation configures AI but one could not be built: {exc}"
-        ) from exc
-
-
-def _ai_control(ctx: Namespace) -> Any:
+def ai_control(ctx: Namespace) -> Any:
     """The Control this runtime reads its AI configuration through, if any.
 
     AI configuration is held in the control database, so a runtime exposing no
@@ -615,294 +534,6 @@ def _ai_control(ctx: Namespace) -> Any:
     cannot be called a configuration defect; it is simply no engines.
     """
     return getattr(ctx, "shared_control", None)
-
-
-def _required_ai_control(ctx: Namespace) -> Any:
-    """The Control a reader has already established this runtime must have.
-
-    Reached only once the engine set answered that this installation has an AI,
-    so a Control missing here is a defect rather than the ordinary absence
-    ``_ai_control`` reports: an installation with engines has asked for an AI,
-    and reporting "unavailable" for the rest of its configuration would turn a
-    configuration defect into silent capability loss.
-    """
-    control = _ai_control(ctx)
-    if control is None:
-        raise ConfigError(
-            "This installation configures AI, and AI configuration is held in "
-            "the control database, but this context exposes no shared Control "
-            "to read it through."
-        )
-    return control
-
-
-def _ai_installation(ctx: Namespace) -> str:
-    """Which installation's AI configuration this runtime is asking for.
-
-    ``ctx.installation`` is an :class:`~rey_lib.installation.installation.Installation`
-    and its name is read from it. This used to normalize the shape itself,
-    because there was no object to ask: stringifying the namespace produced a
-    value no group matches, and the runtime resolved to no tasks at all --
-    silently, because an installation with no AI configuration is an ordinary
-    state.
-
-    An installation-less context reaches here only if something asked for AI
-    configuration without an installation to hold it, which is reported rather
-    than guessed at.
-    """
-    installation = str(getattr(getattr(ctx, "installation", None), "name", "") or "").strip()
-    if not installation:
-        raise ConfigError(
-            "AI configuration is held per installation, and this context names "
-            "none."
-        )
-    return installation
-
-
-def _ai_engines(rows: list[dict[str, Any]]) -> tuple[Any, ...]:
-    """The engines this runtime may reach, read from the control database.
-
-    One shared set. ``ai.ai_engine_profile`` carries no installation and
-    ``profile_key`` is unique across it, so there is nothing to filter on.
-
-    Each row becomes a ``ConfiguredProvider`` -- the object the adapters already
-    take -- so nothing database-shaped travels past here and no adapter changes.
-
-    ``credential_ref`` carries a reference, never a secret: the row holds
-    ``env.ANTHROPIC_API_KEY`` and the adapter resolves it through the credential
-    resolver exactly as it did when the same string came from configuration.
-    """
-    from rey_lib.ai.providers.configuration import ConfiguredProvider
-
-    engines: list[Any] = []
-    for row in rows:
-        key = str(row.get("profile_key") or "").strip()
-        provider = str(row.get("provider") or "").strip()
-        if not provider:
-            raise ConfigError(
-                f"Engine profile '{key}' names no provider."
-            )
-        timeout = row.get("timeout_seconds")
-        engines.append(ConfiguredProvider(
-            id=key,
-            provider=provider,
-            model=str(row.get("model") or ""),
-            endpoint=str(row.get("endpoint") or ""),
-            # By its own name. The configured value used to be read under
-            # `timeout`, which the configuration never declared, so it never
-            # reached an adapter.
-            timeout_seconds=None if timeout is None else float(timeout),
-            credential_ref=str(row.get("credential_ref") or ""),
-            options=dict(row.get("options") or {}),
-        ))
-    return tuple(engines)
-
-
-def _ai_profiles(engines: tuple[Any, ...],
-                 rows: list[dict[str, Any]]) -> tuple[Any, ...]:
-    """The public selection projections this runtime offers.
-
-    One per engine, carrying the access policy its own row states.
-
-    Capability is not read here. The adapter is the authority on what a
-    configured provider can do, so a profile that stated its own could
-    advertise something no adapter implements.
-    """
-    from rey_lib.ai.profiles import AIProfile
-
-    access = {
-        str(row.get("profile_key") or ""): _row_access(row)
-        for row in rows
-    }
-    return tuple(
-        AIProfile(
-            id=engine.id,
-            name=engine.id,
-            configured_provider_id=engine.id,
-            profile_access=access.get(engine.id),
-        )
-        for engine in engines
-    )
-
-
-def _row_access(row: dict[str, Any]) -> Any:
-    """One engine's access policy, as the profile object carries it.
-
-    The envelope of what an engine may ever receive, and the reading it takes
-    when nothing states one. Absent where the row states neither, which is what
-    a configured entry declaring no policy meant.
-    """
-    allowed = row.get("access_allowed")
-    default = row.get("access_default")
-    if not allowed and not default:
-        return None
-    policy: dict[str, Any] = {}
-    if allowed:
-        policy["allowed"] = [str(value) for value in allowed]
-    if default:
-        policy["default"] = str(default)
-    return policy
-
-
-def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
-    """The instructions this runtime offers, read from the control database.
-
-    Three identities are kept apart, as they always were:
-
-        the declared key        the stable id a setting references
-        the contract            what that id resolves to
-        its name and version    what a reader sees
-
-    **Declared, never discovered.** The database is the authority over what may
-    be selected; nothing here scans a directory to find a contract. The reserved
-    keys ``__none__`` and ``__ad_hoc__`` are rows like any other -- they are what
-    keeps "send no instruction" and "ad-hoc text the operator writes" distinct
-    from a named contract, and from each other.
-
-    The body travels with the instruction rather than as a reference to load
-    later. ``ContractResolver`` answers with ``text`` before it looks at
-    ``reference``, so a contract that carries its own body needs no loader and
-    the resolver is untouched.
-
-    Raises
-    ------
-    ConfigError
-        When a contract instruction carries no body, or two instructions show a
-        reader the same name and version. Each was declared, so each is a defect
-        rather than an entry to drop silently.
-    """
-    from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
-
-    offered: list[Any] = []
-    shown: dict[str, str] = {}
-    for row in _required_ai_control(ctx).ai_instructions():
-        identity = str(row.get("instruction_key") or "").strip()
-        kind = AIInstructionKind(str(row.get("kind") or "none"))
-        if kind is not AIInstructionKind.CONTRACT:
-            # The two reserved instructions. They name no contract and show the
-            # reader their own label.
-            offered.append(AIInstruction(
-                id=identity, kind=kind,
-                name="None" if kind is AIInstructionKind.NONE else "Ad hoc text",
-            ))
-            continue
-
-        body = row.get("body")
-        if not body:
-            raise ConfigError(
-                f"AI instruction '{identity}' is a contract and carries no "
-                "body, so nothing could be sent for it."
-            )
-        label = f"{row.get('contract_key')} {row.get('contract_version')}"
-        if label in shown:
-            raise ConfigError(
-                f"AI instructions '{identity}' and '{shown[label]}' both show "
-                f"'{label}', so a reader could not tell them apart."
-            )
-        shown[label] = identity
-        offered.append(AIInstruction(
-            id=identity, kind=kind, name=label, text=str(body),
-        ))
-
-    # The order a reader sees: the reserved choices first, as they were when
-    # this list was assembled by hand.
-    reserved = [i for i in offered if i.kind is not AIInstructionKind.CONTRACT]
-    contracts = [i for i in offered if i.kind is AIInstructionKind.CONTRACT]
-    reserved.sort(key=lambda i: 0 if i.kind is AIInstructionKind.NONE else 1)
-    return tuple(reserved + contracts)
-
-
-def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
-                 instructions: tuple[Any, ...]) -> Any:
-    """This runtime's initial AI settings, read from the control database.
-
-    The initial state only. From here the runtime owns them: the settings panel
-    mutates the value on the ``AI``, and configuration is never re-read to find
-    out what is selected now.
-
-    ``ai.ai_vw`` has already resolved what a task inherits from its group, so a
-    task row states what applies to it. Two row types arrive: the group row is
-    the default scope, and each task row is one task.
-
-    Validated against what this runtime offers, for the same reason it always
-    was: a selection naming an absent profile or instruction is a configuration
-    defect, and dropping it silently would show an operator a runtime that
-    ignores what they configured.
-    """
-    from rey_lib.ai.errors import AIConfigurationError
-    from rey_lib.ai.settings import AISettings, AISettingsTask
-
-    rows = _required_ai_control(ctx).ai_configuration(_ai_installation(ctx))
-    if not rows:
-        return AISettings()
-
-    profile_ids = {profile.id for profile in profiles}
-    instruction_ids = {instruction.id for instruction in instructions}
-
-    def _selection(row: Any, field: str, offered: set[str], what: str,
-                   where: str) -> str:
-        value = str(row.get(field) or "").strip()
-        if value and value not in offered:
-            raise AIConfigurationError(
-                f"AI configuration{where} names {what} '{value}', "
-                "which this runtime does not offer."
-            )
-        return value
-
-    def _temperature(row: Any) -> Any:
-        # A stated 0 is a value and NULL is inherit, so this asks whether one
-        # was stored rather than whether it is truthy.
-        value = row.get("temperature")
-        return None if value is None else float(value)
-
-    def _composed_first(row: Any) -> bool:
-        # Not an override: the view reads each row's own column and coalesces
-        # nothing, so a scope that is silent is false rather than inheriting. A
-        # runtime reading an older view without the column gets false, which is
-        # the behaviour that existed before it.
-        #
-        # The column is named for what the Console does with it; the domain is
-        # told only when an ask is executed relative to being composed, which
-        # is the boundary rey_lib.ai is held to.
-        return bool(row.get("opens_workbench") or False)
-
-    group = next((row for row in rows if str(row.get("row_type")) == "group"), None)
-    settings = AISettings(
-        profile_id=_selection(group or {}, "profile_key", profile_ids,
-                              "profile", ".default"),
-        instruction_id=_selection(group or {}, "instruction_key",
-                                  instruction_ids, "instruction", ".default"),
-        temperature=_temperature(group or {}),
-        representation=str((group or {}).get("representation") or "").strip(),
-        connection=str((group or {}).get("connection_name") or "").strip(),
-        composed_first=_composed_first(group or {}),
-    )
-
-    tasks: list[Any] = []
-    for row in rows:
-        if str(row.get("row_type")) != "task":
-            continue
-        name = str(row.get("task_key") or "").strip()
-        where = f".tasks['{name}']"
-        tasks.append(AISettingsTask(
-            name=name,
-            profile_id=_selection(row, "profile_key", profile_ids, "profile", where),
-            instruction_id=_selection(row, "instruction_key", instruction_ids,
-                                      "instruction", where),
-            temperature=_temperature(row),
-            representation=str(row.get("representation") or "").strip(),
-            connection=str(row.get("connection_name") or "").strip(),
-            composed_first=_composed_first(row),
-        ))
-    return AISettings(
-        profile_id=settings.profile_id,
-        instruction_id=settings.instruction_id,
-        temperature=settings.temperature,
-        representation=settings.representation,
-        connection=settings.connection,
-        composed_first=settings.composed_first,
-        tasks=tuple(tasks),
-    )
 
 
 def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
@@ -1132,9 +763,6 @@ def _app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         if started is not None:
             started.log = run_log
 
-        # Optional: present only when this installation configures AI. Absent is
-        # an ordinary state, and no consumer may construct one lazily instead.
-        open_shared_ai(ctx)
         yield ctx, run_log
     except Terminated as exc:
         # SIGTERM, as this application's policy reads it (#1182).

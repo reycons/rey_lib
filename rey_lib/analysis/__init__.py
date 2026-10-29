@@ -40,7 +40,6 @@ from rey_lib.analysis.datasource import (
     SourceData,
     TextDataSource,
 )
-from rey_lib.analysis.execution import run as execute
 from rey_lib.analysis.package import (
     LlmPackageContract,
     LlmPackageInput,
@@ -82,7 +81,6 @@ __all__ = [
     "analysis_contract",
     "approve",
     "build_package",
-    "execute",
     "load_latest_record",
     "parse_analysis_contract",
     "parse_contract",

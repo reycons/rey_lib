@@ -22,14 +22,11 @@ import pytest
 from rey_lib.analysis.analyzer import (
     AnalysisContract,
     AnalysisContractSpec,
-    AnalysisResult,
     Analyzer,
     parse_analysis_contract,
 )
 from rey_lib.analysis.datasource import CSVDataSource, SourceData, TextDataSource
 from rey_lib.analysis.preparation import prepare
-from rey_lib.analysis.records import STATUS_SUCCESS
-from rey_lib.ai import AI, AIProfile, AIRegistry, AISettings, EchoProvider
 from rey_lib.ai.errors import AIConfigurationError
 
 
@@ -483,88 +480,29 @@ class TestTextDataSource:
 # Analyzer end-to-end
 # ---------------------------------------------------------------------------
 
-def _runtime(reply: str, value: object = None) -> AI:
-    """One AI runtime answering with a fixed reply.
+class _CountingSource(TextDataSource):
+    """A text source that records whether anything was extracted from it."""
 
-    The old tests patched ``runner._resolve_provider_config`` -- an internal of a
-    module that no longer exists, and provider resolution the AI runtime owns
-    now. Substituting an adapter is the supported way to do this, and it
-    exercises the real path rather than a mocked hole in it.
-    """
-    return AI(
-        registry=AIRegistry(
-            profiles=(AIProfile(id="mock", provider="echo", model="m"),),
-            providers=(EchoProvider(reply_with=reply, value=value),),
-        ),
-        settings=AISettings(profile_id="mock"),
-    )
+    extracted = 0
+
+    def extract(self, max_extract: int = 0):  # noqa: ANN201 - the base contract
+        type(self).extracted += 1
+        return super().extract(max_extract=max_extract)
 
 
-class TestAnalyzerEndToEnd:
-    """End-to-end tests for Analyzer.analyze(), against the AI runtime."""
+class TestAnalyzerIsRefused:
+    """Analysis contracts ran on the legacy AI executor, removed by #1025 (#1283)."""
 
-    def test_analyze_returns_analysis_result(self, tmp_path: Path) -> None:
-        """analyze() returns an AnalysisResult with populated fields."""
-        contract = _contract(extra_yaml=(
-                "output_schema:\n  type: object\n  properties:\n"
-                "    result: {type: string}\n"
-            ),
-        )
-        analyzer = Analyzer(
-            contract=contract,
-            ai=_runtime('{"result": "ok"}', value={"result": "ok"}),
-            profile_id="mock",
-        )
-
-        result = analyzer.analyze(TextDataSource("Sales data here."), analysis_id="run-001")
-
-        assert isinstance(result, AnalysisResult)
-        assert result.status == STATUS_SUCCESS
-        assert result.data == {"result": "ok"}
-
-    def test_nested_raw_output_retains_generated_artifact_text(self, tmp_path: Path) -> None:
-        """output.format raw carries extracted model content in the result."""
-        contract = _contract(extra_yaml=(
-                "output:\n"
-                "  format: raw\n"
-                "  artifact_type: data_engine_yaml\n"
-            ),
-        )
-        generated = "data_sources:\n  - name: example\n    enabled: true"
-        analyzer = Analyzer(
-            contract=contract,
-            ai=_runtime(
-                '{"artifact_type":"data_engine_yaml","content":'
-                '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
-            ),
-            profile_id="mock",
-        )
-
-        result = analyzer.analyze(TextDataSource("profile"), analysis_id="raw-001")
-
-        assert result.status == STATUS_SUCCESS
-        assert generated.split("\n")[0] in (result.data or "")
-
-    def test_prepared_metadata_in_result(self, tmp_path: Path) -> None:
-        """AnalysisResult.prepared carries the DataProfile from preparation."""
-        contract = _contract()
-        analyzer = Analyzer(
-            contract=contract, ai=_runtime("answer"), profile_id="mock",
-        )
-
-        result = analyzer.analyze(TextDataSource("some text"), analysis_id="run-002")
-
-        assert result.prepared is not None
-        assert result.prepared.profile is not None
-
-    def test_analysis_without_a_runtime_is_refused(self, tmp_path: Path) -> None:
-        """No AI configured is a refusal, not a silent no-op."""
+    def test_analyze_refuses_naming_the_backlog_before_extracting(self) -> None:
         from rey_lib.ai.errors import AIUnavailableError
 
-        analyzer = Analyzer(contract=_contract())
+        _CountingSource.extracted = 0
+        analyzer = Analyzer(contract=_contract(), ai=object())
 
-        with pytest.raises(AIUnavailableError):
-            analyzer.analyze(TextDataSource("text"), analysis_id="run-003")
+        with pytest.raises(AIUnavailableError, match="backlog #1283"):
+            analyzer.analyze(_CountingSource("text"), analysis_id="run-001")
+
+        assert _CountingSource.extracted == 0
 
 
 class TestThePreparedInputProfileIsNotTheDataSProfile:

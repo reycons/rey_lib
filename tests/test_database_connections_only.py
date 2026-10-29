@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from rey_lib.config.applications import _choices
-from rey_lib.config.bootstrap import _ai_connections
+from rey_lib.config.bootstrap import ai_connections
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.db.connection import (
     Connection, build_connections, is_database_connection, shared_connection,
@@ -87,4 +87,4 @@ class TestAiConnections:
     def test_an_http_connection_is_never_offered_to_a_model(self) -> None:
         ctx = _ctx("ai", _db("control", llm=True), _http())
 
-        assert _ai_connections(ctx) == ("control",)
+        assert ai_connections(ctx) == ("control",)

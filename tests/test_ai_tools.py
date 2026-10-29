@@ -24,8 +24,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError, AIToolError
-from rey_lib.ai.policies import AIExecutionPolicy, ToolCorrectionPolicy
-from rey_lib.ai.registry import AIRegistry
+from rey_lib.ai import ai as ai_module
 from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AITool, AIToolSet
 from rey_lib.errors.error_utils import AppError
@@ -215,9 +214,8 @@ class _ScriptedEngine:
 
 
 def _ai(engine: _ScriptedEngine, monkeypatch: pytest.MonkeyPatch, corrections: int = 0) -> AI:
-    ai = AI(registry=AIRegistry(), policy=AIExecutionPolicy(
-        tool_correction=ToolCorrectionPolicy(max_corrections=corrections),
-    ))
+    monkeypatch.setattr(ai_module, "_MAX_TOOL_CORRECTIONS", corrections)
+    ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: engine.model)
     return ai
 

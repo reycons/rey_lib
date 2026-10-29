@@ -1,0 +1,227 @@
+{
+ "engines": [
+  {
+   "model_identifier": "anthropic:claude-sonnet-4-6",
+   "profile_key": "anthropic"
+  },
+  {
+   "model_identifier": "ollama:qwen2.5-coder:32b",
+   "profile_key": "local_precision"
+  },
+  {
+   "model_identifier": "openai-chat:gpt-4o",
+   "profile_key": "no_policy"
+  }
+ ],
+ "instructions": [
+  {
+   "instruction_key": "explain_v1",
+   "kind": "contract"
+  },
+  {
+   "instruction_key": "__ad_hoc__",
+   "kind": "raw"
+  },
+  {
+   "instruction_key": "__none__",
+   "kind": "none"
+  }
+ ],
+ "settings": {
+  "available": true,
+  "connections": [
+   "llm_reader",
+   "rey_apps"
+  ],
+  "instructions": [
+   {
+    "id": "__none__",
+    "kind": "none",
+    "label": "None"
+   },
+   {
+    "id": "__ad_hoc__",
+    "kind": "raw",
+    "label": "Ad hoc text"
+   },
+   {
+    "id": "explain_v1",
+    "kind": "contract",
+    "label": "explain v1"
+   }
+  ],
+  "profiles": [
+   {
+    "access_policy": {
+     "allowed": [
+      "redacted"
+     ],
+     "default": "redacted"
+    },
+    "id": "anthropic",
+    "label": "anthropic - claude-sonnet-4-6",
+    "model": "claude-sonnet-4-6",
+    "provider": "anthropic"
+   },
+   {
+    "access_policy": {
+     "allowed": [
+      "redacted",
+      "unredacted"
+     ],
+     "default": "unredacted"
+    },
+    "id": "local_precision",
+    "label": "ollama - qwen2.5-coder:32b",
+    "model": "qwen2.5-coder:32b",
+    "provider": "ollama"
+   },
+   {
+    "access_policy": {
+     "allowed": [
+      "redacted"
+     ],
+     "default": "redacted"
+    },
+    "id": "no_policy",
+    "label": "openai - gpt-4o",
+    "model": "gpt-4o",
+    "provider": "openai"
+   }
+  ],
+  "read_only": true,
+  "scopes": [
+   {
+    "effective": {
+     "composed_first": false,
+     "connection": "llm_reader",
+     "instruction_id": "__none__",
+     "profile_id": "anthropic",
+     "representation": "redacted",
+     "temperature": 0.2
+    },
+    "id": "default",
+    "instruction": null,
+    "is_default": true,
+    "label": "Default",
+    "representations": [
+     "redacted"
+    ],
+    "settings": {
+     "composed_first": false,
+     "connection": "llm_reader",
+     "instruction_id": "__none__",
+     "profile_id": "anthropic",
+     "representation": "redacted",
+     "temperature": 0.2
+    }
+   },
+   {
+    "effective": {
+     "composed_first": true,
+     "connection": "llm_reader",
+     "instruction_id": "explain_v1",
+     "profile_id": "local_precision",
+     "representation": "unredacted",
+     "temperature": 0.0
+    },
+    "id": "search_index",
+    "instruction": {
+     "capabilities": {
+      "edit": false,
+      "save": false
+     },
+     "content": "Explain it.",
+     "language": "json",
+     "read_only": true,
+     "title": "explain v1"
+    },
+    "is_default": false,
+    "label": "Search the index",
+    "representations": [
+     "redacted",
+     "unredacted"
+    ],
+    "settings": {
+     "composed_first": true,
+     "connection": "",
+     "instruction_id": "explain_v1",
+     "profile_id": "local_precision",
+     "representation": "unredacted",
+     "temperature": 0.0
+    }
+   },
+   {
+    "effective": {
+     "composed_first": false,
+     "connection": "rey_apps",
+     "instruction_id": "__none__",
+     "profile_id": "anthropic",
+     "representation": "redacted",
+     "temperature": 0.2
+    },
+    "id": "generate_sql",
+    "instruction": null,
+    "is_default": false,
+    "label": "generate_sql",
+    "representations": [
+     "redacted"
+    ],
+    "settings": {
+     "composed_first": false,
+     "connection": "rey_apps",
+     "instruction_id": "",
+     "profile_id": "",
+     "representation": "",
+     "temperature": null
+    }
+   },
+   {
+    "effective": {
+     "composed_first": false,
+     "connection": "llm_reader",
+     "instruction_id": "__ad_hoc__",
+     "profile_id": "anthropic",
+     "representation": "redacted",
+     "temperature": 1.5
+    },
+    "id": "retired",
+    "instruction": {
+     "capabilities": {
+      "edit": false,
+      "save": false
+     },
+     "content": "",
+     "language": "text",
+     "read_only": true,
+     "title": "Ad hoc text"
+    },
+    "is_default": false,
+    "label": "Retired",
+    "representations": [
+     "redacted"
+    ],
+    "settings": {
+     "composed_first": false,
+     "connection": "",
+     "instruction_id": "__ad_hoc__",
+     "profile_id": "",
+     "representation": "",
+     "temperature": 1.5
+    }
+   }
+  ]
+ },
+ "tasks": [
+  {
+   "composed_first": true,
+   "label": "Search the index",
+   "task_key": "search_index"
+  },
+  {
+   "composed_first": false,
+   "label": "generate_sql",
+   "task_key": "generate_sql"
+  }
+ ]
+}

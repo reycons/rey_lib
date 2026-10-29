@@ -85,12 +85,12 @@ class TestAppRuntimeHoldsItFromThere:
         monkeypatch.setattr(bootstrap, "build_ctx_for_app", lambda *a, **k: ctx)
         return ctx
 
-    @pytest.mark.parametrize("failing", ["open_run_log", "open_shared_ai"])
+    @pytest.mark.parametrize("failing", ["open_run_log", "register_runtime_object"])
     def test_a_failure_before_the_block_runs_finishes_the_run_failed(
             self, monkeypatch, failing: str) -> None:
         run = _Run()
         self._handed(monkeypatch, run)
-        if failing == "open_shared_ai":
+        if failing == "register_runtime_object":
             monkeypatch.setattr(bootstrap, "open_run_log",
                                 lambda ctx, phase_started=None: SimpleNamespace(close=lambda: None))
             monkeypatch.setattr(bootstrap, "finalize_run_phases", lambda run_log: None)
@@ -113,7 +113,6 @@ class TestTerminationPolicy:
         monkeypatch.setattr(bootstrap, "open_run_log",
                             lambda ctx, phase_started=None: SimpleNamespace(close=lambda: None))
         monkeypatch.setattr(bootstrap, "finalize_run_phases", lambda run_log: None)
-        monkeypatch.setattr(bootstrap, "open_shared_ai", lambda ctx: None)
 
     @pytest.mark.parametrize("policy, code", [("ABORTED", 143), ("SUCCEEDED", 0)])
     def test_sigterm_finishes_the_run_as_the_policy_says(

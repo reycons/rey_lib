@@ -1,4 +1,4 @@
-"""Turning what a provider said into the output the caller asked for.
+"""Turning what an engine said into the output a task requires.
 
 Parsing and validation are execution's, not an application's. A caller that
 asked for a shape gets the shape or a failure -- never text it has to parse
@@ -17,7 +17,7 @@ import json
 from typing import Any
 
 from rey_lib.ai.errors import AIOutputError
-from rey_lib.ai.requests import AIOutputKind, AIOutputSpec, ResolvedAIRequest
+from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.results import AIOutput
 
 __all__ = ["OutputParser"]
@@ -35,10 +35,6 @@ class OutputParser:
     def __init__(self, *, validate_schema: bool = True) -> None:
         self._validate = validate_schema
 
-    def parse(self, request: ResolvedAIRequest, text: str, value: Any = None) -> AIOutput:
-        """The output, in the form the request required."""
-        return self.parse_output(request.output, request.schema, text, value)
-
     def parse_output(
         self,
         output: AIOutputSpec,
@@ -48,8 +44,7 @@ class OutputParser:
     ) -> AIOutput:
         """The output, in the form this requirement and schema demand.
 
-        The one validation path, whatever carries the requirement: a resolved
-        request today, an AITask's output and schema (backlog 1020).
+        The one validation path: an AITask's output and schema (backlog 1020).
         """
         if not output.is_structured():
             return AIOutput.of_text(text)

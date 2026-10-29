@@ -13,10 +13,7 @@ from typing import Any
 
 import pytest
 
-from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.analysis import analysis_contract, parse_analysis_contract, parse_contract
-from rey_lib.analysis.api import RunRequest
-from rey_lib.analysis.execution import run
 from rey_lib.control.control import Control
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
@@ -165,14 +162,3 @@ def test_the_seam_fails_closed_when_the_text_names_another_contract() -> None:
 
     with pytest.raises(ConfigError, match="declares the name 'stored_yaml'"):
         analysis_contract(control, "stored")
-
-
-# ---------------------------------------------------------------------------
-# Execution carries the parsed contract; there is no file to fall back to
-# ---------------------------------------------------------------------------
-
-def test_a_stage_with_no_contract_and_no_text_is_refused() -> None:
-    request = RunRequest(pipeline_id="p", stage_id="s", input_data="x")
-
-    with pytest.raises(AIConfigurationError, match="carries no contract"):
-        run(request, ai=object())

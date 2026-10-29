@@ -3,7 +3,9 @@
 What an ai_app session sends its presentation: the governed tasks, in configured
 order, each with its key, label and whether it is composed first; and what a
 task's choices may name -- the enabled engines and the instructions (D2). Read
-through the Control's existing AI reads; nothing else re-derives it.
+through the Control's existing AI reads; nothing else re-derives it. The
+settings survey is held to its pre-#1025 shape by
+test_ai_settings_projection_equivalence.py.
 """
 
 from __future__ import annotations
@@ -11,7 +13,6 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.ai.ai import AI
-from rey_lib.ai.registry import AIRegistry
 
 
 class _Control:
@@ -37,11 +38,14 @@ class _Control:
         self.asked.append("engines")
         return [
             {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest",
-             "credential_ref": "", "is_enabled": True},
+             "credential_ref": "", "is_enabled": True,
+             "access_allowed": ["redacted"], "access_default": "redacted"},
             {"profile_key": "switched_off", "model_identifier": "openai-chat:gpt-4o",
-             "credential_ref": "", "is_enabled": False},
+             "credential_ref": "", "is_enabled": False,
+             "access_allowed": ["redacted"], "access_default": "redacted"},
             {"profile_key": "anthropic", "model_identifier": "anthropic:claude-sonnet-4-6",
-             "credential_ref": "env.ANTHROPIC_API_KEY", "is_enabled": True},
+             "credential_ref": "env.ANTHROPIC_API_KEY", "is_enabled": True,
+             "access_allowed": ["redacted"], "access_default": "redacted"},
         ]
 
     def ai_instructions(self) -> list[dict[str, Any]]:
@@ -55,7 +59,7 @@ class _Control:
 def test_the_projection_offers_the_enabled_governed_tasks_in_order() -> None:
     control = _Control()
 
-    projection = AI(registry=AIRegistry()).projection(control, "local")
+    projection = AI().projection(control, "local")
 
     assert control.asked == ["local", "engines", "instructions"]
     assert projection["tasks"] == [
@@ -65,7 +69,7 @@ def test_the_projection_offers_the_enabled_governed_tasks_in_order() -> None:
 
 
 def test_the_projection_offers_what_a_choice_may_name_and_no_credential() -> None:
-    projection = AI(registry=AIRegistry()).projection(_Control(), "local")
+    projection = AI().projection(_Control(), "local")
 
     assert projection["engines"] == [
         {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest"},
@@ -76,54 +80,3 @@ def test_the_projection_offers_what_a_choice_may_name_and_no_credential() -> Non
         {"instruction_key": "explain_v1", "kind": "contract"},
     ]
     assert "ANTHROPIC" not in str(projection)
-
-
-def test_settings_are_projected_from_the_live_owner_without_creating_tasks() -> None:
-    from rey_lib.ai.settings import AISettings, AISettingsTask
-    ai = AI(registry=AIRegistry(), settings=AISettings(temperature=0.5, composed_first=True,
-        tasks=(AISettingsTask(name="search_index", temperature=0, composed_first=False),)))
-    projection = ai.projection(_Control(), "local")["settings"]
-    default, task = projection["scopes"]
-    assert default["id"] == "default" and default["effective"]["temperature"] == 0.5
-    assert task["label"] == "Search the index" and task["effective"]["temperature"] == 0
-    assert task["effective"]["composed_first"] is False
-    assert projection["read_only"] is True
-    assert ai._tasks == {}
-    ai.update_settings(AISettings(temperature=0.8))
-    assert ai.projection(_Control(), "local")["settings"]["scopes"][0]["settings"]["temperature"] == 0.8
-    assert ai._tasks == {}
-
-
-def test_settings_projection_is_plain_data_and_cannot_mutate_the_owner() -> None:
-    from rey_lib.ai.settings import AISettings
-    ai = AI(registry=AIRegistry(), settings=AISettings(temperature=0))
-    settings = ai.projection(_Control(), "local")["settings"]
-    settings["scopes"][0]["settings"]["temperature"] = 99
-    settings["scopes"][0]["effective"]["temperature"] = 100
-    assert ai.settings.temperature == 0
-
-
-def test_settings_include_held_profiles_instruction_text_and_effective_values() -> None:
-    from rey_lib.ai.settings import AISettings, AISettingsTask
-    from rey_lib.ai.profiles import AIProfile
-    from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
-    ai = AI(registry=AIRegistry(
-        profiles=(AIProfile(id="held", provider="owner-provider", model="owner-model",
-            profile_access={"allowed": ["redacted"], "default": "redacted"}),),
-        instructions=(AIInstruction(id="explain_v1", kind=AIInstructionKind.RAW,
-                                    name="Held instruction", text="actual owner text"),)),
-        connections=("llm_reader",),
-        settings=AISettings(profile_id="held", instruction_id="explain_v1", temperature=0,
-            representation="redacted", connection="llm_reader", composed_first=True,
-            tasks=(AISettingsTask(name="search_index"),)))
-    survey = ai.projection(_Control(), "local")["settings"]
-    default, task = survey["scopes"]
-    assert task["effective"] == {"profile_id": "held", "instruction_id": "explain_v1",
-        "temperature": 0, "representation": "redacted", "connection": "llm_reader", "composed_first": False}
-    assert survey["profiles"][0]["label"] == "owner-provider - owner-model"
-    assert default["instruction"]["content"] == "actual owner text"
-    assert default["instruction"]["read_only"] is True
-    assert survey["connections"] == ["llm_reader"]
-    ai.set_instruction_text("explain_v1", "new owner text")
-    assert ai.projection(_Control(), "local")["settings"]["scopes"][0]["instruction"]["content"] == "new owner text"
-    assert ai._tasks == {}

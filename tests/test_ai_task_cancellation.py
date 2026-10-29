@@ -21,7 +21,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AICancelled, AIProviderError, AIRequestError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.streaming import AIEvent, AIEventKind
 from rey_lib.ai.task import AITask
 
@@ -33,7 +32,7 @@ def _task() -> AITask:
 
 
 def _ai(model: FunctionModel, monkeypatch: pytest.MonkeyPatch) -> AI:
-    ai = AI(registry=AIRegistry())
+    ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
     return ai
 
@@ -112,7 +111,7 @@ class TestWithdrawal:
 
 class TestNothingRunning:
     def test_a_task_not_running_is_not_cancelled(self) -> None:
-        ai, task = AI(registry=AIRegistry()), _task()
+        ai, task = AI(), _task()
 
         assert ai.cancel_task(task.id) is False
         assert ai.cancel_task("no-such-task") is False

@@ -16,7 +16,6 @@ from pydantic_ai.models.function import FunctionModel
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import AIOutputSpec
 from rey_lib.ai.results import AIExecutionInfo, AIOutput, AIResult
 from rey_lib.ai.streaming import AIEvent, AIEventKind
@@ -63,7 +62,7 @@ class TestTaskProjection:
     def test_an_answered_task_projects_its_answer_unrendered(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        ai = AI(registry=AIRegistry())
+        ai = AI()
         model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("# Done")]))
         monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
         task = _task()

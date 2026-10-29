@@ -40,8 +40,7 @@ from rey_lib.ai.errors import (  # noqa: E402
     AIOutputError,
     AIProviderError,
 )
-from rey_lib.ai.policies import AIExecutionPolicy, ValidationCorrectionPolicy  # noqa: E402
-from rey_lib.ai.registry import AIRegistry  # noqa: E402
+from rey_lib.ai import ai as ai_module  # noqa: E402
 from rey_lib.ai.requests import AIOutputSpec  # noqa: E402
 from rey_lib.ai.streaming import AIEvent, AIEventKind  # noqa: E402
 from rey_lib.ai.task import AITask  # noqa: E402
@@ -137,9 +136,8 @@ class _Sessions:
 def _ai(sessions: _Sessions, monkeypatch: pytest.MonkeyPatch, corrections: int = 0) -> AI:
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient",
                         lambda options: sessions.client(options))
-    return AI(registry=AIRegistry(), policy=AIExecutionPolicy(
-        validation_correction=ValidationCorrectionPolicy(max_corrections=corrections),
-    ))
+    monkeypatch.setattr(ai_module, "_MAX_OUTPUT_CORRECTIONS", corrections)
+    return AI()
 
 
 class _Owner:
@@ -208,7 +206,7 @@ class TestIsolation:
         assert options.system_prompt == "Explain it."
         assert (options.tools, options.setting_sources) == ([], [])
         assert (options.mcp_servers, options.allowed_tools) == ({}, [])
-        assert options.max_turns == ai._policy.budget.max_turns
+        assert options.max_turns == ai_module._MAX_TURNS
         assert options.output_format is None
         assert options.include_partial_messages is False
         assert options.env == {}

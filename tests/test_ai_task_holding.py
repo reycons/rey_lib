@@ -16,7 +16,6 @@ import pytest
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIRequestError, AISelectionError
-from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.task import AITask
 
@@ -70,7 +69,7 @@ class _Control:
 
 
 def _ai() -> AI:
-    return AI(registry=AIRegistry())
+    return AI()
 
 
 class TestHolding:

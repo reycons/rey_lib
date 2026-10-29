@@ -67,12 +67,10 @@ def test_the_root_contains_no_provider_switch() -> None:
     assert "provider ==" not in root
 
 
-def test_the_root_delegates_rather_than_executes() -> None:
-    """`AI` resolves and hands over; it holds no execution machinery."""
+def test_the_root_holds_no_retry_or_validation_machinery() -> None:
+    """`AI` runs a task through its mechanism; validation is OutputParser's."""
     root = code_of(AI / "ai.py")
 
-    assert "self._executor.execute" in root
-    assert "self._executor.stream" in root
     for mechanism in ("jsonschema", "json.loads", "retry_on", "max_attempts", "invoke("):
         assert mechanism not in root, f"the root implements {mechanism}"
 
@@ -95,47 +93,27 @@ def test_there_is_no_module_level_mutable_state() -> None:
                 pytest.fail(f"{path.name} holds module-level mutable state: {line.strip()}")
 
 
-def test_a_provider_reply_never_escapes_as_itself() -> None:
-    """Provider types stop at the boundary.
+def test_only_ai_app_constructs_an_ai() -> None:
+    """ai_app is the only application that constructs and retains an AI (#1025).
 
-    `ProviderReply` and `ProviderCall` are named by the executor and the
-    adapters, and by nothing an application would import.
+    Every other application reaches ai_app's live AI over the transports. One
+    that built its own would hold a second AI beside the live one.
     """
-    application_facing = ("ai.py", "results.py", "requests.py", "settings.py", "sessions.py")
-    for name in application_facing:
-        code = code_of(AI / name)
-        assert "ProviderReply" not in code, f"{name} exposes a provider reply"
-        assert "ProviderCall" not in code, f"{name} exposes a provider call"
-
-
-def test_only_bootstrap_constructs_the_shared_ai() -> None:
-    """Only bootstrap constructs an AI; consumers receive the shared one.
-
-    The Step-B version of this guard asserted that nothing imported the
-    subsystem at all -- correct while the build was unattached, and expired the
-    moment cutover began. Its successor is the invariant that actually protects
-    the runtime: one AI per runtime invocation, owned by bootstrap. A consumer
-    that built its own would hold a second runtime with its own providers and
-    its own settings, which is the state ``ctx.shared_ai`` exists to prevent.
-    """
-    allowed = {"construction.py", "bootstrap.py"}
+    allowed = {REPO / "ai_app" / "main.py"}
     offenders: list[str] = []
     for path in REPO.rglob("*.py"):
         parts = set(path.parts)
-        if ".venv" in parts or "__pycache__" in parts:
+        if ".venv" in parts or "__pycache__" in parts or "node_modules" in parts:
             continue
-        if AI in path.parents or path.name.startswith("test_"):
+        if AI in path.parents or path.name.startswith("test_") or "tests" in parts:
             continue
-        if path.name in allowed:
+        if path in allowed:
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if re.search(r"(?<![\w.])AI\s*\(\s*registry\s*=", text):
+        text = code_of(path)
+        if re.search(r"(?<![\w.])AI\s*\(", text):
             offenders.append(str(path.relative_to(REPO)))
 
-    assert not offenders, (
-        "these construct their own AI instead of using the shared one: "
-        + ", ".join(offenders)
-    )
+    assert not offenders, "these construct an AI of their own: " + ", ".join(offenders)
 
 
 def test_every_error_the_subsystem_raises_is_its_own() -> None:
@@ -155,9 +133,8 @@ def test_ctx_is_named_only_at_the_construction_boundary() -> None:
 
     The guard targets the ``ctx`` **identifier** -- as a parameter, an
     attribute or a name that is read -- and deliberately not the English word
-    "context". ``AIRequest.context`` and ``ResolvedAIRequest.context`` are
-    unrelated caller metadata, and a crude substring guard would fail on them
-    while catching nothing that matters.
+    "context", which a crude substring guard would trip over while catching
+    nothing that matters.
     """
     offenders: list[str] = []
     for path in sorted(AI.rglob("*.py")):
@@ -175,15 +152,6 @@ def test_ctx_is_named_only_at_the_construction_boundary() -> None:
     assert not offenders, (
         "ctx must not cross the construction boundary: " + "; ".join(offenders)
     )
-
-
-def test_the_caller_metadata_context_fields_are_untouched_by_that_guard() -> None:
-    """The exemption is real: these exist and are not ctx."""
-    from rey_lib.ai import AIRequest
-
-    assert AIRequest.prompt("x", context={"caller": "console"}).context == {
-        "caller": "console",
-    }
 
 
 def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
@@ -252,10 +220,26 @@ class TestAConnectionIsAName:
     @staticmethod
     def _ai(connections=()):
         from rey_lib.ai.ai import AI
-        from rey_lib.ai.registry import AIRegistry
 
-        return AI(registry=AIRegistry(profiles=(), instructions=()),
-                  connections=connections)
+        return AI(connections=connections)
+
+    @staticmethod
+    def _control(group_connection: str = "", task_connection: str = ""):
+        """The governed reads, with one group row and one task row."""
+        class _Control:
+            def ai_configuration(self, installation):
+                return [
+                    {"row_type": "group", "connection_name": group_connection},
+                    {"row_type": "task", "task_key": "search", "connection_name": task_connection},
+                ]
+
+            def ai_engine_profiles(self):
+                return []
+
+            def ai_instructions(self):
+                return []
+
+        return _Control()
 
     def test_it_holds_names_and_opens_nothing(self) -> None:
         offered = self._ai(("code_index", "warehouse")).connections()
@@ -267,41 +251,14 @@ class TestAConnectionIsAName:
         """Not "no such connection" -- one may well exist. It has not said a
         model may use it, which is the refusal a reader needs."""
         from rey_lib.ai.errors import AISelectionError
-        from rey_lib.ai.settings import AISettings
-
-        ai = self._ai(("code_index",))
 
         with pytest.raises(AISelectionError, match="offered to AI"):
-            ai.update_settings(AISettings(connection="rey_apps"))
+            self._ai(("code_index",)).projection(self._control("rey_apps"), "local")
 
     def test_a_task_naming_an_unoffered_connection_is_refused(self) -> None:
         """Every level, as for a profile. A task configured into a state that
         only fails when that task next runs is a state nobody sees."""
         from rey_lib.ai.errors import AISelectionError
-        from rey_lib.ai.settings import AISettings, AISettingsTask
-
-        ai = self._ai(("code_index",))
 
         with pytest.raises(AISelectionError, match="for task 'search'"):
-            ai.update_settings(AISettings(
-                tasks=(AISettingsTask(name="search", connection="rey_apps"),),
-            ))
-
-    def test_no_connection_is_an_ordinary_answer(self) -> None:
-        """Empty means this ask queries nothing, which is most asks."""
-        ai = self._ai(("code_index",))
-
-        assert ai.connection_for("", "") == ""
-
-    def test_an_ask_overrides_its_task_which_overrides_the_default(self) -> None:
-        from rey_lib.ai.settings import AISettings, AISettingsTask
-
-        ai = self._ai(("code_index", "warehouse"))
-        ai.update_settings(AISettings(
-            connection="code_index",
-            tasks=(AISettingsTask(name="search", connection="warehouse"),),
-        ))
-
-        assert ai.connection_for("", "") == "code_index"
-        assert ai.connection_for("", "search") == "warehouse"
-        assert ai.connection_for("code_index", "search") == "code_index"
+            self._ai(("code_index",)).projection(self._control("", "rey_apps"), "local")
