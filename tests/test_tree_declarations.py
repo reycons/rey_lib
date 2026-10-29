@@ -110,9 +110,26 @@ def test_a_field_reference_the_record_lacks_is_refused() -> None:
         declared_fact({"target": {"kind": "k", "value": {"$field": "subject_id"}}}, {})
 
 
-@pytest.mark.parametrize("target", [None, {}, {"kind": "k"}, {"fields": {"a": "a"}}])
-def test_no_identity_is_declared_without_a_kind_and_something_to_bind(target) -> None:
+@pytest.mark.parametrize("target", [None, {}, {"fields": {"a": "a"}}])
+def test_no_identity_is_declared_without_a_kind(target) -> None:
     assert declared_fact({"target": target}, {"a": 1}) is None
+
+
+def test_a_constant_identity_is_declared_as_stated_and_reads_nothing_from_the_row() -> None:
+    """#1242: a governed subject identity need not contain a value from the row."""
+    declared = {"target": {"kind": "ai", "subject": "ai.settings"}}
+
+    assert declared_fact(declared, {"application_id": "ai_app", "id": 7}) == {
+        "kind": "ai", "subject": "ai.settings",
+    }
+    assert declared_fact(declared, {}) == {"kind": "ai", "subject": "ai.settings"}
+
+
+def test_a_field_bound_identity_still_binds_its_record() -> None:
+    """#1242: the constant case changes nothing for an identity that reads the row."""
+    declared = {"target": {"kind": "workflow", "fields": {"workflow_id": "subject_id"}}}
+
+    assert declared_fact(declared, {"subject_id": 12}) == {"kind": "workflow", "workflow_id": 12}
 
 
 def test_a_column_reading_wins_over_a_stated_value_of_the_same_name() -> None:

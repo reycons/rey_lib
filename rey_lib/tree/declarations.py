@@ -247,15 +247,20 @@ def declared_fact(
     holds values and no reference. A column reading wins over a stated value of
     the same name: the row is the more specific answer.
 
+    An identity need not contain a value from the record: a target that states
+    its whole identity outright -- ``{"kind": "ai", "subject": "ai.settings"}`` --
+    is a complete, constant governed subject identity, and is returned as stated
+    (#1242).
+
     Returns:
-        ``{"kind": ..., ...}``, or None when the declaration names no target.
+        ``{"kind": ..., ...}``, or None when the declaration names no target kind.
 
     Raises:
         ConfigError: When a field reference names a column the record lacks.
     """
     target = declared.get("target") or {}
     fields = target.get("fields") or {}
-    if not target.get("kind") or not (fields or _references_a_field(target)):
+    if not target.get("kind"):
         return None
     return {
         "kind": target["kind"],
@@ -269,17 +274,6 @@ def _is_field_reference(value: Any) -> bool:
     """Whether a declared value is a field reference: exactly ``{"$field": <string>}``."""
     return (isinstance(value, dict) and set(value) == {FIELD_REFERENCE}
             and isinstance(value[FIELD_REFERENCE], str))
-
-
-def _references_a_field(value: Any) -> bool:
-    """Whether a declared value names a record field anywhere inside it."""
-    if _is_field_reference(value):
-        return True
-    if isinstance(value, dict):
-        return any(_references_a_field(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_references_a_field(item) for item in value)
-    return False
 
 
 def _bound(value: Any, record: Mapping[str, Any]) -> Any:
