@@ -225,13 +225,15 @@ class TestAConnectionIsAName:
 
     @staticmethod
     def _control(group_connection: str = "", task_connection: str = ""):
-        """The governed reads, with one group row and one task row."""
+        """The governed reads: one group and one task, their connections stated."""
         class _Control:
             def ai_configuration(self, installation):
-                return [
-                    {"row_type": "group", "connection_name": group_connection},
-                    {"row_type": "task", "task_key": "search", "connection_name": task_connection},
-                ]
+                return [{"row_type": "group"}, {"row_type": "task", "task_key": "search"}]
+
+            def ai_settings(self, installation):
+                return [{"ai_group_key": "console_default", "task_key": "search",
+                         "default_connection_name": group_connection or None,
+                         "task_connection_name": task_connection or None}]
 
             def ai_engine_profiles(self):
                 return []

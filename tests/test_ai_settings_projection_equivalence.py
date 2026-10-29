@@ -5,6 +5,8 @@ legacy construction -- bootstrap.open_shared_ai over these same governed rows --
 before AISettings, AIRegistry and the profiles were deleted. The AI Settings
 panel reads ``settings`` and nothing else (ai_settings_panel/types.ts), so the
 live AI must answer the same rows with the same projection, value for value.
+Save (#1191) since added the declared actions and lifted read-only; the stated
+values now come from control.f_ai_settings_get, given here for the same scopes.
 """
 
 from __future__ import annotations
@@ -63,6 +65,25 @@ class _Control:
              "is_enabled": True, "model_identifier": "openai-chat:gpt-4o"},
         ]
 
+    def ai_settings(self, installation: str) -> list[dict[str, Any]]:
+        """The same scopes' STATED values, as control.f_ai_settings_get rows (#1191)."""
+        assert installation == "local"
+        group = {"installation": "local", "ai_group_key": "console_default",
+                 "default_profile_key": "anthropic", "default_instruction_key": "__none__",
+                 "default_temperature": 0.2, "default_representation": "redacted",
+                 "default_connection_name": "llm_reader"}
+        return [
+            {**group, "task_key": "search_index", "task_profile_key": "local_precision",
+             "task_instruction_key": "explain_v1", "task_temperature": 0,
+             "task_representation": "unredacted", "task_connection_name": None},
+            {**group, "task_key": "generate_sql", "task_profile_key": None,
+             "task_instruction_key": None, "task_temperature": None,
+             "task_representation": None, "task_connection_name": "rey_apps"},
+            {**group, "task_key": "retired", "task_profile_key": None,
+             "task_instruction_key": "__ad_hoc__", "task_temperature": 1.5,
+             "task_representation": None, "task_connection_name": None},
+        ]
+
     def ai_instructions(self) -> list[dict[str, Any]]:
         return [
             {"instruction_key": "explain_v1", "kind": "contract", "body": "Explain it.",
@@ -79,4 +100,15 @@ def test_the_projection_equals_the_one_captured_before_the_cutover() -> None:
     # legacy construction was given when the golden was captured.
     projection = AI(connections=("llm_reader", "rey_apps")).projection(_Control(), "local")
 
-    assert json.loads(json.dumps(projection)) == json.loads(_GOLDEN.read_text())
+    # What Save added since (#1191), and nothing else: the declared edits and
+    # Save, and a survey that is no longer read-only.
+    settings = projection["settings"]
+    assert settings.pop("read_only") is False
+    assert settings.pop("actions") == []
+    for scope in settings["scopes"]:
+        assert [one["role"]["field"] for one in scope.pop("actions")] == [
+            "profile_id", "instruction_id", "temperature", "representation", "connection"]
+    golden = json.loads(_GOLDEN.read_text())
+    assert golden["settings"].pop("read_only") is True
+
+    assert json.loads(json.dumps(projection)) == golden

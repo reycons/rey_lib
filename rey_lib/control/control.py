@@ -1380,6 +1380,65 @@ class Control:
             (self._call_rows("get_ai_instruction", {}, required=required) or [])
         ]
 
+    def ai_settings(self, installation: str,
+                    required: bool = True) -> list[dict[str, Any]]:
+        """One installation's STATED AI settings, one row per group task (#1191).
+
+        Each row carries its group's defaults beside the task's own values, NULL
+        where the task inherits -- unlike :meth:`ai_configuration`, whose rows are
+        already resolved. The view owns the shape; nothing here re-derives it.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_ai_settings", {
+                "installation": str(installation),
+            }, required=required) or [])
+        ]
+
+    def update_ai_group_defaults(self, installation: str, ai_group_key: str, *,
+                                 profile_key: Optional[str],
+                                 instruction_key: Optional[str],
+                                 temperature: Optional[float],
+                                 representation: Optional[str],
+                                 connection_name: Optional[str],
+                                 required: bool = True) -> None:
+        """Replace one AI group's five default settings; a None clears a default (#1191).
+
+        The values are handed over exactly as given; the routine owns how they
+        become the group's row.
+        """
+        self._call("update_ai_group_defaults", {
+            "installation": str(installation),
+            "ai_group_key": str(ai_group_key),
+            "profile_key": profile_key,
+            "instruction_key": instruction_key,
+            "temperature": temperature,
+            "representation": representation,
+            "connection_name": connection_name,
+        }, required=required)
+
+    def update_ai_group_task(self, installation: str, ai_group_key: str, task_key: str, *,
+                             profile_key: Optional[str],
+                             instruction_key: Optional[str],
+                             temperature: Optional[float],
+                             representation: Optional[str],
+                             connection_name: Optional[str],
+                             required: bool = True) -> None:
+        """Replace one group task's five settings; a None is inheritance (#1191).
+
+        The values are handed over exactly as given; the routine owns how they
+        become the group task's row.
+        """
+        self._call("update_ai_group_task", {
+            "installation": str(installation),
+            "ai_group_key": str(ai_group_key),
+            "task_key": str(task_key),
+            "profile_key": profile_key,
+            "instruction_key": instruction_key,
+            "temperature": temperature,
+            "representation": representation,
+            "connection_name": connection_name,
+        }, required=required)
+
     def analysis_contract(self, name: str) -> Optional[dict[str, Any]]:
         """This installation's stored analysis contract ``name``, or None.
 

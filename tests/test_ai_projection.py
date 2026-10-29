@@ -16,7 +16,7 @@ from rey_lib.ai.ai import AI
 
 
 class _Control:
-    """The three reads projection uses, as the control.f_ai_*_get rows."""
+    """The four reads projection uses, as the control.f_ai_*_get rows."""
 
     def __init__(self) -> None:
         self.asked: list[str] = []
@@ -48,6 +48,10 @@ class _Control:
              "access_allowed": ["redacted"], "access_default": "redacted"},
         ]
 
+    def ai_settings(self, installation: str) -> list[dict[str, Any]]:
+        self.asked.append(f"settings:{installation}")
+        return []
+
     def ai_instructions(self) -> list[dict[str, Any]]:
         self.asked.append("instructions")
         return [
@@ -61,7 +65,7 @@ def test_the_projection_offers_the_enabled_governed_tasks_in_order() -> None:
 
     projection = AI().projection(control, "local")
 
-    assert control.asked == ["local", "engines", "instructions"]
+    assert control.asked == ["local", "engines", "instructions", "settings:local"]
     assert projection["tasks"] == [
         {"task_key": "search_index", "label": "Search the index", "composed_first": True},
         {"task_key": "generate_sql", "label": "generate_sql", "composed_first": False},

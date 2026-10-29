@@ -14,6 +14,7 @@ nothing: no ``ctx`` discovery, no ambient lookup, no module-level state.
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
@@ -62,6 +63,19 @@ _MAX_OUTPUT_CORRECTIONS = 0
 
 #: The two representations a configured engine may be permitted to receive.
 _ACCESS_MODES = frozenset({"redacted", "unredacted"})
+
+#: The scope the group's defaults are addressed by; a task scope is its task_key.
+_DEFAULT_SCOPE = "default"
+#: The settings a scope may change (#1191). Compose before run is not one of them.
+_EDITABLE_SETTINGS = ("profile_id", "instruction_id", "temperature", "representation",
+                      "connection")
+#: Each editable setting, as the AITask choice a new task takes it as.
+_CHOICE_OF_SETTING = {"profile_id": "profile_key", "instruction_id": "instruction_key",
+                      "temperature": "temperature", "representation": "representation",
+                      "connection": "connection"}
+#: Save, declared while an edit is unsaved: the command that persists the settings.
+_SAVE_SETTINGS_ACTION = {"role": {"act": "save", "on": "settings"},
+                         "command": {"command": "save_settings"}}
 
 __all__ = ["AI"]
 
@@ -113,6 +127,14 @@ class AI:
         # only the check, the registration and the release -- never a run.
         self._running: dict[str, Any] = {}
         self._running_lock = threading.Lock()
+        # The installation's AI settings as this session holds them (#1191): per
+        # installation, each scope's STATED values -- "default" and each task_key --
+        # as last read from governed configuration, and the working copy edits
+        # change. Save writes the working copy and re-reads; a new task hydrates
+        # from the working copy, so an unsaved edit applies to it.
+        self._governed_settings: dict[str, dict[str, dict[str, Any]]] = {}
+        self._working_settings: dict[str, dict[str, dict[str, Any]]] = {}
+        self._settings_group: dict[str, str] = {}
 
     def projection(self, control: Any, installation: str) -> dict[str, Any]:
         """What this AI offers an installation, as plain data (backlog 1041).
@@ -123,14 +145,18 @@ class AI:
         The tasks its governed configuration offers, in configured order, each as
         its key, its label and whether it is composed before it runs; the enabled
         engines and the instructions a task's choices may name (backlog 1047,
-        D2); and ``settings``, the read-only survey of the defaults and each
-        configured task that the AI Settings presentation draws.
+        D2); and ``settings``, the defaults and each configured task as this
+        session holds them, with the edits and the Save they declare (#1191).
         """
         configuration = control.ai_configuration(installation)
         engines = control.ai_engine_profiles()
         instructions = control.ai_instructions()
+        stated = self._settings_of(control, installation)
         return {
-            "settings": self._settings_projection(configuration, engines, instructions),
+            "settings": self._settings_projection(
+                configuration, engines, instructions, stated,
+                stated != self._governed_settings[installation],
+            ),
             "tasks": [
                 {
                     "task_key": str(row.get("task_key") or ""),
@@ -162,13 +188,18 @@ class AI:
         configuration: Iterable[Mapping[str, Any]],
         engines: Iterable[Mapping[str, Any]],
         instructions: Iterable[Mapping[str, Any]],
+        stated: Mapping[str, Mapping[str, Any]],
+        unsaved: bool,
     ) -> dict[str, Any]:
-        """The read-only survey of the governed AI settings, scope by scope.
+        """The AI settings this session holds, scope by scope, with what may be done.
 
-        The group row is the default scope and each task row one task scope. A
-        task states what it sets for itself, empty meaning inherit, and its
-        effective values are computed here -- a browser overlaying one on the
-        other would be a second resolver. Credentials never leave.
+        The default scope and each configured task, in the governed rows' order.
+        A scope's ``settings`` are what it states for itself -- for a task, empty
+        means inherit -- and its ``effective`` values are computed here: a browser
+        overlaying one on the other would be a second resolver. Each scope
+        declares the edits it takes; Save is declared while an edit is unsaved.
+        Compose before run is read from the governed rows and is not editable.
+        Credentials never leave.
 
         Raises:
             AIConfigurationError: when a scope names an engine or instruction the
@@ -181,9 +212,10 @@ class AI:
         rows = list(configuration)
 
         def values(row: Mapping[str, Any], where: str, task: str = "") -> dict[str, Any]:
-            profile_id = str(row.get("profile_key") or "").strip()
-            instruction_id = str(row.get("instruction_key") or "").strip()
-            connection = str(row.get("connection_name") or "").strip()
+            held = stated.get(task or _DEFAULT_SCOPE) or {}
+            profile_id = str(held.get("profile_id") or "").strip()
+            instruction_id = str(held.get("instruction_id") or "").strip()
+            connection = str(held.get("connection") or "").strip()
             if profile_id and profile_id not in profiles:
                 raise AIConfigurationError(
                     f"AI configuration{where} names profile '{profile_id}', "
@@ -199,10 +231,10 @@ class AI:
                     f"No connection is offered to AI as '{connection}'"
                     f"{f' for task {task!r}' if task else ''}."
                 )
-            temperature = row.get("temperature")
+            temperature = held.get("temperature")
             return {"profile_id": profile_id, "instruction_id": instruction_id,
                     "temperature": None if temperature is None else float(temperature),
-                    "representation": str(row.get("representation") or "").strip(),
+                    "representation": str(held.get("representation") or "").strip(),
                     "connection": connection,
                     "composed_first": bool(row.get("composed_first") or False)}
 
@@ -212,17 +244,20 @@ class AI:
         scopes: list[dict[str, Any]] = []
         for row in (None, *tasks):
             name = str(row.get("task_key") or "").strip() if row is not None else ""
-            stated = values(row, f".tasks['{name}']", name) if row is not None else dict(default)
-            effective = dict(stated)
+            scope_stated = (values(row, f".tasks['{name}']", name) if row is not None
+                            else dict(default))
+            effective = dict(scope_stated)
             if row is not None:
                 for field in ("profile_id", "instruction_id", "representation", "connection"):
-                    effective[field] = stated[field] or default[field]
-                effective["temperature"] = (default["temperature"] if stated["temperature"] is None
-                                            else stated["temperature"])
+                    effective[field] = scope_stated[field] or default[field]
+                effective["temperature"] = (default["temperature"]
+                                            if scope_stated["temperature"] is None
+                                            else scope_stated["temperature"])
             engine = profiles.get(str(effective["profile_id"])) if effective["profile_id"] else None
             policy = (_access_policy(engine) if engine is not None
                       else {"allowed": [], "default": ""})
-            instruction = offered.get(str(effective["instruction_id"])) if effective["instruction_id"] else None
+            instruction = (offered.get(str(effective["instruction_id"]))
+                           if effective["instruction_id"] else None)
             resource = None
             if instruction is not None and instruction["kind"] != "none":
                 resource = {"content": instruction["text"],
@@ -231,12 +266,17 @@ class AI:
                             "capabilities": {"edit": False, "save": False}}
             label = (str(row.get("task_label") or row.get("task_key") or "")
                      if row is not None else "Default")
-            scopes.append({"id": name if row is not None else "default",
-                           "label": label, "is_default": row is None, "settings": stated,
+            scope_id = name if row is not None else _DEFAULT_SCOPE
+            scopes.append({"id": scope_id,
+                           "label": label, "is_default": row is None, "settings": scope_stated,
                            "effective": effective, "representations": list(policy["allowed"]),
-                           "instruction": resource})
-        return {"available": True, "read_only": True, "scopes": scopes,
-                "profiles": [{"id": key, "label": f"{row.get('provider') or ''} - {row.get('model') or ''}",
+                           "instruction": resource,
+                           "actions": [_set_setting_action(scope_id, field)
+                                       for field in _EDITABLE_SETTINGS]})
+        return {"available": True, "read_only": False, "scopes": scopes,
+                "actions": [_SAVE_SETTINGS_ACTION] if unsaved else [],
+                "profiles": [{"id": key,
+                              "label": f"{row.get('provider') or ''} - {row.get('model') or ''}",
                               "provider": str(row.get("provider") or ""),
                               "model": str(row.get("model") or ""),
                               "access_policy": _access_policy(row)}
@@ -244,6 +284,118 @@ class AI:
                 "instructions": [{"id": key, "label": one["label"], "kind": one["kind"]}
                                  for key, one in offered.items()],
                 "connections": list(self.connections())}
+
+    # -- the installation's AI settings (#1191) -----------------------------
+
+    def set_setting(self, control: Any, installation: str, scope: str, field: str,
+                    value: Any) -> None:
+        """Change one setting of one scope in this session's working settings.
+
+        Nothing is written: Save persists the working settings. An empty value is
+        no value -- for a task, inheritance of the default. A task created after
+        this hydrates with the edit; a task already held keeps its configuration.
+
+        Raises:
+            AIRequestError: when the field is not an editable setting, or the
+                temperature is not a number.
+            AISelectionError: when the scope is not one of this installation's,
+                or the value names something the configuration does not offer.
+        """
+        if field not in _EDITABLE_SETTINGS:
+            raise AIRequestError(f"AI settings take no editable field {field!r}.")
+        scopes = self._settings_of(control, installation)
+        if scope not in scopes:
+            raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
+        scopes[scope][field] = self._offered_setting(control, field, value)
+
+    def save_settings(self, control: Any, installation: str) -> None:
+        """Persist this session's working settings, then re-read them as governed.
+
+        Only a scope whose working values differ from what was last read is
+        written, and each with exactly its stated values: an inherited task
+        value is written as NULL, never as the default it resolves to. Every
+        changed value is validated again before anything is written.
+
+        Raises:
+            AIRequestError, AISelectionError: as :meth:`set_setting` does, before
+                any write.
+        """
+        scopes = self._settings_of(control, installation)
+        governed = self._governed_settings[installation]
+        changed = [scope for scope, values in scopes.items() if values != governed.get(scope)]
+        for scope in changed:
+            for field in _EDITABLE_SETTINGS:
+                self._offered_setting(control, field, scopes[scope][field])
+        group = self._settings_group[installation]
+        for scope in changed:
+            values = {
+                "profile_key": scopes[scope]["profile_id"] or None,
+                "instruction_key": scopes[scope]["instruction_id"] or None,
+                "temperature": scopes[scope]["temperature"],
+                "representation": scopes[scope]["representation"] or None,
+                "connection_name": scopes[scope]["connection"] or None,
+            }
+            logger.debug("saving AI settings %s for installation %s", scope, installation)
+            if scope == _DEFAULT_SCOPE:
+                control.update_ai_group_defaults(installation, group, **values)
+            else:
+                control.update_ai_group_task(installation, group, scope, **values)
+        self._read_settings(control, installation)
+
+    def _settings_of(self, control: Any, installation: str) -> dict[str, dict[str, Any]]:
+        """This session's working settings for one installation, read once."""
+        if installation not in self._working_settings:
+            self._read_settings(control, installation)
+        return self._working_settings[installation]
+
+    def _read_settings(self, control: Any, installation: str) -> None:
+        """Read the installation's stated settings; the working copy becomes them."""
+        group, governed = _stated_scopes(control.ai_settings(installation))
+        self._settings_group[installation] = group
+        self._governed_settings[installation] = governed
+        self._working_settings[installation] = deepcopy(governed)
+
+    def _offered_setting(self, control: Any, field: str, value: Any) -> Any:
+        """One setting's value as the configuration offers it, or a refusal."""
+        if field == "temperature":
+            if value is None or str(value).strip() == "":
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError) as error:
+                raise AIRequestError(f"An AI temperature is a number, not {value!r}.") from error
+        chosen = str(value or "").strip()
+        if not chosen:
+            return ""
+        if field == "profile_id" and chosen not in {
+                str(row.get("profile_key") or "") for row in control.ai_engine_profiles()}:
+            raise AISelectionError(f"No AI engine profile is configured as {chosen!r}.")
+        if field == "instruction_id" and chosen not in _offered_instructions(
+                control.ai_instructions()):
+            raise AISelectionError(f"No AI instruction is configured as {chosen!r}.")
+        if field == "representation" and chosen not in _ACCESS_MODES:
+            raise AISelectionError(f"No data representation is named {chosen!r}.")
+        if field == "connection" and chosen not in self._connections:
+            raise AISelectionError(f"No connection is offered to AI as {chosen!r}.")
+        return chosen
+
+    def _unsaved_choices(self, installation: str, task_key: str) -> dict[str, Any]:
+        """What a new task takes from this session's unsaved edits, as its choices.
+
+        Only a value whose effective working setting differs from the effective
+        governed one: the governed rows already carry the rest.
+        """
+        working = self._working_settings.get(installation)
+        governed = self._governed_settings.get(installation)
+        if working is None or working == governed:
+            return {}
+        scope = task_key if task_key in working else _DEFAULT_SCOPE
+        now, before = _effective(working, scope), _effective(governed or {}, scope)
+        return {
+            choice: now[field]
+            for field, choice in _CHOICE_OF_SETTING.items()
+            if now[field] != before[field] and now[field] not in ("", None)
+        }
 
     def execute_task(
         self,
@@ -830,6 +982,9 @@ class AI:
             AIConfigurationError: as ``AITask.from_governed`` does.
         """
         self._refuse_unknown(facts)
+        # The session's unsaved edits, beneath anything the caller chose (#1191).
+        facts = {**self._unsaved_choices(installation, str(facts.get("task_key") or "")),
+                 **facts}
         task = AITask.from_governed(control, installation, **facts)
         self._tasks[task.id] = task
         return task
@@ -1020,3 +1175,42 @@ def _access_policy(engine: Mapping[str, Any]) -> dict[str, Any]:
             "profile_access.default must be a member of profile_access.allowed."
         )
     return {"allowed": allowed, "default": default}
+
+
+def _set_setting_action(scope: str, field: str) -> dict[str, Any]:
+    """The declared edit of one setting of one scope: its command and where its value goes."""
+    return {"role": {"act": "set", "on": "settings", "field": field},
+            "command": {"command": "set_setting", "scope": scope, "field": field},
+            "inputs": {"value": ["value"]}}
+
+
+def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> tuple[str, dict[str, dict[str, Any]]]:
+    """The group's key and each scope's stated settings, from control.f_ai_settings_get rows.
+
+    Every row carries the group's defaults; each row with a task carries that
+    task's own values, NULL where it inherits.
+    """
+    listed = list(rows)
+    first = listed[0] if listed else {}
+
+    def stated(row: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+        temperature = row.get(f"{prefix}temperature")
+        return {"profile_id": str(row.get(f"{prefix}profile_key") or ""),
+                "instruction_id": str(row.get(f"{prefix}instruction_key") or ""),
+                "temperature": None if temperature is None else float(temperature),
+                "representation": str(row.get(f"{prefix}representation") or ""),
+                "connection": str(row.get(f"{prefix}connection_name") or "")}
+
+    scopes = {_DEFAULT_SCOPE: stated(first, "default_")}
+    for row in listed:
+        if row.get("task_key"):
+            scopes[str(row["task_key"])] = stated(row, "task_")
+    return str(first.get("ai_group_key") or ""), scopes
+
+
+def _effective(scopes: Mapping[str, Mapping[str, Any]], scope: str) -> dict[str, Any]:
+    """One scope's effective settings: its own values, else the default's."""
+    default = dict(scopes.get(_DEFAULT_SCOPE) or {})
+    own = dict(scopes.get(scope) or {})
+    return {field: (own.get(field) if own.get(field) not in ("", None) else default.get(field))
+            for field in _EDITABLE_SETTINGS}
