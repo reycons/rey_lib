@@ -1098,6 +1098,16 @@ class AI:
                 f"The engine '{model_identifier}' does not resolve to a model."
             ) from error
 
+    def connection_capabilities(self, task: AITask) -> frozenset[str]:
+        """The capability keys this AI binds itself from ``task``'s governed connection.
+
+        Read-only (recipe ai.give_a_task_a_tool step 5): the operations
+        :meth:`execute_task` binds from this AI's connection operations for the task's
+        connection. A host that binds its own operations for one execution binds only
+        the task's other granted capabilities, so it never replaces one this AI binds.
+        """
+        return frozenset(self._connection_operations.get(task.connection, {}))
+
     def connections(self) -> tuple[str, ...]:
         """Every connection a task here may be pointed at, in name order.
 

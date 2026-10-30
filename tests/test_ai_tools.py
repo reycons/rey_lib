@@ -112,6 +112,61 @@ class TestHydrationAndBinding:
             AIToolSet((tool, tool), {"database.query": _Owner()})
 
 
+#: A granted hosted subject capability, as the governed read answers it (#1141 piece 2):
+#: read_file_text -> file.text, its schema the owner's input contract.
+FILE_TEXT_SCHEMA = {"type": "object", "required": ["max_bytes"],
+                    "properties": {"max_bytes": {"type": "integer", "minimum": 1}},
+                    "additionalProperties": False}
+GRANTED = [
+    CONFIGURATION[0],
+    {"row_type": "task", "is_enabled": True, "task_key": "log_interpretation",
+     "task_label": "Log interpretation", "profile_key": "local_testing",
+     "instruction_key": None, "temperature": 0, "representation": None,
+     "composed_first": False, "connection_name": None,
+     "tools": [{"tool_key": "read_file_text", "description": "Read the file's text.",
+                "input_schema": FILE_TEXT_SCHEMA, "replay_safe": True,
+                "capability_key": "file.text", "result_row_limit": None}]},
+    {"row_type": "task", "is_enabled": True, "task_key": "read_class_action",
+     "task_label": "Class action", "profile_key": "local_testing", "instruction_key": None,
+     "temperature": 0, "representation": None, "composed_first": False,
+     "connection_name": None, "tools": []},
+]
+
+
+class _GovernedReads:
+    """The governed reads the live AI hydrates from, answered as the database would."""
+
+    def ai_configuration(self, installation: str, required: bool = True) -> list[dict[str, Any]]:
+        return GRANTED
+
+    def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
+        return ENGINES
+
+    def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
+        return []
+
+
+class TestHydrationThroughTheLiveAI:
+    """Recipe 54 (ai.give_a_task_a_tool) verification 1: a granted tool reaches a task
+    only through AI.hydrate_task, and the live AI retains the task it hydrates."""
+
+    def test_a_granted_hosted_capability_is_carried_by_the_task_the_live_ai_hydrates(
+            self) -> None:
+        ai = AI()
+
+        task = ai.hydrate_task(_GovernedReads(), "local", task_key="log_interpretation")
+
+        assert ai.task(task.id) is task
+        assert [(tool.name, tool.capability_key, tool.replay_safe, tool.result_row_limit)
+                for tool in task.tools] == [("read_file_text", "file.text", True, None)]
+        assert task.tools[0].input_schema == FILE_TEXT_SCHEMA
+
+    def test_a_task_without_the_grant_carries_no_tool(self) -> None:
+        task = AI().hydrate_task(_GovernedReads(), "local", task_key="read_class_action")
+
+        assert task.tools == ()
+
+
 class TestDispatch:
     def _set(self, owner: _Owner) -> AIToolSet:
         return AIToolSet(_hydrated().tools,
