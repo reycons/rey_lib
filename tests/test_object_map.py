@@ -374,7 +374,6 @@ def test_a_schema_map_selects_a_table_and_never_opens() -> None:
     held = _schema()
 
     assert held.click("table:run") is None
-    assert held.context_click("table:run") is None
     projected = held.projection()
     assert projected["selected"] == "table:run"
     assert {n["id"]: n["highlight"] for n in projected["nodes"]}["table:run_log"] == ["first"]

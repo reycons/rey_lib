@@ -34,7 +34,7 @@ from typing import Any, Callable, Final
 
 from rey_lib.db.database_objects import DatabaseSchema
 from rey_lib.db.database_query import DatabaseQuery
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files import read_text_file
 
 __all__ = ["CLAIM_NODE_TYPE", "OBJECT_PROJECTION", "SCHEMA_PROJECTION", "ObjectMap"]
@@ -105,6 +105,10 @@ class ObjectMap:
         #: The selected node (#1099), which a click sets and the projection
         #: highlights. None when nothing is selected.
         self._selected: str | None = None
+        self._index_connection: Any = None
+        self._index_installation = ""
+        self._database_provider = ""
+        self._table_context: dict[str, Any] | None = None
 
     # -- opening ---------------------------------------------------------------
 
@@ -124,7 +128,8 @@ class ObjectMap:
                    OBJECT_PROJECTION, read)
 
     @classmethod
-    def for_schema(cls, connection: Any, catalog: str, schema: str) -> "ObjectMap":
+    def for_schema(cls, connection: Any, catalog: str, schema: str, *,
+                   index_connection: Any = None, installation: str = "") -> "ObjectMap":
         """One database schema's map, from the canonical database read.
 
         The schema and its tables are read as the database domain's own objects
@@ -137,8 +142,12 @@ class ObjectMap:
             schema: The schema.
         """
         read = DatabaseSchema.read(connection.handle(), connection.name, catalog, schema).to_dict()
-        return cls({"kind": "database_schema", "connection": connection.name,
+        held = cls({"kind": "database_schema", "connection": connection.name,
                     "catalog": catalog, "schema": schema}, SCHEMA_PROJECTION, read)
+        held._index_connection = index_connection
+        held._index_installation = installation
+        held._database_provider = str(getattr(connection, "provider", "") or "")
+        return held
 
     # -- behaviour ---------------------------------------------------------------
 
@@ -153,7 +162,13 @@ class ObjectMap:
             unknown = sorted(set(opened) - set(self._table_names()))
             if unknown:
                 raise ConfigError(f"This schema holds no table {unknown}.")
-            self._focus = {"opened": opened}
+            table = str(focus.get("table") or "")
+            if table:
+                if table not in self._table_names():
+                    raise AppError(f"This schema holds no table {table!r}.")
+                context = self._read_table_context(table)
+                self._table_context = context
+            self._focus = {"opened": opened, **({"table": table} if table else {})}
             return
         level = str(focus.get("level") or "")
         if level == "estate":
@@ -190,16 +205,17 @@ class ObjectMap:
 
         Validity is this map's own inventory's answer, never the screen on show,
         so the same claim opens from any focus. A node this map holds that is no
-        claim -- an area, a table -- has no context-click behaviour: nothing
-        changes.
+        claim has no opening behavior. A table instead focuses its indexed
+        neighbourhood in this map; an area leaves the focus unchanged.
 
+        A schema table focuses its bounded indexed neighbourhood in this same map.
         A claim shows its owner's File, and the map says only which File that is:
         its canonical identity, a configured file beneath the apps root.
 
         Returns:
             For a claim, ``{"identity": {"kind", "root", "relative_path"}}`` -- what
             to open, naming no application, operation or panel. None for any
-            other node.
+            other node, including a table whose context was focused in place.
 
         Raises:
             ConfigError: When the node is none this map holds, or the claim names
@@ -208,6 +224,10 @@ class ObjectMap:
         node_id = str(node_id or "")
         if not self._holds[self.projection_kind](node_id):
             raise ConfigError(f"The map has no node {node_id!r}.")
+        if self.projection_kind == SCHEMA_PROJECTION and node_id.startswith(_TABLE):
+            self.focus(table=node_id[len(_TABLE):], opened=self._focus.get("opened", []))
+            self._selected = node_id
+            return None
         claim = self._claim_keyed(node_id)
         if claim is None:
             return None
@@ -490,8 +510,12 @@ class ObjectMap:
         A schema map's path is its one step, the schema itself.
         """
         if self.projection_kind == SCHEMA_PROJECTION:
-            return [{"value": "schema", "label": self.subject["schema"],
-                     "focus": dict(self._focus)}]
+            steps = [{"value": "schema", "label": self.subject["schema"],
+                      "focus": {"opened": list(self._focus.get("opened") or [])}}]
+            if self._focus.get("table"):
+                steps.append({"value": f"table:{self._focus['table']}",
+                              "label": self._focus["table"], "focus": dict(self._focus)})
+            return steps
         steps = [{"value": "estate", "label": "Estate", "focus": {"level": "estate"}}]
         area_id = self._focus.get("area_id")
         if area_id is not None:
@@ -533,6 +557,8 @@ class ObjectMap:
 
     def _holds_schema_node(self, node_id: str) -> bool:
         """Whether this schema holds the table, or references the external table, a node names."""
+        if self._focus.get("table") and self._table_context:
+            return any(node["id"] == node_id for node in self._table_context["nodes"])
         if node_id.startswith(_TABLE):
             return node_id[len(_TABLE):] in self._table_names()
         if node_id.startswith(_EXTERNAL):
@@ -547,7 +573,32 @@ class ObjectMap:
             return
         name = node_id[len(_TABLE):]
         opened = list(self._focus.get("opened") or [])
-        self.focus(opened=[t for t in opened if t != name] if name in opened else [*opened, name])
+        self.focus(opened=[t for t in opened if t != name] if name in opened else [*opened, name],
+                   **({"table": self._focus["table"]} if self._focus.get("table") else {}))
+
+    def _read_table_context(self, table: str) -> dict[str, Any]:
+        """The existing index's bounded graph, on the host's shared index connection."""
+        if self._index_connection is None or not self._index_installation:
+            raise AppError("This map has no configured index connection/installation for table context.")
+        rows = list(DatabaseQuery(_statement("table_context"), {
+            "catalog": self.subject["catalog"], "provider": self._database_provider,
+            "schema": self.subject["schema"], "table": table,
+            "installation": self._index_installation,
+        }).rows(self._index_connection.handle()))
+        if len(rows) != 1 or rows[0]["root_count"] != 1:
+            raise AppError("The index does not identify exactly one table for this database, schema and name.")
+        read = dict(rows[0])
+        root = read["root_id"]
+        root_id = f"{_TABLE}{table}"
+        nodes = [dict(node) for node in read.get("nodes") or []]
+        for node in nodes:
+            if node["id"] == root:
+                node.update(id=root_id, table=table)
+        edges = [{**edge,
+                  "source": root_id if edge["source"] == root else edge["source"],
+                  "target": root_id if edge["target"] == root else edge["target"]}
+                 for edge in read.get("edges") or []]
+        return {"nodes": nodes, "edges": edges}
 
     def _schema_scope(self) -> tuple[list[_Mapped], list[_Mapped]]:
         """The schema's tables, the external tables its foreign keys reach, and those keys.
@@ -555,6 +606,10 @@ class ObjectMap:
         A foreign key to a table outside this schema is related to that table as
         an external element. Each table and key is beside the row it maps.
         """
+        if self._focus.get("table") and self._table_context:
+            tables = {str(t["identity"]["name"]): t for t in self._read.get("tables", [])}
+            return ([(dict(n), tables.get(n.get("table", ""))) for n in self._table_context["nodes"]],
+                    [(dict(e), None) for e in self._table_context["edges"]])
         schema = self.subject["schema"]
         tables = self._read.get("tables", [])
         here = set(self._table_names())
@@ -599,7 +654,7 @@ class ObjectMap:
                  "primary_key": c["name"] in keyed}
                 for c in sorted(table.get("columns") or [], key=lambda c: c["ordinal"])
             ] if element["table"] in opened else []})
-        edges = [{**relation, "columns": list(key["columns"]),
-                  "referenced_columns": list(key["referenced_columns"])}
+        edges = [{**relation, **({"columns": list(key["columns"]),
+                  "referenced_columns": list(key["referenced_columns"])} if key else {})}
                  for relation, key in relations]
         return {"nodes": nodes, "edges": edges, "path": self._path(), "details": None}
