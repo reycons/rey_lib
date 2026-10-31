@@ -29,26 +29,37 @@ class _Control:
     """
 
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
+        """One row per task, as ai.ai_installation_vw (#1296): the installation's stated
+        defaults on every row, the task's stated values, and the effective values."""
         assert installation == "local"
+        defaults = {"installation": "local",
+                    "default_profile_key": "anthropic", "default_instruction_key": "__none__",
+                    "default_temperature": 0.2, "default_representation": "redacted",
+                    "default_connection_name": "llm_reader", "default_composed_first": False}
         return [
-            {"row_type": "group", "task_key": None, "task_label": None, "is_enabled": True,
-             "profile_key": "anthropic", "instruction_key": "__none__", "temperature": 0.2,
-             "representation": "redacted", "connection_name": "llm_reader",
-             "opens_workbench": False, "composed_first": False},
-            {"row_type": "task", "task_key": "search_index", "task_label": "Search the index",
-             "is_enabled": True, "profile_key": "local_precision", "instruction_key": "explain_v1",
+            {**defaults, "task_key": "search_index", "task_label": "Search the index",
+             "is_enabled": True, "task_profile_key": "local_precision",
+             "task_instruction_key": "explain_v1", "task_temperature": 0,
+             "task_representation": "unredacted", "task_connection_name": None,
+             "profile_key": "local_precision", "instruction_key": "explain_v1",
              "temperature": 0, "representation": "unredacted", "connection_name": "",
              "opens_workbench": True, "composed_first": True},
-            {"row_type": "task", "task_key": "generate_sql", "task_label": None, "is_enabled": True,
+            {**defaults, "task_key": "generate_sql", "task_label": None, "is_enabled": True,
+             "task_profile_key": None, "task_instruction_key": None, "task_temperature": None,
+             "task_representation": None, "task_connection_name": "rey_apps",
              "profile_key": "", "instruction_key": "", "temperature": None, "representation": "",
              "connection_name": "rey_apps", "opens_workbench": None, "composed_first": None},
-            {"row_type": "task", "task_key": "retired", "task_label": "Retired",
-             "is_enabled": False, "profile_key": "", "instruction_key": "__ad_hoc__",
+            {**defaults, "task_key": "retired", "task_label": "Retired",
+             "is_enabled": False, "task_profile_key": None,
+             "task_instruction_key": "__ad_hoc__", "task_temperature": 1.5,
+             "task_representation": None, "task_connection_name": None,
+             "profile_key": "", "instruction_key": "__ad_hoc__",
              "temperature": 1.5, "representation": "", "connection_name": "",
              "opens_workbench": False, "composed_first": False},
         ]
 
-    def ai_engine_profiles(self) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str) -> list[dict[str, Any]]:
+        assert installation == "local"
         return [
             {"profile_key": "anthropic", "provider": "anthropic", "model": "claude-sonnet-4-6",
              "endpoint": "", "timeout_seconds": None, "credential_ref": "", "options": {},
@@ -63,25 +74,6 @@ class _Control:
              "timeout_seconds": None, "credential_ref": "", "options": {},
              "access_allowed": ["redacted", "redacted"], "access_default": "redacted",
              "is_enabled": True, "model_identifier": "openai-chat:gpt-4o"},
-        ]
-
-    def ai_settings(self, installation: str) -> list[dict[str, Any]]:
-        """The same scopes' STATED values, as control.f_ai_settings_get rows (#1191)."""
-        assert installation == "local"
-        group = {"installation": "local", "ai_group_key": "console_default",
-                 "default_profile_key": "anthropic", "default_instruction_key": "__none__",
-                 "default_temperature": 0.2, "default_representation": "redacted",
-                 "default_connection_name": "llm_reader"}
-        return [
-            {**group, "task_key": "search_index", "task_profile_key": "local_precision",
-             "task_instruction_key": "explain_v1", "task_temperature": 0,
-             "task_representation": "unredacted", "task_connection_name": None},
-            {**group, "task_key": "generate_sql", "task_profile_key": None,
-             "task_instruction_key": None, "task_temperature": None,
-             "task_representation": None, "task_connection_name": "rey_apps"},
-            {**group, "task_key": "retired", "task_profile_key": None,
-             "task_instruction_key": "__ad_hoc__", "task_temperature": 1.5,
-             "task_representation": None, "task_connection_name": None},
         ]
 
     def ai_instructions(self) -> list[dict[str, Any]]:

@@ -76,6 +76,26 @@ class TestConstruction:
         assert built[0].entry_point == "main.py"
         assert built[0].shared_parameters is True
 
+    def test_the_ai_definition_is_carried_as_the_installation_states_it(self) -> None:
+        # Part of the settings sent to the application (#1296): the installation
+        # row's ai, as given, and empty where the application defines none.
+        given = {"is_enabled": True, "default_profile_key": "anthropic",
+                 "engines": [{"profile_key": "anthropic"}], "tools": [],
+                 "tasks": [{"task_key": "search_index", "tools": []}]}
+        with_ai, without = build([
+            {**declaration(), "ai": given},
+            {**declaration(), "name": "plain", "app_path": "/apps/plain"},
+        ])
+
+        assert dict(with_ai.ai) == given
+        assert dict(without.ai) == {}
+        assert with_ai.projection()["ai"] == given
+        assert without.projection()["ai"] == {}
+
+    def test_an_ai_definition_that_is_not_a_mapping_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="states 'ai' as list; it is a mapping"):
+            build([{**declaration(), "ai": ["anthropic"]}])
+
     def test_a_disabled_application_is_not_built(self) -> None:
         entry = {**declaration(), "enabled": False}
 

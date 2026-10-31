@@ -45,10 +45,10 @@ TOOL_ROWS = [
 ]
 
 CONFIGURATION = [
-    {"row_type": "group", "is_enabled": True, "profile_key": "local_testing",
-     "instruction_key": None, "temperature": None, "representation": None,
-     "composed_first": False, "connection_name": None, "tools": []},
-    {"row_type": "task", "is_enabled": True, "task_key": "search_index",
+    {"default_profile_key": "local_testing", "default_instruction_key": None,
+     "default_temperature": None, "default_representation": None,
+     "default_connection_name": None, "default_composed_first": False,
+     "is_enabled": True, "task_key": "search_index",
      "task_label": "Search", "profile_key": "local_testing", "instruction_key": None,
      "temperature": 0, "representation": None, "composed_first": False,
      "connection_name": "llm_reader", "tools": TOOL_ROWS},
@@ -139,7 +139,7 @@ class _GovernedReads:
     def ai_configuration(self, installation: str, required: bool = True) -> list[dict[str, Any]]:
         return GRANTED
 
-    def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str, required: bool = True) -> list[dict[str, Any]]:
         return ENGINES
 
     def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:

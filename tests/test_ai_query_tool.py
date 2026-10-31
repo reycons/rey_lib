@@ -45,10 +45,10 @@ ENGINES = [{"profile_key": "local_testing", "is_enabled": True,
 
 def _configuration(connection: str | None) -> list[dict[str, Any]]:
     return [
-        {"row_type": "group", "is_enabled": True, "profile_key": "local_testing",
-         "instruction_key": None, "temperature": None, "representation": None,
-         "composed_first": False, "connection_name": None, "tools": []},
-        {"row_type": "task", "is_enabled": True, "task_key": "search_index",
+        {"default_profile_key": "local_testing", "default_instruction_key": None,
+         "default_temperature": None, "default_representation": None,
+         "default_connection_name": None, "default_composed_first": False,
+         "is_enabled": True, "task_key": "search_index",
          "task_label": "Search", "profile_key": "local_testing", "instruction_key": None,
          "temperature": None, "representation": None, "composed_first": False,
          "connection_name": connection, "tools": [QUERY_ROW]},

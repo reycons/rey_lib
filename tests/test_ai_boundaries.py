@@ -228,14 +228,11 @@ class TestAConnectionIsAName:
         """The governed reads: one group and one task, their connections stated."""
         class _Control:
             def ai_configuration(self, installation):
-                return [{"row_type": "group"}, {"row_type": "task", "task_key": "search"}]
-
-            def ai_settings(self, installation):
-                return [{"ai_group_key": "console_default", "task_key": "search",
+                return [{"installation": "local", "task_key": "search",
                          "default_connection_name": group_connection or None,
                          "task_connection_name": task_connection or None}]
 
-            def ai_engine_profiles(self):
+            def ai_engine_profiles(self, installation):
                 return []
 
             def ai_instructions(self):

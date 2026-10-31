@@ -1319,10 +1319,11 @@ class Control:
 
     def ai_configuration(self, installation: str,
                          required: bool = True) -> list[dict[str, Any]]:
-        """One installation's resolved AI configuration.
+        """One installation's AI configuration: ai.ai_installation_vw, one row per task (#1296).
 
-        The view owns the group/task inheritance, so what comes back is already
-        resolved. Nothing here re-derives it.
+        Each row carries the installation's stated defaults, the task's stated
+        values, the effective values, the task's tools and the installation's
+        available engines. The view owns the inheritance; nothing here re-derives it.
         """
         return [
             dict(row) for row in (self._call_rows("get_ai_configuration", {
@@ -1361,17 +1362,17 @@ class Control:
             }, required=required) or [])
         ]
 
-    def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
-        """Every engine profile the estate offers.
+    def ai_engine_profiles(self, installation: str,
+                           required: bool = True) -> list[dict[str, Any]]:
+        """The engine profiles available to one installation (#1296).
 
-        One shared set, not a set per installation: ai.ai_engine_profile carries
-        no installation and profile_key is unique across it, so there is nothing
-        to filter on and no argument to pass.
+        ai.ai_installation_vw carries them on every row as ``engines`` -- the
+        installation's ai_installation_engine rows, each as ai.ai_engine_profile
+        holds it -- so they are read with the configuration, once. The profile's
+        own is_enabled travels with the row and remains a further restriction.
         """
-        return [
-            dict(row) for row in
-            (self._call_rows("get_ai_engine_profile", {}, required=required) or [])
-        ]
+        rows = self.ai_configuration(installation, required=required)
+        return [dict(row) for row in (rows[0].get("engines") or [])] if rows else []
 
     def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
         """Every instruction the estate offers, with its contract body."""
@@ -1380,35 +1381,20 @@ class Control:
             (self._call_rows("get_ai_instruction", {}, required=required) or [])
         ]
 
-    def ai_settings(self, installation: str,
-                    required: bool = True) -> list[dict[str, Any]]:
-        """One installation's STATED AI settings, one row per group task (#1191).
-
-        Each row carries its group's defaults beside the task's own values, NULL
-        where the task inherits -- unlike :meth:`ai_configuration`, whose rows are
-        already resolved. The view owns the shape; nothing here re-derives it.
-        """
-        return [
-            dict(row) for row in (self._call_rows("get_ai_settings", {
-                "installation": str(installation),
-            }, required=required) or [])
-        ]
-
-    def update_ai_group_defaults(self, installation: str, ai_group_key: str, *,
-                                 profile_key: Optional[str],
-                                 instruction_key: Optional[str],
-                                 temperature: Optional[float],
-                                 representation: Optional[str],
-                                 connection_name: Optional[str],
-                                 required: bool = True) -> None:
-        """Replace one AI group's five default settings; a None clears a default (#1191).
+    def update_ai_installation_defaults(self, installation: str, *,
+                                        profile_key: Optional[str],
+                                        instruction_key: Optional[str],
+                                        temperature: Optional[float],
+                                        representation: Optional[str],
+                                        connection_name: Optional[str],
+                                        required: bool = True) -> None:
+        """Replace one installation's five default AI settings; a None clears a default (#1191, #1296).
 
         The values are handed over exactly as given; the routine owns how they
-        become the group's row.
+        become the installation's row.
         """
-        self._call("update_ai_group_defaults", {
+        self._call("update_ai_installation_defaults", {
             "installation": str(installation),
-            "ai_group_key": str(ai_group_key),
             "profile_key": profile_key,
             "instruction_key": instruction_key,
             "temperature": temperature,
@@ -1416,21 +1402,20 @@ class Control:
             "connection_name": connection_name,
         }, required=required)
 
-    def update_ai_group_task(self, installation: str, ai_group_key: str, task_key: str, *,
-                             profile_key: Optional[str],
-                             instruction_key: Optional[str],
-                             temperature: Optional[float],
-                             representation: Optional[str],
-                             connection_name: Optional[str],
-                             required: bool = True) -> None:
-        """Replace one group task's five settings; a None is inheritance (#1191).
+    def update_ai_installation_task(self, installation: str, task_key: str, *,
+                                    profile_key: Optional[str],
+                                    instruction_key: Optional[str],
+                                    temperature: Optional[float],
+                                    representation: Optional[str],
+                                    connection_name: Optional[str],
+                                    required: bool = True) -> None:
+        """Replace one installation task's five settings; a None is inheritance (#1191, #1296).
 
         The values are handed over exactly as given; the routine owns how they
-        become the group task's row.
+        become the installation task's row.
         """
-        self._call("update_ai_group_task", {
+        self._call("update_ai_installation_task", {
             "installation": str(installation),
-            "ai_group_key": str(ai_group_key),
             "task_key": str(task_key),
             "profile_key": profile_key,
             "instruction_key": instruction_key,
@@ -1469,6 +1454,21 @@ class Control:
             "file_path": str(file_path),
         }, required=required) or []
         return dict(rows[0]) if rows else None
+
+    def get_application_installations(self, installation_id: int,
+                                      application: str | None = None) -> list[dict[str, Any]]:
+        """Read installation/application declarations without interpreting settings (#1297).
+
+        Each independent application owns the settings it consumes. Control
+        carries the governed rows; it does not merge them into ctx, resolve
+        paths, supply defaults, or construct application/domain objects.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_application_installations", {
+                "installation_id": installation_id,
+                "application": application,
+            }, required=True) or [])
+        ]
 
     def get_application_capabilities(self, application: str,
                                      required: bool = True) -> list[dict[str, Any]]:

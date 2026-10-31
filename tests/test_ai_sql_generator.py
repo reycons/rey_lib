@@ -54,17 +54,17 @@ class _Control:
 
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
         return [
-            {"row_type": "group", "is_enabled": True, "profile_key": "local_testing",
-             "instruction_key": None, "temperature": None, "representation": None,
-             "composed_first": False, "connection_name": None, "tools": []},
-            {"row_type": "task", "is_enabled": True, "task_key": "generate_sql",
+            {"default_profile_key": "local_testing", "default_instruction_key": None,
+             "default_temperature": None, "default_representation": None,
+             "default_connection_name": None, "default_composed_first": False,
+             "is_enabled": True, "task_key": "generate_sql",
              "task_label": "Generate SQL", "profile_key": "local_precision",
              "instruction_key": "sql_generate_sql", "temperature": 0,
              "representation": None, "composed_first": False, "connection_name": None,
              "tools": self._tools},
         ]
 
-    def ai_engine_profiles(self) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str) -> list[dict[str, Any]]:
         return [{"profile_key": "local_precision", "is_enabled": True,
                  "model_identifier": "ollama:qwen2.5-coder:32b",
                  "base_url": "http://localhost:11434/v1"}]

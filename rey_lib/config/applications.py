@@ -500,6 +500,14 @@ class Application:
     #: the application hosts, not a workflow step. Empty until published, and
     #: empty never means everything.
     capabilities: tuple[ApplicationCapability, ...] = field(default=())
+    #: The application's AI definition, part of its installation settings (#1296).
+    #:
+    #: As the installation row carries it (control.application_installation_vw.ai:
+    #: is_enabled, the stated defaults, the engines, tools and tasks available to
+    #: this application), opaque here: the application that consumes it owns its
+    #: meaning, as it owns every other setting sent to it. Empty when the
+    #: application defines none.
+    ai: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     #: The presentation an application's settings require (#1150): what the
     #: Console's registry presents it with. Not :attr:`panel`, the retired
@@ -687,6 +695,8 @@ class Application:
             "application_id": self.name,
             **({"settings": self.settings_projection()} if self._run_settings else {}),
             "label": self.label,
+            # The AI this installation gives the application, as carried (#1296).
+            "ai": json.loads(json.dumps(dict(self.ai))),
             "commands": [
                 {
                     "name": command.name,
@@ -972,6 +982,9 @@ def _from_registration(
         # From the installation entry, not the registration: how loud this
         # application runs here is this installation's decision.
         log_level=str(entry.get("log_level") or ""),
+        # From the installation entry, as the log level is: which AI this
+        # application is given here is this installation's setting (#1296).
+        ai=_ai_setting(entry, name),
         parameters=parameters,
         parameter_groups=_parameter_groups(cli, parameters, name),
         commands=_commands(cli, ctx, name),
@@ -1084,6 +1097,26 @@ def _capabilities(
     return tuple(capabilities)
 
 
+def _ai_setting(entry: dict[str, Any], name: str) -> dict[str, Any]:
+    """The application's AI definition as the installation entry carries it (#1296).
+
+    Carried as given and never interpreted here; absent is ordinary and means
+    the application defines none.
+
+    Raises:
+        ConfigError: When the entry states ``ai`` as something other than a
+            mapping.
+    """
+    given = _plain(entry.get("ai"))
+    if given is None:
+        return {}
+    if not isinstance(given, dict):
+        raise ConfigError(
+            f"Application '{name}' states 'ai' as {type(given).__name__}; it is a mapping."
+        )
+    return dict(given)
+
+
 def _from_declaration(
     entry: dict[str, Any],
     ctx: Any,
@@ -1105,6 +1138,7 @@ def _from_declaration(
         # generic mark.
         icon=str(entry.get("icon") or ""),
         log_level=str(entry.get("log_level") or ""),
+        ai=_ai_setting(entry, name),
         parameters=tuple(
             _parameter(one, ctx, name)
             for one in (_plain(item) for item in (cli.get("parameters") or []))

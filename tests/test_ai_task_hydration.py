@@ -16,18 +16,21 @@ from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputSpec
 from rey_lib.ai.task import AITask
 
+#: The installation's stated defaults, as every row of ai.ai_installation_vw carries them.
+DEFAULTS = {
+    "installation": "local", "installation_label": "Console",
+    "default_profile_key": "local_testing", "default_instruction_key": "__none__",
+    "default_temperature": 0.2, "default_representation": "redacted",
+    "default_connection_name": None, "default_composed_first": False,
+}
+
 CONFIGURATION = [
-    {"row_type": "group", "ai_group_key": "console_default", "label": "Console",
-     "is_enabled": True, "sort_order": 0, "task_key": None, "task_label": None,
-     "profile_key": "local_testing", "instruction_key": "__none__", "temperature": 0.2,
-     "representation": "redacted", "opens_workbench": False, "connection_name": None,
-     "composed_first": False},
-    {"row_type": "task", "ai_group_key": "console_default", "label": "Console",
+    {**DEFAULTS,
      "is_enabled": True, "sort_order": 1, "task_key": "search_index",
      "task_label": "Search the index", "profile_key": "local_testing",
      "instruction_key": "explain_v1", "temperature": 0, "representation": "redacted",
      "opens_workbench": True, "connection_name": "llm_reader", "composed_first": True},
-    {"row_type": "task", "ai_group_key": "console_default", "label": "Console",
+    {**DEFAULTS,
      "is_enabled": False, "sort_order": 2, "task_key": "retired",
      "task_label": "Retired", "profile_key": "local_testing", "instruction_key": None,
      "temperature": None, "representation": None, "opens_workbench": False,
@@ -184,7 +187,7 @@ class TestFromGoverned:
             self.asked.append(f"configuration:{installation}")
             return CONFIGURATION
 
-        def ai_engine_profiles(self) -> list[dict]:
+        def ai_engine_profiles(self, installation: str) -> list[dict]:
             self.asked.append("engines")
             return ENGINES
 

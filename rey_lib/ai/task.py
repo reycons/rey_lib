@@ -193,7 +193,7 @@ class AITask:
                      task_key or "(default)", installation)
         return cls.hydrate(
             control.ai_configuration(installation),
-            control.ai_engine_profiles(),
+            control.ai_engine_profiles(installation),
             control.ai_instructions(),
             installation=installation, task_key=task_key,
             profile_key=profile_key, instruction_key=instruction_key,
@@ -240,26 +240,36 @@ class AITask:
         shape.
 
         ``configuration`` is the installation's control.f_ai_configuration_get
-        rows: the group row is the default scope and each task row one task, its
-        inheritance already resolved by ai.ai_vw. ``engines`` and
-        ``instructions`` are the estate's engine and instruction rows.
+        rows (ai.ai_installation_vw): one row per task, its inheritance already
+        resolved, and the installation's stated defaults -- the default scope --
+        on every row. ``engines`` are the installation's available engines and
+        ``instructions`` the estate's instruction rows.
 
         Precedence, for every choice: the caller's override, then the task's
-        row, then the group's. An override is an input here and never an edit
-        afterwards: a different choice is a different hydration. A task key no
-        row configures takes the default scope, as it always has.
+        row, then the installation's defaults. An override is an input here and
+        never an edit afterwards: a different choice is a different hydration. A
+        task key no row configures takes the default scope, as it always has.
 
         Raises:
             AIConfigurationError: when the task is disabled, or names an engine
                 or instruction that is not configured or not usable.
         """
         key = str(task_key or "").strip()
-        group = next(
-            (row for row in configuration if str(row.get("row_type")) == "group"), {},
-        )
+        # THE DEFAULT SCOPE, off the first row: every row of ai.ai_installation_vw
+        # carries the installation's stated defaults, under the names a task row
+        # resolves its own values to.
+        first = configuration[0] if configuration else {}
+        group: dict[str, Any] = {
+            "label": first.get("installation_label"),
+            "profile_key": first.get("default_profile_key"),
+            "instruction_key": first.get("default_instruction_key"),
+            "temperature": first.get("default_temperature"),
+            "representation": first.get("default_representation"),
+            "connection_name": first.get("default_connection_name"),
+            "composed_first": first.get("default_composed_first"),
+        } if first else {}
         row = next(
-            (one for one in configuration
-             if str(one.get("row_type")) == "task" and str(one.get("task_key")) == key),
+            (one for one in configuration if str(one.get("task_key")) == key),
             None,
         ) if key else None
         if row is not None and row.get("is_enabled") is False:
@@ -267,7 +277,7 @@ class AITask:
         scope = row if row is not None else group
 
         def chosen(override: Any, column: str) -> str:
-            """The override, else the task's row, else the group's."""
+            """The override, else the task's row, else the installation's."""
             return str(
                 override or (row or {}).get(column) or group.get(column) or ""
             ).strip()

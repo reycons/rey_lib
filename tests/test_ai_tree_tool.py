@@ -28,10 +28,10 @@ TREE_EXPAND_ROW = {
 }
 
 CONFIGURATION = [
-    {"row_type": "group", "is_enabled": True, "profile_key": "local_testing",
-     "instruction_key": None, "temperature": None, "representation": None,
-     "composed_first": False, "connection_name": None, "tools": []},
-    {"row_type": "task", "is_enabled": True, "task_key": "tree_inspection",
+    {"default_profile_key": "local_testing", "default_instruction_key": None,
+     "default_temperature": None, "default_representation": None,
+     "default_connection_name": None, "default_composed_first": False,
+     "is_enabled": True, "task_key": "tree_inspection",
      "task_label": "Inspect", "profile_key": "local_testing", "instruction_key": None,
      "temperature": None, "representation": None, "composed_first": False,
      "connection_name": None, "tools": [TREE_EXPAND_ROW]},

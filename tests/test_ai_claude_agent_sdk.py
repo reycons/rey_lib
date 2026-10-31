@@ -182,8 +182,8 @@ class TestSelection:
         assert AITask(model_identifier="ollama:x").execution_mechanism == "pydantic_ai"
 
     def test_hydration_carries_the_engine_row_mechanism(self) -> None:
-        configuration = [{"row_type": "group", "is_enabled": True,
-                          "profile_key": "claude_subscription", "tools": []}]
+        configuration = [{"default_profile_key": "claude_subscription", "is_enabled": True,
+                          "task_key": "any", "profile_key": "claude_subscription", "tools": []}]
         engines = [{"profile_key": "claude_subscription", "is_enabled": True,
                     "model_identifier": "claude-sonnet-4-6",
                     "execution_mechanism": "claude_agent_sdk"}]

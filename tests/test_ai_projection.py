@@ -24,17 +24,15 @@ class _Control:
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
         self.asked.append(installation)
         return [
-            {"row_type": "group", "task_key": None, "task_label": None, "is_enabled": True,
-             "composed_first": False},
-            {"row_type": "task", "task_key": "search_index", "task_label": "Search the index",
-             "is_enabled": True, "composed_first": True},
-            {"row_type": "task", "task_key": "retired", "task_label": "Retired",
-             "is_enabled": False, "composed_first": False},
-            {"row_type": "task", "task_key": "generate_sql", "task_label": None,
-             "is_enabled": True, "composed_first": None},
+            {"task_key": "search_index", "task_label": "Search the index",
+             "is_enabled": True, "composed_first": True, "default_composed_first": False},
+            {"task_key": "retired", "task_label": "Retired",
+             "is_enabled": False, "composed_first": False, "default_composed_first": False},
+            {"task_key": "generate_sql", "task_label": None,
+             "is_enabled": True, "composed_first": None, "default_composed_first": False},
         ]
 
-    def ai_engine_profiles(self) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str) -> list[dict[str, Any]]:
         self.asked.append("engines")
         return [
             {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest",
@@ -47,10 +45,6 @@ class _Control:
              "credential_ref": "env.ANTHROPIC_API_KEY", "is_enabled": True,
              "access_allowed": ["redacted"], "access_default": "redacted"},
         ]
-
-    def ai_settings(self, installation: str) -> list[dict[str, Any]]:
-        self.asked.append(f"settings:{installation}")
-        return []
 
     def ai_instructions(self) -> list[dict[str, Any]]:
         self.asked.append("instructions")
@@ -65,7 +59,9 @@ def test_the_projection_offers_the_enabled_governed_tasks_in_order() -> None:
 
     projection = AI().projection(control, "local")
 
-    assert control.asked == ["local", "engines", "instructions", "settings:local"]
+    # One read of the configuration (ai.ai_installation_vw carries the stated
+    # settings too), the engines, the instructions -- nothing read twice.
+    assert control.asked == ["local", "engines", "instructions"]
     assert projection["tasks"] == [
         {"task_key": "search_index", "label": "Search the index", "composed_first": True},
         {"task_key": "generate_sql", "label": "generate_sql", "composed_first": False},

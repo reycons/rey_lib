@@ -19,16 +19,19 @@ from rey_lib.ai.errors import AIRequestError, AISelectionError
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.task import AITask
 
+#: The installation's stated defaults, as every row of ai.ai_installation_vw carries them.
+DEFAULTS = {
+    "default_profile_key": "local_testing", "default_instruction_key": "__none__",
+    "default_temperature": 0.2, "default_representation": "redacted",
+    "default_connection_name": None, "default_composed_first": False,
+}
+
 CONFIGURATION = [
-    {"row_type": "group", "task_key": None, "task_label": None,
-     "profile_key": "local_testing", "instruction_key": "__none__", "temperature": 0.2,
-     "representation": "redacted", "connection_name": None, "composed_first": False,
-     "is_enabled": True},
-    {"row_type": "task", "task_key": "search_index", "task_label": "Search the index",
+    {**DEFAULTS, "task_key": "search_index", "task_label": "Search the index",
      "profile_key": "local_testing", "instruction_key": "explain_v1", "temperature": 0,
      "representation": "redacted", "connection_name": "llm_reader",
      "composed_first": True, "is_enabled": True},
-    {"row_type": "task", "task_key": "explain", "task_label": "Explain",
+    {**DEFAULTS, "task_key": "explain", "task_label": "Explain",
      "profile_key": None, "instruction_key": "explain_v1", "temperature": None,
      "representation": None, "connection_name": None, "composed_first": False,
      "is_enabled": True},
@@ -61,7 +64,7 @@ class _Control:
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
         return self.configuration
 
-    def ai_engine_profiles(self) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str) -> list[dict[str, Any]]:
         return ENGINES
 
     def ai_instructions(self) -> list[dict[str, Any]]:
@@ -137,8 +140,10 @@ class TestRehydration:
     def test_an_unchosen_value_follows_a_governed_change(self) -> None:
         ai, control = _ai(), _Control()
         first = ai.hydrate_task(control, "local", task_key="explain", temperature=0.5)
-        control.configuration[0]["profile_key"] = "anthropic"
-        control.configuration[0]["representation"] = "unredacted"
+        # The installation's defaults travel on every row (ai.ai_installation_vw).
+        for row in control.configuration:
+            row["default_profile_key"] = "anthropic"
+            row["default_representation"] = "unredacted"
 
         second = ai.rehydrate_task(control, first.id, {"temperature": 0.9})
 

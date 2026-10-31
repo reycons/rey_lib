@@ -76,7 +76,6 @@ _CHOICE_OF_SETTING = {"profile_id": "profile_key", "instruction_id": "instructio
 #: Save, declared while an edit is unsaved: the command that persists the settings.
 _SAVE_SETTINGS_ACTION = {"role": {"act": "save", "on": "settings"},
                          "command": {"command": "save_settings"}}
-
 __all__ = ["AI"]
 
 
@@ -134,7 +133,6 @@ class AI:
         # from the working copy, so an unsaved edit applies to it.
         self._governed_settings: dict[str, dict[str, dict[str, Any]]] = {}
         self._working_settings: dict[str, dict[str, dict[str, Any]]] = {}
-        self._settings_group: dict[str, str] = {}
 
     def projection(self, control: Any, installation: str) -> dict[str, Any]:
         """What this AI offers an installation, as plain data (backlog 1041).
@@ -149,23 +147,24 @@ class AI:
         session holds them, with the edits and the Save they declare (#1191).
         """
         configuration = control.ai_configuration(installation)
-        engines = control.ai_engine_profiles()
+        engines = control.ai_engine_profiles(installation)
         instructions = control.ai_instructions()
-        stated = self._settings_of(control, installation)
+        stated = self._settings_of(control, installation, configuration)
+        tasks = [
+            {
+                "task_key": str(row.get("task_key") or ""),
+                "label": str(row.get("task_label") or row.get("task_key") or ""),
+                "composed_first": bool(row.get("composed_first") or False),
+            }
+            for row in configuration
+            if row.get("is_enabled") is not False
+        ]
         return {
             "settings": self._settings_projection(
                 configuration, engines, instructions, stated,
                 stated != self._governed_settings[installation],
             ),
-            "tasks": [
-                {
-                    "task_key": str(row.get("task_key") or ""),
-                    "label": str(row.get("task_label") or row.get("task_key") or ""),
-                    "composed_first": bool(row.get("composed_first") or False),
-                }
-                for row in configuration
-                if str(row.get("row_type")) == "task" and row.get("is_enabled") is not False
-            ],
+            "tasks": tasks,
             "engines": [
                 {
                     "profile_key": str(row.get("profile_key") or ""),
@@ -238,9 +237,11 @@ class AI:
                     "connection": connection,
                     "composed_first": bool(row.get("composed_first") or False)}
 
-        group = next((row for row in rows if str(row.get("row_type")) == "group"), {})
-        tasks = [row for row in rows if str(row.get("row_type")) == "task"]
-        default = values(group, ".default")
+        # EVERY ROW CARRIES THE INSTALLATION'S DEFAULTS (ai.ai_installation_vw): the
+        # default scope is read off the first row, and each row is one task.
+        first = rows[0] if rows else {}
+        tasks = rows
+        default = values({"composed_first": first.get("default_composed_first")}, ".default")
         scopes: list[dict[str, Any]] = []
         for row in (None, *tasks):
             name = str(row.get("task_key") or "").strip() if row is not None else ""
@@ -306,7 +307,7 @@ class AI:
         scopes = self._settings_of(control, installation)
         if scope not in scopes:
             raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
-        scopes[scope][field] = self._offered_setting(control, field, value)
+        scopes[scope][field] = self._offered_setting(control, installation, field, value)
 
     def save_settings(self, control: Any, installation: str) -> None:
         """Persist this session's working settings, then re-read them as governed.
@@ -325,8 +326,7 @@ class AI:
         changed = [scope for scope, values in scopes.items() if values != governed.get(scope)]
         for scope in changed:
             for field in _EDITABLE_SETTINGS:
-                self._offered_setting(control, field, scopes[scope][field])
-        group = self._settings_group[installation]
+                self._offered_setting(control, installation, field, scopes[scope][field])
         for scope in changed:
             values = {
                 "profile_key": scopes[scope]["profile_id"] or None,
@@ -337,26 +337,34 @@ class AI:
             }
             logger.debug("saving AI settings %s for installation %s", scope, installation)
             if scope == _DEFAULT_SCOPE:
-                control.update_ai_group_defaults(installation, group, **values)
+                control.update_ai_installation_defaults(installation, **values)
             else:
-                control.update_ai_group_task(installation, group, scope, **values)
+                control.update_ai_installation_task(installation, scope, **values)
         self._read_settings(control, installation)
 
-    def _settings_of(self, control: Any, installation: str) -> dict[str, dict[str, Any]]:
-        """This session's working settings for one installation, read once."""
+    def _settings_of(self, control: Any, installation: str,
+                     configuration: Iterable[Mapping[str, Any]] | None = None,
+                     ) -> dict[str, dict[str, Any]]:
+        """This session's working settings for one installation, read once.
+
+        ``configuration`` is the installation's rows where the caller has them
+        already (``projection``), so the one read is not repeated.
+        """
         if installation not in self._working_settings:
-            self._read_settings(control, installation)
+            self._read_settings(control, installation, configuration)
         return self._working_settings[installation]
 
-    def _read_settings(self, control: Any, installation: str) -> None:
+    def _read_settings(self, control: Any, installation: str,
+                       configuration: Iterable[Mapping[str, Any]] | None = None) -> None:
         """Read the installation's stated settings; the working copy becomes them."""
-        group, governed = _stated_scopes(control.ai_settings(installation))
-        self._settings_group[installation] = group
+        rows = control.ai_configuration(installation) if configuration is None else configuration
+        governed = _stated_scopes(rows)
         self._governed_settings[installation] = governed
         self._working_settings[installation] = deepcopy(governed)
 
-    def _offered_setting(self, control: Any, field: str, value: Any) -> Any:
-        """One setting's value as the configuration offers it, or a refusal."""
+    def _offered_setting(self, control: Any, installation: str, field: str,
+                         value: Any) -> Any:
+        """One setting's value as the installation's configuration offers it, or a refusal."""
         if field == "temperature":
             if value is None or str(value).strip() == "":
                 return None
@@ -368,7 +376,8 @@ class AI:
         if not chosen:
             return ""
         if field == "profile_id" and chosen not in {
-                str(row.get("profile_key") or "") for row in control.ai_engine_profiles()}:
+                str(row.get("profile_key") or "")
+                for row in control.ai_engine_profiles(installation)}:
             raise AISelectionError(f"No AI engine profile is configured as {chosen!r}.")
         if field == "instruction_id" and chosen not in _offered_instructions(
                 control.ai_instructions()):
@@ -1194,11 +1203,11 @@ def _set_setting_action(scope: str, field: str) -> dict[str, Any]:
             "inputs": {"value": ["value"]}}
 
 
-def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> tuple[str, dict[str, dict[str, Any]]]:
-    """The group's key and each scope's stated settings, from control.f_ai_settings_get rows.
+def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each scope's stated settings, from control.f_ai_configuration_get rows.
 
-    Every row carries the group's defaults; each row with a task carries that
-    task's own values, NULL where it inherits.
+    Every row (ai.ai_installation_vw) carries the installation's stated defaults
+    and that task's own stated values, NULL where it inherits (#1296).
     """
     listed = list(rows)
     first = listed[0] if listed else {}
@@ -1215,7 +1224,7 @@ def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> tuple[str, dict[str, di
     for row in listed:
         if row.get("task_key"):
             scopes[str(row["task_key"])] = stated(row, "task_")
-    return str(first.get("ai_group_key") or ""), scopes
+    return scopes
 
 
 def _effective(scopes: Mapping[str, Mapping[str, Any]], scope: str) -> dict[str, Any]:

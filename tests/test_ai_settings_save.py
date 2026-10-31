@@ -37,25 +37,21 @@ class _Control:
         }
         self.writes: list[tuple[str, ...]] = []
 
-    def ai_settings(self, installation: str) -> list[dict[str, Any]]:
-        group = {"installation": installation, "ai_group_key": "console_default",
-                 **{f"default_{field}": value for field, value in self.defaults.items()}}
-        return [{**group, "task_key": task, **{f"task_{field}": value
-                                               for field, value in own.items()}}
-                for task, own in self.tasks.items()]
-
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
+        """One row per task, as ai.ai_installation_vw: stated defaults, stated own, effective."""
         def resolved(own: dict[str, Any]) -> dict[str, Any]:
             return {field: own[field] if own[field] is not None else self.defaults[field]
                     for field in _FIELDS}
-        group = {"row_type": "group", "ai_group_key": "console_default", "task_key": None,
-                 "composed_first": False, **self.defaults}
-        return [group, *({"row_type": "task", "ai_group_key": "console_default",
-                          "task_key": task, "task_label": task, "is_enabled": True,
-                          "composed_first": False, "tools": [], **resolved(own)}
-                         for task, own in self.tasks.items())]
+        defaults = {"installation": installation, "default_composed_first": False,
+                    **{f"default_{field}": value for field, value in self.defaults.items()}}
+        return [{**defaults,
+                 "task_key": task, "task_label": task, "is_enabled": True,
+                 "composed_first": False, "tools": [],
+                 **{f"task_{field}": value for field, value in own.items()},
+                 **resolved(own)}
+                for task, own in self.tasks.items()]
 
-    def ai_engine_profiles(self) -> list[dict[str, Any]]:
+    def ai_engine_profiles(self, installation: str) -> list[dict[str, Any]]:
         return [{"profile_key": key, "provider": provider, "model": model,
                  "model_identifier": f"{provider}:{model}", "credential_ref": "",
                  "base_url": "", "execution_mechanism": "pydantic_ai", "is_enabled": True,
@@ -69,14 +65,13 @@ class _Control:
                 {"instruction_key": "explain_v1", "kind": "contract", "body": "Explain it.",
                  "contract_key": "explain", "contract_version": "v1"}]
 
-    def update_ai_group_defaults(self, installation: str, ai_group_key: str,
-                                 **values: Any) -> None:
-        self.writes.append(("default", installation, ai_group_key))
+    def update_ai_installation_defaults(self, installation: str, **values: Any) -> None:
+        self.writes.append(("default", installation))
         self.defaults = dict(values)
 
-    def update_ai_group_task(self, installation: str, ai_group_key: str, task_key: str,
-                             **values: Any) -> None:
-        self.writes.append((task_key, installation, ai_group_key))
+    def update_ai_installation_task(self, installation: str, task_key: str,
+                                    **values: Any) -> None:
+        self.writes.append((task_key, installation))
         self.tasks[task_key] = dict(values)
 
 
@@ -133,7 +128,7 @@ class TestSaveKeepsInheritance:
         ai.set_setting(control, "local", "default", "profile_id", "other")
         ai.save_settings(control, "local")
 
-        assert control.writes == [("default", "local", "console_default")]
+        assert control.writes == [("default", "local")]
         assert control.defaults["profile_key"] == "other"
         assert control.tasks["search_index"]["profile_key"] == "local"
         assert _scope(ai, control, "search_index")["effective"]["profile_id"] == "local"
@@ -167,7 +162,7 @@ class TestSaveKeepsInheritance:
         ai.set_setting(control, "local", "generate_sql", "connection", "rey_apps")
         ai.save_settings(control, "local")
 
-        assert control.writes == [("generate_sql", "local", "console_default")]
+        assert control.writes == [("generate_sql", "local")]
         assert ai.projection(control, "local")["settings"]["actions"] == []
         ai.save_settings(control, "local")
         assert len(control.writes) == 1
