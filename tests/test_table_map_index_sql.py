@@ -35,7 +35,7 @@ def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
       objects=[(1,'root','table'),(2,'linked','table'),(3,'third_table','table'),(4,'view1','view'),(5,'view2','view'),(6,'view3','view'),(7,'routine','function'),(8,'incoming','table')]
       q.executemany('INSERT INTO pg_temp.ctx_db_object_vw VALUES (%s,1,\'fixture\',\'postgres\',\'public\',%s,%s,\'\')',objects)
       q.execute("INSERT INTO pg_temp.ctx_db_object_vw VALUES (999,2,'other','postgres','public','root','table','')")
-      refs=[(1,1,2,'foreign_key'),(2,2,3,'foreign_key'),(3,4,1,'read'),(4,5,4,'read'),(5,6,5,'read'),(6,7,1,'read'),(7,8,1,'foreign_key')]
+      refs=[(1,1,2,'foreign_key'),(2,2,3,'foreign_key'),(3,4,1,'read'),(4,5,4,'read'),(5,6,5,'read'),(6,7,1,'read'),(7,8,1,'foreign_key'),(8,7,4,'read')]
       q.executemany('INSERT INTO pg_temp.ctx_db_reference_vw VALUES (%s,%s,%s,%s)',refs)
       q.execute("INSERT INTO pg_temp.ctx_repository VALUES (1,'app')")
       q.execute("INSERT INTO pg_temp.ctx_file VALUES (100,1,'main.py')")
@@ -45,7 +45,7 @@ def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
       q.execute("INSERT INTO pg_temp.ctx_db_code_reference VALUES (1,10,100,'app','main.py','routine_user','control_dispatch','use_routine'),(2,20,100,'app','main.py','direct','control_dispatch','direct')")
       q.execute("INSERT INTO pg_temp.ctx_relationship_vw VALUES (1,21,20,NULL,true,false,'call'),(2,22,21,NULL,true,false,'call')")
       sql=re.sub(r'(?<!:):(\w+)',r'%(\1)s',sql)
-      params={'catalog':'fixture','provider':'postgres','schema':'public','table':'root','installation':'admin'}
+      params={'catalog':'fixture','provider':'postgres','schema':'public','table':'root','installation':'admin','node':None}
       q.execute(sql,params)
       count,root,nodes,edges=q.fetchone()
       ids={n['id'] for n in nodes}
@@ -55,6 +55,28 @@ def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
       assert all(e['source'] in ids and e['target'] in ids for e in edges)
       assert any(e['source']=='db:5' and e['target']=='db:4' for e in edges)
       assert any(e['source']=='symbol:21' and e['target']=='symbol:20' for e in edges)
+      # The same operation reroots on a view, SQL routine, or application symbol.
+      params.update(node='db:4',table=None)
+      q.execute(sql,params)
+      count,root,nodes,edges=q.fetchone()
+      assert count==1 and root=='db:4'
+      ids={n['id'] for n in nodes}
+      assert {'db:1','db:4','db:5','db:6','db:7','symbol:10'} <= ids
+      assert 'db:2' not in ids and 'db:8' not in ids
+      params['node']='symbol:20'
+      q.execute(sql,params)
+      count,root,nodes,edges=q.fetchone()
+      assert count==1 and root=='symbol:20'
+      assert {n['id'] for n in nodes}=={'symbol:20','symbol:21','symbol:22','db:1'}
+      params['node']='db:7'
+      q.execute(sql,params)
+      count,root,nodes,edges=q.fetchone()
+      assert count==1 and root=='db:7'
+      assert {'db:1','db:4','symbol:10'} <= {n['id'] for n in nodes}
+      params['node']='symbol:999999'
+      q.execute(sql,params)
+      assert q.fetchone()==(0,None,[],[])
+      params.update(node=None,table='root')
       params['installation']='no_access'
       q.execute(sql,params)
       _,_,nodes,_=q.fetchone()

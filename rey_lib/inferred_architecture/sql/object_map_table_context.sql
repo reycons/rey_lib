@@ -1,8 +1,9 @@
--- A table's indexed neighbourhood. Foreign-key tables are one hop;
+-- An indexed object's neighbourhood. The initial root is a schema table;
+-- subsequent roots use the existing indexed node id. Table links are one hop;
 -- dependent database code/views and application code are at most two hops.
 -- Names resolve only the requested root; every graph/bridge join uses ids.
-WITH RECURSIVE root AS (
-	SELECT o.db_node_id
+WITH RECURSIVE root_database AS (
+	SELECT 'db:' || o.db_node_id AS id
 	FROM code.db_object_vw AS o
 	WHERE o.catalog_name = :catalog
 		AND o.provider = :provider
@@ -12,20 +13,24 @@ WITH RECURSIVE root AS (
 ), database_nodes AS (
 	SELECT 'db:' || o.db_node_id AS id,
 		CASE WHEN o.object_type IN ('table', 'view') THEN o.object_type ELSE 'code' END AS kind,
-		o.schema_name || '.' || o.object_name || COALESCE(o.signature, '') AS label
+		NULL::TEXT AS label,
+		jsonb_build_object('schema', o.schema_name, 'name', o.object_name,
+			'object_type', o.object_type, 'signature', COALESCE(o.signature, '')) AS identity
 	FROM code.db_object_vw AS o
 	JOIN code.db_source AS s ON s.db_source_id = o.db_source_id
 	WHERE s.catalog_name = :catalog AND s.provider = :provider
 ), application_nodes AS (
 	SELECT DISTINCT 'file:' || f.code_file_id AS id,
-		'code'::TEXT AS kind, p.repository_key || ':' || f.relative_path AS label
+		'code'::TEXT AS kind, p.repository_key || ':' || f.relative_path AS label,
+		jsonb_build_object('repository_key', p.repository_key, 'relative_path', f.relative_path) AS identity
 	FROM code.db_code_reference AS r
 	JOIN code.file AS f ON f.code_file_id = r.code_file_id
 	JOIN code.repository AS p ON p.repository_id = f.repository_id
 	WHERE r.code_symbol_id IS NULL
 ), call_nodes AS (
 	SELECT 'symbol:' || y.code_symbol_id AS id, 'code'::TEXT AS kind,
-		r.repository_key || ':' || f.relative_path || ':' || y.qualified_name AS label
+		r.repository_key || ':' || f.relative_path || ':' || y.qualified_name AS label,
+		jsonb_build_object('repository_key', r.repository_key, 'relative_path', f.relative_path) AS identity
 	FROM code.symbol AS y
 	JOIN code.file AS f ON f.code_file_id = y.code_file_id
 	JOIN code.repository AS r ON r.repository_id = f.repository_id
@@ -35,6 +40,12 @@ WITH RECURSIVE root AS (
 	SELECT * FROM application_nodes
 	UNION
 	SELECT * FROM call_nodes
+), root AS (
+	SELECT n.id, n.kind
+	FROM all_nodes AS n
+	LEFT JOIN root_database AS r ON r.id = n.id
+	WHERE (CAST(:node AS TEXT) IS NOT NULL AND n.id = CAST(:node AS TEXT))
+		OR (CAST(:node AS TEXT) IS NULL AND r.id IS NOT NULL)
 ), database_edges AS (
 	SELECT 'reference:' || r.code_db_reference_id AS id,
 		'db:' || r.source_node_id AS source, 'db:' || r.target_node_id AS target,
@@ -72,17 +83,22 @@ WITH RECURSIVE root AS (
 	UNION ALL SELECT * FROM bridge_edges
 	UNION ALL SELECT * FROM call_edges
 ), dependent(id, depth, path) AS (
-	SELECT 'db:' || r.db_node_id, 0, ARRAY['db:' || r.db_node_id] FROM root AS r
+	SELECT r.id, 0, ARRAY[r.id] FROM root AS r
 	UNION ALL
-	SELECT e.source, d.depth + 1, d.path || e.source
+	SELECT n.id, d.depth + 1, d.path || n.id
 	FROM dependent AS d
-	JOIN all_edges AS e ON e.target = d.id
-	WHERE d.depth < 2 AND e.kind <> 'foreign_key' AND NOT e.source = ANY(d.path)
+	CROSS JOIN root AS r
+	JOIN all_edges AS e ON e.target = d.id OR (r.kind <> 'table' AND e.source = d.id)
+	JOIN all_nodes AS n ON n.id = CASE WHEN e.target = d.id THEN e.source ELSE e.target END
+	JOIN all_nodes AS current ON current.id = d.id
+	WHERE d.depth < 2 AND e.kind <> 'foreign_key' AND NOT n.id = ANY(d.path)
+		AND (n.kind <> 'table' OR d.depth = 0)
+		AND (current.kind <> 'table' OR d.depth = 0)
 ), linked_tables AS (
-	SELECT e.source AS id FROM database_edges AS e JOIN root AS r ON e.target = 'db:' || r.db_node_id
+	SELECT e.source AS id FROM database_edges AS e JOIN root AS r ON e.target = r.id
 	WHERE e.kind = 'foreign_key'
 	UNION
-	SELECT e.target FROM database_edges AS e JOIN root AS r ON e.source = 'db:' || r.db_node_id
+	SELECT e.target FROM database_edges AS e JOIN root AS r ON e.source = r.id
 	WHERE e.kind = 'foreign_key'
 ), reached AS (
 	SELECT d.id, MIN(d.depth) AS depth FROM dependent AS d GROUP BY d.id
@@ -91,20 +107,20 @@ WITH RECURSIVE root AS (
 ), distances AS (
 	SELECT r.id, MIN(r.depth) AS depth FROM reached AS r GROUP BY r.id
 ), nodes AS (
-	SELECT DISTINCT n.id, n.kind, n.label, d.depth
+	SELECT DISTINCT n.id, n.kind, n.label, n.identity, d.depth
 	FROM all_nodes AS n JOIN distances AS d ON d.id = n.id
 ), edges AS (
 	SELECT e.* FROM all_edges AS e
 	JOIN distances AS s ON s.id = e.source
 	JOIN distances AS t ON t.id = e.target
 	WHERE (e.kind = 'foreign_key' AND (s.depth = 0 OR t.depth = 0))
-		OR (e.kind <> 'foreign_key' AND s.depth = t.depth + 1)
+		OR (e.kind <> 'foreign_key' AND ABS(s.depth - t.depth) <= 1)
 ), node_rows AS (
 	SELECT jsonb_agg(to_jsonb(n) ORDER BY n.depth, n.id) AS nodes FROM nodes AS n
 ), edge_rows AS (
 	SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) AS edges FROM edges AS e
 ), root_rows AS (
-	SELECT count(*) AS root_count, MIN('db:' || r.db_node_id) AS root_id FROM root AS r
+	SELECT count(*) AS root_count, MIN(r.id) AS root_id FROM root AS r
 )
 SELECT r.root_count, r.root_id, COALESCE(n.nodes, '[]'::JSONB) AS nodes,
 	COALESCE(e.edges, '[]'::JSONB) AS edges

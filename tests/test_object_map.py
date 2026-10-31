@@ -338,16 +338,16 @@ def test_a_schema_projects_its_tables_and_foreign_keys_closed() -> None:
         ("table:run_log", "table:run"), ("table:run_log", "external:code.installation")]
 
 
-def test_double_clicking_a_table_opens_it_to_its_columns_and_again_closes_it() -> None:
+def test_schema_focus_opens_a_table_to_its_columns_and_closes_it() -> None:
     held = _schema()
 
-    held.double_click("table:run")
+    held.focus(opened=["run"])
     run = next(n for n in held.projection()["nodes"] if n["id"] == "table:run")
     assert run["columns"] == [
         {"name": "run_id", "type": "bigint", "nullable": False, "primary_key": True},
         {"name": "note", "type": "text", "nullable": True, "primary_key": False}]
 
-    held.double_click("table:run")
+    held.focus(opened=[])
     assert held.projection()["focus"] == {"opened": []}
 
 
@@ -468,7 +468,7 @@ def test_inspect_moves_nothing() -> None:
 
 def test_inspect_of_a_schema_relates_its_tables_and_never_carries_their_columns() -> None:
     held = _schema()
-    held.double_click("table:run")
+    held.focus(opened=["run"])
     inspected = held.inspect()
 
     assert inspected["map"] == SCHEMA_PROJECTION
