@@ -1853,6 +1853,11 @@ class DatabaseProcedure:
     #: reported them, empty where the provider reported that there are none.
     parameters: tuple[DatabaseParameter, ...] | None = None
 
+    @property
+    def label(self) -> str:
+        """The procedure's displayed name; its signature remains identity."""
+        return self.identity.name
+
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "procedures"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
@@ -1949,6 +1954,7 @@ class DatabaseProcedure:
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
+            "label": self.label,
             "ddl": self.ddl,
             "invocation": self.invocation,
             "parameters": (
@@ -1977,6 +1983,11 @@ class DatabaseFunction:
     #: the function's own return characteristic, which decides how it is
     #: invoked. None where no source reported it.
     returns_rows: bool | None = None
+
+    @property
+    def label(self) -> str:
+        """The function's displayed name; its signature remains identity."""
+        return self.identity.name
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "functions"
@@ -2074,6 +2085,7 @@ class DatabaseFunction:
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
+            "label": self.label,
             "ddl": self.ddl,
             "invocation": self.invocation,
             "parameters": (

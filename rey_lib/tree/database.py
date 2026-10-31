@@ -914,15 +914,11 @@ class DatabaseDataObject:
     def _object_label(self, entry: dict[str, Any]) -> str:
         """What one object reads as.
 
-        The name and, for a routine, its signature -- so two overloads are told
-        apart on screen. The same formatting the old tree used, and a label
-        only: what addresses the object is the identity beneath it, which the
-        server normalized into separate fields.
+        Carry the owning object's label. Other objects already supply their
+        name through their canonical identity. No routine formatting belongs here.
         """
         identity = dict(entry.get("identity") or {})
-        name = str(identity.get("name") or "")
-        signature = str(identity.get("signature") or "")
-        return f"{name}({signature})" if signature else name
+        return str(entry.get("label") or identity.get("name") or "")
 
     def _identity(self, entry: dict[str, Any]) -> dict[str, Any]:
         """What this relation is addressed by.

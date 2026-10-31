@@ -127,6 +127,11 @@ class IndexedDatabaseObject:
     object_type: str
     signature: str = ""
 
+    @property
+    def label(self) -> str:
+        """Its qualified display name, independent of its overload signature."""
+        return f"{self.schema}.{self.name}"
+
     def is_indexed(self, conn: Any, adapter: Any = None) -> bool:
         """Whether the index has ever seen this object.
 

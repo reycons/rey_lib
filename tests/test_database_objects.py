@@ -197,6 +197,7 @@ def test_a_procedure_serializes_its_identity_and_its_source() -> None:
             "connection": "rey_apps", "catalog": "rey", "schema": "control",
             "name": "rate", "signature": "text, date",
         },
+        "label": "rate",
         "ddl": "CREATE PROCEDURE control.rate(text, date) ...",
         "invocation": "",
         # No source reported them: unknown, not "takes none" (747).
@@ -207,6 +208,7 @@ def test_a_procedure_serializes_its_identity_and_its_source() -> None:
 def test_a_function_serializes_the_same_way() -> None:
     assert DatabaseFunction(identity=ROUTINE).to_dict() == {
         "identity": ROUTINE.to_dict(),
+        "label": "rate",
         "ddl": "",
         "invocation": "",
         # No source reported them: unknown, not "takes none" (747).
@@ -260,6 +262,9 @@ def test_two_overloads_are_two_identities() -> None:
     assert ROUTINE.name == other.name
     assert {ROUTINE, other} == {ROUTINE, other}
     assert len({ROUTINE, other}) == 2
+    # Display names may match; the objects retain their distinct overload identities.
+    assert DatabaseFunction(identity=ROUTINE).label == DatabaseFunction(identity=other).label == "rate"
+    assert DatabaseProcedure(identity=ROUTINE).label == DatabaseProcedure(identity=other).label == "rate"
 
 
 def test_a_schema_carries_all_four_collections() -> None:
