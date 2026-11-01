@@ -75,7 +75,8 @@ def test_build_ctx_for_app_loads_shared_installation_configs(
     assert ctx.app_name == "sample_app"
     assert ctx.name == "sample_app"
     assert ctx.paths.resolve("configs") == config_root.resolve()
-    assert ctx.apps[0].name == "sample_app"
+    assert not hasattr(ctx, "apps")
+    assert ctx.applications == ()  # Membership comes from Control, not this YAML fixture.
 
 
 @pytest.mark.parametrize("given, recorded", [

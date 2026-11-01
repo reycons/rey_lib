@@ -7,11 +7,11 @@ the registry, re-normalized whatever shape it found, and re-resolved dynamic
 choices on every call, against one application named in a branch.
 
 This is the construction that makes an application the same kind of thing. It
-runs once, at the end of the config load, and what it produces is what the tree,
+runs once in the common startup bootstrap, after Control is available, and what it produces is what the tree,
 the opening path and execution read.
 
-**Declaration in, object out.** ``ctx.apps`` is the declaration and is never
-written to. A parameter that declares where its choices come from has that
+**Database declaration in, object out.** The common bootstrap supplies the
+installation rows after Control is available; ctx carries application handles only. A parameter that declares where its choices come from has that
 declaration *consumed*: the object carries the resolved values and not the
 instruction that produced them, so nothing downstream can resolve a second time
 or resolve differently.
@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Mapping
 
+from rey_lib.config.config_namespace import Namespace
+from rey_lib.config.config_paths import _apply_path_resolver
 from rey_lib.config.operation_contract import check_contract, check_definition
 from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
 from rey_lib.errors.error_utils import ConfigError
@@ -508,6 +510,8 @@ class Application:
     #: meaning, as it owns every other setting sent to it. Empty when the
     #: application defines none.
     ai: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    #: Installation-scoped configuration owned by this application, not ctx.
+    settings: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     #: The presentation an application's settings require (#1150): what the
     #: Console's registry presents it with. Not :attr:`panel`, the retired
@@ -828,6 +832,7 @@ def configured_application(ctx: Any, name: str) -> Application:
 def build_applications(
     ctx: Any,
     registrations: dict[str, dict[str, Any]] | None = None,
+    *, declarations: Any = (),
 ) -> tuple[Application, ...]:
     """Return this installation's applications, resolved once.
 
@@ -835,8 +840,8 @@ def build_applications(
     declaration reading one of them is resolved here rather than later.
 
     Args:
-        ctx: The loaded context, carrying the ``apps`` declaration and the
-            collections a choice may be resolved from.
+        ctx: Bootstrap context carrying paths and choice-source collections.
+        declarations: Application declarations from the governed installation read.
         registrations: What the installed applications published. None
             discovers them from the environment.
 
@@ -844,15 +849,15 @@ def build_applications(
         One :class:`Application` per enabled declaration, in declared order.
 
     Raises:
-        ConfigError: If ``apps`` is not a canonical list, or a parameter names a
+        ConfigError: If declarations are not a canonical list, or a parameter names a
             choice source that does not exist.
     """
-    declared = getattr(ctx, "apps", None)
+    declared = declarations
     if declared is None:
         return ()
     if not isinstance(declared, (list, tuple)):
         raise ConfigError(
-            "Config section 'apps' must be a canonical list; "
+            "Application database declarations must be a canonical list; "
             f"found {type(declared).__name__}."
         )
     # Discovery answers before any Application is built, so a duplicate claim
@@ -864,10 +869,25 @@ def build_applications(
     if registrations is None:
         registrations = discover_registrations()
     return tuple(
-        _application(entry, ctx, registrations)
+        _application(_resolved_declaration(entry, ctx), ctx, registrations)
         for entry in (_plain(item) for item in declared)
         if isinstance(entry, dict) and entry.get("enabled", True)
     )
+
+
+def _resolved_declaration(entry: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    """Resolve only application paths/settings using the existing path owner."""
+    settings = entry.get("settings")
+    if settings is None:
+        settings = {}
+    if not isinstance(settings, Mapping):
+        from rey_lib.errors.error_utils import AppError
+        raise AppError(f"Application {entry.get('name')!r} settings must be a mapping.")
+    values = Namespace({"app_path": entry.get("app_path") or "", "settings": dict(settings)})
+    resolver = getattr(ctx, "paths", None)
+    if resolver is not None:
+        _apply_path_resolver(values, resolver)
+    return {**entry, "app_path": str(values.app_path), "settings": _plain(values.settings)}
 
 
 def _application(
@@ -985,6 +1005,7 @@ def _from_registration(
         # From the installation entry, as the log level is: which AI this
         # application is given here is this installation's setting (#1296).
         ai=_ai_setting(entry, name),
+        settings=dict(entry.get("settings") or {}),
         parameters=parameters,
         parameter_groups=_parameter_groups(cli, parameters, name),
         commands=_commands(cli, ctx, name),
@@ -1139,6 +1160,7 @@ def _from_declaration(
         icon=str(entry.get("icon") or ""),
         log_level=str(entry.get("log_level") or ""),
         ai=_ai_setting(entry, name),
+        settings=dict(entry.get("settings") or {}),
         parameters=tuple(
             _parameter(one, ctx, name)
             for one in (_plain(item) for item in (cli.get("parameters") or []))

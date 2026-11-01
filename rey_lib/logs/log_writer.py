@@ -361,10 +361,14 @@ def _resolve_jsonl_path(ctx: Any, operation: str) -> Path:
     from rey_lib.logs.app_logger import _resolve_log_path
 
     timestamp = ctx.run_timestamp
-    if getattr(ctx, "jsonl_path", None):
-        return _resolve_log_path(ctx.jsonl_path, ctx, operation, timestamp)
-    if getattr(ctx, "log_path", None):
-        return _resolve_log_path(ctx.log_path, ctx, operation, timestamp).with_suffix(".jsonl")
+    application = getattr(ctx, "application", None)
+    settings = getattr(application, "settings", {})
+    jsonl_path = settings.get("jsonl_path") or getattr(ctx, "jsonl_path", None)
+    log_path = getattr(ctx, "log_path", None) or settings.get("log_path")
+    if jsonl_path:
+        return _resolve_log_path(jsonl_path, ctx, operation, timestamp)
+    if log_path:
+        return _resolve_log_path(log_path, ctx, operation, timestamp).with_suffix(".jsonl")
     app_name = getattr(ctx, "app_name", None) or getattr(ctx, "name", None) or "app"
     template = f"~/logs/{app_name}/{app_name}.{{operation}}.{{timestamp}}.jsonl"
     return _resolve_log_path(template, ctx, operation, timestamp)

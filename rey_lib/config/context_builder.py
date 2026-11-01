@@ -12,8 +12,10 @@ nothing noticed, because nothing compared the two builders.
 
 The sequence owned here, in order:
 
-    normalize raw state -> wrap as Namespace -> PathResolver -> applications
-    -> identity and logging defaults -> provenance -> completed context
+    normalize raw state -> wrap as Namespace -> PathResolver
+    -> identity and logging defaults -> provenance -> bootstrap-ready context
+
+The common process bootstrap then reads governed application configuration.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from rey_lib.config.applications import build_applications, with_choice_collections
+from rey_lib.config.applications import with_choice_collections
 from rey_lib.config.config_loader import _merge_compatible_collection
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_paths import (
@@ -86,7 +88,7 @@ class ContextBuilder:
 
         Returns:
             The fully populated ``Namespace``, carrying a resolved ``paths``
-            resolver, built ``applications``, its identity and its provenance.
+            resolver, its identity and provenance; bootstrap supplies application objects.
 
         Raises:
             ConfigError: If the configuration state is not assemblable -- an
@@ -98,16 +100,15 @@ class ContextBuilder:
         # EVERY CHOICE-SOURCE COLLECTION PRESENT, empty where this installation
         # declares none (backlog 293): absence then means a build-order fault.
         raw = with_choice_collections(raw)
+        raw.pop("apps", None)
         ctx = Namespace(raw)
 
         self._resolve_paths_onto(ctx)
         self._install_identity_onto(ctx)
 
-        # Applications last of the collections: a parameter may resolve its
-        # choices from tools, connections or data sources, and those are on ctx
-        # by now. Built here rather than read later so the resolution happens once
-        # -- the declaration under `apps` is the input and is never written to.
-        object.__setattr__(ctx, "applications", build_applications(ctx))
+        # Database application configuration is loaded by the shared bootstrap,
+        # after Control has settled installation identity. No YAML application state.
+        object.__setattr__(ctx, "applications", None)
 
         object.__setattr__(ctx, "config_path", str(self._config_path))
         if self._app_name:

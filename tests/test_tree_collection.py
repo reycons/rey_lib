@@ -201,7 +201,7 @@ def _application(name: str) -> Any:
     declared = [{"name": name, "app_path": f"/apps/{name}", "entry_point": "main.py",
                  "cli": {}}]
     return build_applications(
-        SimpleNamespace(apps=declared), registrations=_published(declared)
+        SimpleNamespace(apps=declared), registrations=_published(declared), declarations=getattr((SimpleNamespace(apps=declared)), "apps", ())
     )[0]
 
 
@@ -236,7 +236,7 @@ class TestTheTreeProjects:
                      "cli": {}}]
         published = {**_published(declared)["alpha"], "node_type": "ai_application"}
         alpha = build_applications(SimpleNamespace(apps=declared),
-                                   registrations={"alpha": published})[0]
+                                   registrations={"alpha": published}, declarations=getattr((SimpleNamespace(apps=declared)), "apps", ()))[0]
 
         rows = collection.configured_applications(SimpleNamespace(
             applications=(alpha, _application("beta")), installation=_LOCAL,

@@ -1,11 +1,12 @@
 """
 Context assembly and effective-config construction for rey_lib.
 
-Builds ctx from an installation ``config.yaml``: include-folder resolution,
+Builds bootstrap context from installation YAML: include-folder resolution,
 ordered deep-merge, compatibility aliases, env-reference and env-block
 injection, path resolution, provenance recording, and secret injection. Split
 out of ``config_utils`` (SGC_Rey_Lib_Config_Utils_Responsibility_Split); loading
-order, merge precedence, token resolution, and ctx shape are unchanged.
+order, merge precedence and token resolution remain here. Application configuration
+is hydrated from the database by the common runtime bootstrap.
 """
 
 from __future__ import annotations

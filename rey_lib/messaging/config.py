@@ -20,8 +20,11 @@ __all__ = [
 
 
 def messaging_config(ctx: Any) -> Any:
-    """Return ``ctx.messaging`` when configured, otherwise an empty object."""
-    return getattr(ctx, "messaging", None)
+    """Read the messaging application's own startup-loaded configuration."""
+    from rey_lib.config.applications import configured_application
+    from rey_lib.config.config_namespace import Namespace
+    settings = configured_application(ctx, "rey_messaging").settings
+    return Namespace(dict(settings.get("messaging") or {}))
 
 
 def message_archive_path(ctx: Any) -> Path | None:

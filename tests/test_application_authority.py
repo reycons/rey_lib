@@ -39,11 +39,11 @@ class TestBothHalvesAreRequired:
     def test_a_declared_python_app_with_no_registration_is_refused(self) -> None:
         """Configuration cannot invent an application the environment lacks."""
         with pytest.raises(ConfigError, match="no installed distribution"):
-            build_applications(ctx([declared()]), registrations={})
+            build_applications(ctx([declared()]), registrations={}, declarations=getattr((ctx([declared()])), "apps", ()))
 
     def test_a_registered_app_the_installation_omits_never_appears(self) -> None:
         """A shared venv serves several installations; discovery is not membership."""
-        built = build_applications(ctx([]), registrations=registered())
+        built = build_applications(ctx([]), registrations=registered(), declarations=getattr((ctx([])), "apps", ()))
 
         assert built == ()
 
@@ -52,7 +52,7 @@ class TestBothHalvesAreRequired:
         with pytest.raises(ConfigError, match="no installed distribution"):
             build_applications(
                 ctx([{"name": "rey_lib", "app_path": "/apps/rey_lib"}]),
-                registrations={},
+                registrations={}, declarations=getattr((ctx([{"name": "rey_lib", "app_path": "/apps/rey_lib"}])), "apps", ()),
             )
 
 
@@ -63,7 +63,7 @@ class TestWhatItIsCalled:
         # An installation that has said what it calls an application there
         # keeps saying it: this is what it calls its own copy.
         built = build_applications(
-            ctx([declared(label="Feeds")]), registrations=registered(label="Loader"),
+            ctx([declared(label="Feeds")]), registrations=registered(label="Loader"), declarations=getattr((ctx([declared(label="Feeds")])), "apps", ()),
         )
 
         assert built[0].label == "Feeds"
@@ -72,14 +72,14 @@ class TestWhatItIsCalled:
         # What an application is called is its own fact, published beside its
         # icon and its CLI.
         built = build_applications(
-            ctx([declared()]), registrations=registered(label="Loader"),
+            ctx([declared()]), registrations=registered(label="Loader"), declarations=getattr((ctx([declared()])), "apps", ()),
         )
 
         assert built[0].label == "Loader"
 
     def test_the_identifier_stands_in_when_neither_said_anything(self) -> None:
         # And then it reads like an identifier, which is what it is.
-        built = build_applications(ctx([declared()]), registrations=registered())
+        built = build_applications(ctx([declared()]), registrations=registered(), declarations=getattr((ctx([declared()])), "apps", ()))
 
         assert built[0].label == "loader"
 
@@ -91,7 +91,7 @@ class TestIdentity:
         with pytest.raises(ConfigError, match="registered under the name"):
             build_applications(
                 ctx([declared()]),
-                registrations={"loader": {"name": "something_else"}},
+                registrations={"loader": {"name": "something_else"}}, declarations=getattr((ctx([declared()])), "apps", ()),
             )
 
     def test_two_registrations_claiming_one_name_are_refused(
@@ -124,7 +124,7 @@ class TestIdentity:
             lambda *args: built.append(args),
         )
         with pytest.raises(ConfigError):
-            build_applications(ctx([declared()]))
+            build_applications(ctx([declared()]), declarations=getattr((ctx([declared()])), "apps", ()))
 
         assert built == []
 
@@ -135,7 +135,7 @@ class TestCapabilityHasOneSource:
     def test_commands_come_from_the_registration(self) -> None:
         built = build_applications(
             ctx([declared()]),
-            registrations=registered(cli={"commands": [{"name": "index"}]}),
+            registrations=registered(cli={"commands": [{"name": "index"}]}), declarations=getattr((ctx([declared()])), "apps", ()),
         )
 
         assert [one.name for one in built[0].commands] == ["index"]
@@ -146,7 +146,7 @@ class TestCapabilityHasOneSource:
             # The declaration still carries the old published surface. It is
             # legacy data: not merged, not a fallback, not an override.
             ctx([declared(cli={"commands": [{"name": "retired"}]})]),
-            registrations=registered(cli={"commands": [{"name": "index"}]}),
+            registrations=registered(cli={"commands": [{"name": "index"}]}), declarations=getattr((ctx([declared(cli={"commands": [{"name": "retired"}]})])), "apps", ()),
         )
 
         assert [one.name for one in built[0].commands] == ["index"]
@@ -154,14 +154,14 @@ class TestCapabilityHasOneSource:
     def test_a_declaration_alone_publishes_nothing(self) -> None:
         built = build_applications(
             ctx([declared(cli={"commands": [{"name": "retired"}]})]),
-            registrations=registered(),
+            registrations=registered(), declarations=getattr((ctx([declared(cli={"commands": [{"name": "retired"}]})])), "apps", ()),
         )
 
         assert built[0].commands == ()
 
     def test_workflow_operations_are_empty_until_published(self) -> None:
         """An application that has approved nothing has not approved everything."""
-        built = build_applications(ctx([declared()]), registrations=registered())
+        built = build_applications(ctx([declared()]), registrations=registered(), declarations=getattr((ctx([declared()])), "apps", ()))
 
         assert built[0].workflow_operations == ()
 
@@ -178,7 +178,7 @@ class TestCapabilityHasOneSource:
             registrations=registered(workflow_operations=[
                 {"name": "index", "contract_definition": definition,
                  "contract_sample": {"connection": ""}},
-            ]),
+            ]), declarations=getattr((ctx([declared()])), "apps", ()),
         )
 
         operation = built[0].workflow_operations[0]
@@ -192,20 +192,20 @@ class TestInstallationOwnedFields:
     def test_app_path_is_required_and_never_reconstructed(self) -> None:
         with pytest.raises(ConfigError, match="declares no 'app_path'"):
             build_applications(
-                ctx([{"name": "loader"}]), registrations=registered()
+                ctx([{"name": "loader"}]), registrations=registered(), declarations=getattr((ctx([{"name": "loader"}])), "apps", ())
             )
 
     def test_app_path_comes_from_the_declaration(self) -> None:
         built = build_applications(
             ctx([declared(app_path="/installation/owned")]),
-            registrations=registered(),
+            registrations=registered(), declarations=getattr((ctx([declared(app_path="/installation/owned")])), "apps", ()),
         )
 
         assert built[0].app_path == "/installation/owned"
 
     def test_enabled_is_the_installations_answer(self) -> None:
         built = build_applications(
-            ctx([declared(enabled=False)]), registrations=registered()
+            ctx([declared(enabled=False)]), registrations=registered(), declarations=getattr((ctx([declared(enabled=False)])), "apps", ())
         )
 
         assert built == ()
@@ -220,7 +220,10 @@ class TestExternalApplications:
                 "name": "db_backup", "type": "shell", "app_path": "/scripts",
                 "cli": {"commands": [{"name": "run"}]},
             }]),
-            registrations={},
+            registrations={}, declarations=getattr((ctx([{
+                "name": "db_backup", "type": "shell", "app_path": "/scripts",
+                "cli": {"commands": [{"name": "run"}]},
+            }])), "apps", ()),
         )
 
         assert built[0].name == "db_backup"
@@ -231,5 +234,5 @@ class TestExternalApplications:
         """Claiming another type would route a Python app around discovery."""
         with pytest.raises(ConfigError, match="declared as 'shell'"):
             build_applications(
-                ctx([declared(type="shell")]), registrations=registered()
+                ctx([declared(type="shell")]), registrations=registered(), declarations=getattr((ctx([declared(type="shell")])), "apps", ())
             )

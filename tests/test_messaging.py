@@ -18,7 +18,7 @@ from rey_lib.messaging.repository import FileMessageRepository
 
 
 def _ctx(tmp_path: Path) -> Namespace:
-    return Namespace(
+    settings = Namespace(
         {
             "messaging": {
                 "archive_path": tmp_path / "messages" / "archive.jsonl",
@@ -77,6 +77,10 @@ def _ctx(tmp_path: Path) -> Namespace:
             }
         }
     )
+
+    from rey_lib.config.applications import Application
+    from rey_lib.config.inventory import to_plain_data
+    return Namespace({"applications": [Application(name="rey_messaging", settings=to_plain_data(settings))]})
 
 
 def test_email_dry_run_lifecycle_writes_archive(tmp_path: Path) -> None:

@@ -14,7 +14,8 @@ def approval_required(ctx: Any, request: MessageRequest) -> bool:
     if request.approval_required is not None:
         return bool(request.approval_required)
 
-    cfg = getattr(ctx, "messaging", None)
+    from rey_lib.messaging.config import messaging_config
+    cfg = messaging_config(ctx)
     approvals = getattr(cfg, "approvals", None) if cfg else None
     if not approvals:
         return False

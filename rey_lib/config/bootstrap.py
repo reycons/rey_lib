@@ -1,15 +1,17 @@
 """
 Shared startup bootstrap for Rey process entry points.
 
-The bootstrap owns context acquisition and logging initialization, and every
-Rey process goes through it. The only variation is whether the bootstrap
+The bootstrap owns context acquisition, governed application configuration
+loading and logging initialization, and every Rey process goes through it. The only variation is whether the bootstrap
 receives an existing context or builds one itself. Logging is never owned by the
 application entry point.
 
     process entry point
         -> bootstrap
         -> ctx supplied?  yes: use it   no: load and resolve configuration
-        -> initialize logging from ctx
+        -> shared Control and installation identity
+        -> database application configuration on Application objects
+        -> initialize logging from the application and execution context
         -> return ctx
         -> application logic
 
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
+from rey_lib.config.applications import build_applications
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import (
     AppLogger, classified, finalize_run_phases,
@@ -78,7 +81,7 @@ def build_ctx_for_app(
     parent_run_id: Optional[int] = None,
     settings: Optional[dict] = None,
 ) -> Namespace:
-    """Start a Rey process: acquire the context, then start logging from it.
+    """Start a Rey process: acquire context, hydrate application configuration, log.
 
     Either supply a context that is already resolved, or supply the path to
     resolve one from. Whichever way the context arrives, logging is initialized
@@ -154,16 +157,13 @@ def build_ctx_for_app(
     # run_id already set and does not start a second run.
     started_here = None
     if not getattr(ctx, "run_id", None):
-        # What the batch is called. Read off the context by Control, because
-        # `operation` is a parameter here and Control is built from the context
-        # alone -- without this the batch takes the app's name and the run's
-        # purpose is lost from the record.
         ctx.operation = operation
-        # Building it starts its batch. The batch is not started here: it was
-        # once, as a second call after this line, and a setting vetoed it
-        # silently and left a Control whose batch_id was None until a workflow
-        # step hit the NOT NULL on control.batch_step.
+    # New runs, adopted runs and already-open page runtimes use one Control
+    # and the same application configuration load before logging starts.
+    if getattr(ctx, "shared_control", None) is None:
         ctx.shared_control = _open_control(ctx)
+    _load_application_configuration(ctx)
+    if not getattr(ctx, "run_id", None):
         # The installation this process runs under, recorded with the run. The
         # bootstrap is its authority: a caller's own "installation" is replaced.
         installation = getattr(ctx, "installation", None)
@@ -181,12 +181,6 @@ def build_ctx_for_app(
         )
         ctx.run_id = ctx.run.run_id
         started_here = ctx.run
-    elif getattr(ctx, "shared_control", None) is None:
-        # A process that adopted its run still writes governed records under it.
-        # Control was opened only when a run was started, so an adopting child
-        # inherited the identity and no way to reach the database -- every
-        # manifest write refused with "this context exposes no shared Control".
-        ctx.shared_control = _open_control(ctx)
 
     # A run started here is this function's until the context is handed on: what
     # fails before then ends it, rather than leaving it RUNNING with nobody left
@@ -246,8 +240,8 @@ DEFAULT_LOG_LEVEL = "ERROR"
 def _application_level(ctx: Namespace) -> Optional[str]:
     """The level the running application declares for itself, or None.
 
-    Read from ``ctx.applications`` -- the canonical collection built once at the
-    end of the config load -- by ``ctx.app_name``. Nothing here re-reads the
+    Read from ``ctx.applications`` -- the canonical collection built once by the
+    database configuration bootstrap -- by ``ctx.app_name``. Nothing here re-reads the
     installation's declaration: a second reader of application configuration is
     a second answer waiting to disagree with the first.
 
@@ -389,6 +383,24 @@ def _open_control(ctx: Namespace) -> Any:
     return control
 
 
+def _load_application_configuration(ctx: Namespace) -> None:
+    """The common startup read: application objects own the database settings."""
+    if getattr(ctx, "applications", None) is not None:
+        return
+    installation = getattr(ctx, "installation", None)
+    if installation is None:
+        object.__setattr__(ctx, "applications", ())
+        return
+    if installation.installation_id is None:
+        raise AppError("Application configuration requires the resolved installation ID.")
+    rows = ctx.shared_control.get_application_installations(installation.installation_id)
+    declarations = [{**row, "name": row["application"], "enabled": row["is_enabled"]}
+                    for row in rows]
+    object.__setattr__(ctx, "applications", build_applications(ctx, declarations=declarations))
+    object.__setattr__(ctx, "application", next(
+        (app for app in ctx.applications if app.name == getattr(ctx, "app_name", "")), None))
+
+
 def open_shared_control(ctx: Namespace) -> Namespace:
     """Make a resolved context into a runtime by giving it its one Control.
 
@@ -429,6 +441,10 @@ def open_shared_control(ctx: Namespace) -> Namespace:
         When control is configured and one could not be built.
     """
     if getattr(ctx, "shared_control", None) is not None:
+        # ContextBuilder marks an application collection awaiting startup as None.
+        # A domain-only context borrowing Control is not another app startup.
+        if getattr(ctx, "applications", ()) is None:
+            _load_application_configuration(ctx)
         return ctx
     # The same test Control makes before it does anything: no named routine
     # contract means this installation has not asked for a control database.
@@ -436,6 +452,7 @@ def open_shared_control(ctx: Namespace) -> Namespace:
         ctx.shared_control = None
         return ctx
     ctx.shared_control = _open_control(ctx)
+    _load_application_configuration(ctx)
     return ctx
 
 

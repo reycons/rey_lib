@@ -403,7 +403,15 @@ def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
             self.batch_step_id = 10
             return self.batch_id
 
-    monkeypatch.setattr(bootstrap, "_open_control", lambda ctx: _ResolvingControl())
+    def _open_recording_control(ctx):
+        installation = getattr(ctx, "installation", None)
+        if installation is not None and installation.installation_id is None:
+            installation.attach_installation_id(1)
+        control = _ResolvingControl()
+        control.get_application_installations = lambda installation_id, application=None: []
+        return control
+
+    monkeypatch.setattr(bootstrap, "_open_control", _open_recording_control)
     monkeypatch.setattr(bootstrap.Run, "start", staticmethod(_start))
 
 

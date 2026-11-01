@@ -35,7 +35,7 @@ def _built(*capabilities: dict[str, Any]) -> Any:
     registrations = {"data_engine": {"name": "data_engine",
                                        "capabilities": list(capabilities)}}
     ctx = SimpleNamespace(apps=[{"name": "data_engine", "app_path": "/apps/data_engine"}])
-    return build_applications(ctx, registrations=registrations)[0]
+    return build_applications(ctx, registrations=registrations, declarations=getattr((ctx), "apps", ()))[0]
 
 
 def test_capabilities_are_empty_until_published() -> None:

@@ -220,8 +220,10 @@ class AppLogger:
         # readable_enabled=true. When log_path is configured it is still resolved so the
         # JSONL log is written beside it, but the text handler is added only when opted in.
         resolved_log: Path | None = None
-        if getattr(ctx, "log_path", None):
-            resolved_log = _resolve_log_path(ctx.log_path, ctx, operation, timestamp)
+        application_settings = getattr(getattr(ctx, "application", None), "settings", {})
+        log_path = getattr(ctx, "log_path", None) or application_settings.get("log_path")
+        if log_path:
+            resolved_log = _resolve_log_path(log_path, ctx, operation, timestamp)
             if _log_bool(ctx, "readable_enabled", False):
                 file_handler = _TextFileHandler(resolved_log)
                 file_handler.setLevel(level)
@@ -243,7 +245,7 @@ class AppLogger:
                                 or getattr(ctx, "name", "") or ""),
             context       = {"run_started_at": getattr(ctx, "run_started_at", "")},
             ctx           = ctx,
-            ctx_fields    = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
+            ctx_fields    = tuple(application_settings.get("jsonl_ctx_fields") or getattr(ctx, "jsonl_ctx_fields", ())),
         )
         output_handler = JsonlHandler(builder, writer)
         output_handler.setLevel(level)

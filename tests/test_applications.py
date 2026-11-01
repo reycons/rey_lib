@@ -62,7 +62,7 @@ def build(apps: Any, **collections: Any) -> tuple[Application, ...]:
         for entry in entries
         if isinstance(entry, dict) and entry.get("name")
     }
-    return build_applications(ctx(apps, **collections), registrations=registrations)
+    return build_applications(ctx(apps, **collections), registrations=registrations, declarations=getattr((ctx(apps, **collections)), "apps", ()))
 
 
 class TestConstruction:
@@ -108,7 +108,7 @@ class TestConstruction:
             build({"loader": declaration()})
 
     def test_an_absent_collection_is_not_an_error(self) -> None:
-        assert build_applications(SimpleNamespace()) == ()
+        assert build_applications(SimpleNamespace(), declarations=getattr((SimpleNamespace()), "apps", ())) == ()
 
     def test_the_approved_implementations_are_the_registrations(self) -> None:
         def handler(*_args: Any) -> None:
@@ -119,7 +119,7 @@ class TestConstruction:
             "name": "loader", "cli": {}, "approved_implementations": {"load": handler},
         }}
 
-        built = build_applications(ctx(apps), registrations=registrations)
+        built = build_applications(ctx(apps), registrations=registrations, declarations=getattr((ctx(apps)), "apps", ()))
 
         assert built[0].approved_implementations == {"load": handler}
 
