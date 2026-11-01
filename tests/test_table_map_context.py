@@ -167,6 +167,7 @@ def test_right_click_on_code_returns_the_existing_configured_file_opening(monkey
         "identity": {"repository_key": "rey_lib", "relative_path": "rey_lib/db/database_query.py"}})
     held, _ = _index(monkeypatch, rows)
     held.double_click("table:run")
+    assert next(n for n in held.projection()["nodes"] if n["id"] == "symbol:4")["role"] == "file"
     assert held.context_click("symbol:4") == {"identity": {
         "kind": "configured_file", "root": "{apps}",
         "relative_path": "rey_lib/rey_lib/db/database_query.py"}}

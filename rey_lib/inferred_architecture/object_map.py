@@ -111,6 +111,7 @@ class ObjectMap:
         self._database_provider = ""
         self._table_context: dict[str, Any] | None = None
         self._context_path: list[dict[str, Any]] = []
+        self._edge_inspection: dict[str, Any] | None = None
 
     # -- opening ---------------------------------------------------------------
 
@@ -126,8 +127,10 @@ class ObjectMap:
         handle = connection.handle()
         read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
                 for name in _OBJECT_READS}
-        return cls({"kind": "inferred_architecture", "installation": installation},
+        held = cls({"kind": "inferred_architecture", "installation": installation},
                    OBJECT_PROJECTION, read)
+        held._index_connection = connection
+        return held
 
     @classmethod
     def for_schema(cls, connection: Any, catalog: str, schema: str, *,
@@ -199,6 +202,7 @@ class ObjectMap:
                 self._context_path = []
             self._focus = {"opened": opened, **({"table": table} if table else {}),
                            **({"node": node} if node else {})}
+            self._edge_inspection = None
             return
         level = str(focus.get("level") or "")
         if level == "estate":
@@ -211,6 +215,29 @@ class ObjectMap:
                            "area_id": int(area_id) if area_id is not None else None}
         else:
             raise ConfigError(f"The map has no screen {focus!r}.")
+        if level == "estate":
+            self._context_path = []
+        elif level == "area":
+            area = self._area(self._focus["area_id"]) or {}
+            self._context_path = [{"value": f"area:{self._focus['area_id']}",
+                                   "label": area.get("area_label", ""), "focus": dict(self._focus)}]
+        else:
+            area_id = self._focus.get("area_id")
+            area_value = f"area:{area_id}"
+            if area_id is not None and not any(s["value"] == area_value for s in self._context_path):
+                area = self._area(area_id) or {}
+                self._context_path = [{"value": area_value, "label": area.get("area_label", ""),
+                                       "focus": {"level": "area", "area_id": area_id}}]
+            elif area_id is None and any(s["focus"].get("level") == "area" for s in self._context_path):
+                self._context_path = []
+            claim = self._claim(self._focus["claim_id"]) or {}
+            value = f"object:{self._focus['claim_id']}"
+            at = next((i for i, s in enumerate(self._context_path) if s["value"] == value),
+                      len(self._context_path))
+            self._context_path = self._context_path[:at] + [{
+                "value": value, "label": claim.get("owner_qualified_name") or claim.get("object_key", ""),
+                "focus": dict(self._focus)}]
+        self._edge_inspection = None
 
     def click(self, node_id: str | None) -> None:
         """Select (#1099): the node becomes the selection; the projection
@@ -224,11 +251,13 @@ class ObjectMap:
         """
         if not node_id:
             self._selected = None
+            self._edge_inspection = None
             return
         node_id = str(node_id)
-        if not self._holds[self.projection_kind](node_id):
+        if not self._holds[self.projection_kind](node_id) and not any(e["id"] == node_id for e, _ in self._scope()[1]):
             raise ConfigError(f"The map has no node {node_id!r}.")
         self._selected = node_id
+        self._edge_inspection = None
 
     def context_click(self, node_id: str) -> dict[str, Any] | None:
         """Open (#1099, #1218): a right-click on a claim opens the subject it represents.
@@ -249,6 +278,23 @@ class ObjectMap:
                 no owner file.
         """
         node_id = str(node_id or "")
+        if self.projection_kind == SCHEMA_PROJECTION and any(
+                edge["id"] == node_id for edge, _ in self._scope()[1]):
+            self.click(node_id)
+            return
+        edge = self._mapped_edge(node_id)
+        if edge is not None:
+            rows = (self._edge_inspection["evidence"] if self._edge_inspection is not None
+                    and self._edge_inspection["id"] == node_id else self._read_edge_evidence(edge[1]))
+            files = {(r["repository_key"], r["relative_path"]) for r in rows
+                     if r.get("repository_key") and r.get("relative_path")}
+            if not files:
+                raise AppError("This relationship has no indexed source file to open.")
+            if len(files) != 1:
+                raise AppError(f"This relationship has {len(files)} source files; inspect its indexed evidence.")
+            repository, path = next(iter(files))
+            return {"identity": {"kind": _CLAIM_FILE_KIND, "root": _CLAIM_FILE_ROOT,
+                                 "relative_path": f"{repository}/{path}"}}
         if not self._holds[self.projection_kind](node_id):
             raise ConfigError(f"The map has no node {node_id!r}.")
         if self.projection_kind == SCHEMA_PROJECTION:
@@ -283,10 +329,49 @@ class ObjectMap:
     def double_click(self, node_id: str) -> None:
         """Drill into the selected object's map context, for either projection."""
         node_id = str(node_id or "")
+        if self.projection_kind == SCHEMA_PROJECTION and any(
+                edge["id"] == node_id for edge, _ in self._scope()[1]):
+            self.click(node_id)
+            return
+        edge = self._mapped_edge(node_id)
+        if edge is not None:
+            evidence = self._read_edge_evidence(edge[1])
+            self._edge_inspection = {"id": node_id, "evidence": evidence}
+            self._selected = node_id
+            return
         if not self._holds[self.projection_kind](node_id):
             raise ConfigError(f"The map has no node {node_id!r}.")
         self._drill[self.projection_kind](node_id)
         self._selected = None
+        self._edge_inspection = None
+
+    def _mapped_edge(self, edge_id: str) -> _Mapped | None:
+        """A visible code-map relationship and its existing index row."""
+        if self.projection_kind != OBJECT_PROJECTION:
+            return None
+        return next((pair for pair in self._scope()[1] if pair[0]["id"] == edge_id), None)
+
+    def _read_edge_evidence(self, row: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Read supporting call sites through the existing canonical-region view."""
+        if row is None or self._index_connection is None:
+            raise AppError("This map has no configured index connection for relationship evidence.")
+        if "canonical_object_id" in row:
+            sources = [row["canonical_object_id"]]
+            targets = [row["linked_canonical_object_id"]]
+        else:
+            sources = sorted({p["canonical_object_id"] for p in self._read.get("placements", [])
+                              if p["inferred_architecture_area_id"] == row["from_area_id"]})
+            targets = sorted({p["canonical_object_id"] for p in self._read.get("placements", [])
+                              if p["inferred_architecture_area_id"] == row["to_area_id"]})
+        if not sources or not targets:
+            return []
+        statement = _statement("edge_evidence")
+        params = {}
+        for name, values in (("sources", sources), ("targets", targets)):
+            bindings = {f"{name}_{i}": value for i, value in enumerate(values)}
+            statement = statement.replace(f":{name}", ", ".join(f":{key}" for key in bindings))
+            params.update(bindings)
+        return [dict(r) for r in DatabaseQuery(statement, params).rows(self._index_connection.handle())]
 
     def projection(self) -> dict[str, Any]:
         """The focused screen: nodes, edges, the path back, the details, and the
@@ -322,7 +407,8 @@ class ObjectMap:
             "map": self.projection_kind,
             "focus": dict(self._focus),
             "path": [{"value": step["value"], "label": step["label"]} for step in self._path()],
-            "selected": self._selection_in({element["id"] for element in held}),
+            "selected": self._selection_in({element["id"] for element in held}
+                                           | {edge["id"] for edge, _ in relations}),
             "elements": held,
             "relations": [dict(relation) for relation, _ in relations],
         }
@@ -339,7 +425,15 @@ class ObjectMap:
         ``second`` what those link to next -- empty when nothing on this screen
         is selected.
         """
-        selected = self._selection_in({node["id"] for node in nodes})
+        selected = self._selection_in({node["id"] for node in nodes} | {edge["id"] for edge in edges})
+        chosen_edge = next((edge for edge in edges if edge["id"] == selected), None)
+        if chosen_edge is not None:
+            endpoints = {chosen_edge["source"], chosen_edge["target"]}
+            for node in nodes:
+                node["highlight"] = ["first"] if node["id"] in endpoints else []
+            for edge in edges:
+                edge["highlight"] = ["focus", "first"] if edge["id"] == selected else []
+            return selected
         near: dict[str, set[str]] = {}
         for edge in edges:
             near.setdefault(edge["source"], set()).add(edge["target"])
@@ -543,7 +637,7 @@ class ObjectMap:
     def _path(self) -> list[dict[str, Any]]:
         """The path to the focused screen, Estate first; each step names its focus.
 
-        A schema map's path is its one step, the schema itself.
+        Each map retains the traversed objects after its root.
         """
         if self.projection_kind == SCHEMA_PROJECTION:
             steps = [{"value": "schema", "label": self.subject["schema"],
@@ -552,21 +646,31 @@ class ObjectMap:
                           "opened": list(self._focus.get("opened") or [])}}
                          for step in self._context_path)
             return steps
-        steps = [{"value": "estate", "label": "Estate", "focus": {"level": "estate"}}]
-        area_id = self._focus.get("area_id")
-        if area_id is not None:
-            area = self._area(area_id) or {}
-            steps.append({"value": f"area:{area_id}", "label": area.get("area_label", ""),
-                          "focus": {"level": "area", "area_id": area_id}})
-        if self._focus.get("level") == "object":
-            claim = self._claim(self._focus["claim_id"]) or {}
-            steps.append({"value": f"object:{self._focus['claim_id']}",
-                          "label": claim.get("owner_qualified_name") or claim.get("object_key", ""),
-                          "focus": dict(self._focus)})
-        return steps
+        return [{"value": "estate", "label": "Estate", "focus": {"level": "estate"}},
+                *self._context_path]
 
     def _details(self) -> dict[str, Any] | None:
         """The focused claim's details, as its own row states them."""
+        edge = self._mapped_edge(self._selected or "")
+        if edge is not None:
+            element, row = edge
+            names = {n["id"]: n.get("label", n["id"]) for n, _ in self._scope()[0]}
+            details = [["Relationship", element["kind"]],
+                       ["Source", (row or {}).get("object_key") or names.get(element["source"])],
+                       ["Target", (row or {}).get("linked_object_key") or names.get(element["target"])]]
+            inspection = self._edge_inspection
+            if inspection is None or inspection["id"] != element["id"]:
+                return {"rows": details, "hint": "Double-click for indexed call/reference evidence."}
+            evidence = inspection["evidence"]
+            if not evidence:
+                details.append(["Evidence", "No indexed call/reference locations are available."])
+            for index, site in enumerate(evidence, 1):
+                location = f"{site['repository_key']}/{site['relative_path']}"
+                if site.get("source_line", 0) > 0:
+                    location += f":{site['source_line']}"
+                details.append([f"Evidence {index}",
+                                f"{site['edge_kind']}: {site['source_identity']} → {site['target_identity']}\n{location}"])
+            return {"rows": details}
         if self._focus.get("level") != "object":
             return None
         claim = self._claim(self._focus["claim_id"])
@@ -627,6 +731,8 @@ class ObjectMap:
         for node in nodes:
             if (node.get("identity") or {}).get("object_type"):
                 node["label"] = IndexedDatabaseObject(**node["identity"]).label
+            elif (node.get("identity") or {}).get("relative_path"):
+                node["role"] = "file"
             if node["id"] == root:
                 node.update(id=root_id)
                 if table is not None and alias is None:
@@ -694,4 +800,18 @@ class ObjectMap:
         edges = [{**relation, **({"columns": list(key["columns"]),
                   "referenced_columns": list(key["referenced_columns"])} if key else {})}
                  for relation, key in relations]
-        return {"nodes": nodes, "edges": edges, "path": self._path(), "details": None}
+        details = None
+        selected_edge = next(((edge, key) for edge, key in relations
+                              if edge["id"] == self._selected), None)
+        if selected_edge is not None:
+            edge, key = selected_edge
+            names = {node["id"]: node.get("label", node["id"]) for node in nodes}
+            rows = [["Relationship", edge["kind"]],
+                    ["Source", names.get(edge["source"], edge["source"])],
+                    ["Target", names.get(edge["target"], edge["target"])]]
+            if key and edge["kind"] == "foreign_key":
+                rows.extend([["Constraint", key.get("name", "")],
+                             ["Columns", ", ".join(key.get("columns", []))],
+                             ["Referenced columns", ", ".join(key.get("referenced_columns", []))]])
+            details = {"rows": rows}
+        return {"nodes": nodes, "edges": edges, "path": self._path(), "details": details}

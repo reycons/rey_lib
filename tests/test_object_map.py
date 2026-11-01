@@ -133,6 +133,20 @@ def test_the_map_opens_on_the_estate() -> None:
     assert projected["details"] is None
 
 
+def test_object_path_retains_the_visited_objects_and_can_retrace_to_root() -> None:
+    held = _architecture()
+    held.double_click("area:10")
+    held.double_click("claim:1")
+    alpha = held.projection()["path"][-1]["focus"]
+    held.double_click("claim:2")
+    assert [s["value"] for s in held.projection()["path"]] == [
+        "estate", "area:10", "object:1", "object:2"]
+    held.focus(**alpha)
+    assert [s["value"] for s in held.projection()["path"]] == ["estate", "area:10", "object:1"]
+    held.focus(**held.projection()["path"][0]["focus"])
+    assert [s["value"] for s in held.projection()["path"]] == ["estate"]
+
+
 def test_double_clicking_an_area_drills_into_its_claims_and_their_links() -> None:
     held = _architecture()
 
