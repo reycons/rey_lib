@@ -28,6 +28,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping
 
+from rey_lib.errors.error_utils import AppError
 from rey_lib.content import Content
 from rey_lib.files import primitive_file_io
 from rey_lib.files.file_utils import bounded_text_preview
@@ -233,6 +234,10 @@ class File:
         # The format ``for_path`` resolved this file as; None when it was
         # constructed directly, and then ``format`` resolves it the same way.
         self._format: str | None = None
+        self._editing = False
+        self._working_text: str | None = None
+        self._original_bytes: bytes | None = None
+        self._editing_limit = 0
 
     # -- what kind of file ------------------------------------------------------
 
@@ -445,6 +450,12 @@ class File:
             text is in, whether it was truncated, and its refusal when it may
             not be shown.
         """
+        if self._working_text is not None:
+            encoded = self._working_text.encode(self.encoding)
+            return Content(name=self.path.name,
+                           text=encoded[:max_bytes].decode(self.encoding, errors="ignore"),
+                           language=self.language(self._working_text),
+                           truncated=len(encoded) > max_bytes)
         refused = self.display_refusal()
         if not refused:
             preview = bounded_text_preview(self.path, max_bytes, encoding=self.encoding)
@@ -460,6 +471,66 @@ class File:
                 )
         return Content(name=self.path.name, text="", language=self.language(),
                        refusal=refused)
+
+    def editing_projection(self, max_bytes: int) -> dict[str, Any]:
+        """Declare text editing only for a complete, display-safe current file."""
+        shown = self.content(max_bytes)
+        actions = []
+        if not shown.refusal and not shown.truncated:
+            actions.append({"role": {"act": "toggle", "on": "file_edit"},
+                            "command": {"command": "set_file_editing", "enabled": not self._editing}})
+            if self._editing:
+                actions.append({"role": {"act": "edit", "on": "file_edit", "field": "text"},
+                                "command": {"command": "edit_file_text"},
+                                "inputs": {"text": ["text"]}})
+            if self._working_text is not None and self._original_bytes is not None:
+                if self._working_text != self._original_bytes.decode(self.encoding):
+                    actions.append({"role": {"act": "save", "on": "file_edit"},
+                                    "command": {"command": "save_file_text"}})
+        return {"enabled": self._editing, "actions": actions}
+
+    def set_editing(self, enabled: bool, max_bytes: int) -> None:
+        """Toggle editing without writing; keep unsaved text when locked again."""
+        if not isinstance(enabled, bool):
+            raise AppError("File editing requires a boolean.")
+        if enabled:
+            if not self.editing_projection(max_bytes)["actions"]:
+                raise AppError("This file is not available for complete text editing.")
+            if self._working_text is None:
+                original = self.path.read_bytes()
+                if len(original) > max_bytes or self.display_refusal(original):
+                    raise AppError("This file is not available for complete text editing.")
+                self._working_text = original.decode(self.encoding)
+                self._original_bytes = original
+            self._editing_limit = max_bytes
+        self._editing = enabled
+
+    def edit_text(self, text: str) -> None:
+        """Change this live object's working text. Only Save writes the file."""
+        if not self._editing or self._original_bytes is None:
+            raise AppError("Enable file editing before changing its text.")
+        if not isinstance(text, str):
+            raise AppError("File text must be a string.")
+        if len(text.encode(self.encoding)) > self._editing_limit or self.display_refusal(text.encode(self.encoding)):
+            raise AppError("The edited text exceeds the safe text editing bound.")
+        self._working_text = text
+
+    def save_text(self) -> None:
+        """Save working text through this same File, refusing an external change."""
+        if self._working_text is None or self._original_bytes is None:
+            raise AppError("This file has no text edit to save.")
+        if self.display_refusal(self._working_text.encode(self.encoding)):
+            raise AppError("This file is not available for text saving.")
+        if len(self._working_text.encode(self.encoding)) > self._editing_limit:
+            raise AppError("The edited text exceeds the safe text editing bound.")
+        if self.path.read_bytes() != self._original_bytes:
+            raise AppError("The file changed outside this editor; reopen it before saving.")
+        encoding = self.encoding
+        if encoding.lower().replace("_", "-") == "utf-8-sig" and not self._original_bytes.startswith(b"\xef\xbb\xbf"):
+            encoding = "utf-8"
+        primitive_file_io.write_bytes(self.path, self._working_text.encode(encoding))
+        self._original_bytes = self.path.read_bytes()
+        self._working_text = self._original_bytes.decode(self.encoding)
 
     def language(self, content: str | None = None) -> str:
         """The language this file is written in (#1129): what highlighting and
