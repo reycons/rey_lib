@@ -116,14 +116,18 @@ class ApplicationAI:
         """The governed tasks this application may run, in declared order."""
         return self._task_keys
 
-    def call(self, runtime: Any, task_key: str, text: str, relay: Relay) -> None:
+    def call(self, runtime: Any, task_key: str, text: str, relay: Relay,
+             context: Mapping[str, Any] | None = None) -> None:
         """Run one available task on ai_app's live AI with ``text`` as its input.
 
         The AI's own sequence over its hosted commands: ``task`` opens the governed
         task (correlated, so its refusal is this call's), ``edit`` gives it the
-        text as its prompt, ``run`` executes it. Every message ai_app emits about
-        that task -- its projection after the edit, each event as it happens, the
-        projection as it ended, or the refusal -- goes to ``relay`` as emitted.
+        text as its prompt -- and ``context`` beside it, where the application
+        supplies one: what its live object already holds (a database object's own
+        definition, #1301), which the task's tools answer from -- ``run`` executes
+        it. Every message ai_app emits about that task -- its projection after the
+        edit, each event as it happens, the projection as it ended, or the refusal
+        -- goes to ``relay`` as emitted.
 
         Blocks only for the opening; call it off the thread reading commands, as
         any work that outlives a command runs.
@@ -150,7 +154,10 @@ class ApplicationAI:
         with self._guard:
             self._relays[object_id] = relay
         relay(dict(opened))
-        transport.send({"command": "edit", "object": object_id, "changes": {"prompt": text}})
+        changes: dict[str, Any] = {"prompt": text}
+        if context is not None:
+            changes["context"] = dict(context)
+        transport.send({"command": "edit", "object": object_id, "changes": changes})
         transport.send({"command": "run", "object": object_id})
 
     def close(self) -> None:

@@ -163,6 +163,23 @@ class TestACallOnAiApp:
         # The opening's answer is the first thing relayed, as ai_app answered it.
         assert relayed[0] == {"opened": {"object": "t1"}, "request_id": "made-here"}
 
+    def test_a_context_the_application_supplies_travels_with_the_prompt(self) -> None:
+        """#1301: what the live object already holds goes beside the prompt, in the
+        same edit, as given; no lookup and no second transport."""
+        transports = _Transports()
+        ai = ApplicationAI(("generate_sql",), transports)
+        held = {"identity": {"schema": "control", "name": "batch"},
+                "columns": [{"name": "batch_id", "type": "bigint", "nullable": False}]}
+
+        ai.call(object(), "generate_sql", "how many batches are there", lambda m: None,
+                context=held)
+
+        assert transports.transport.sent[0] == {
+            "command": "edit", "object": "t1",
+            "changes": {"prompt": "how many batches are there", "context": held},
+        }
+        assert transports.transport.sent[1] == {"command": "run", "object": "t1"}
+
     def test_what_ai_app_says_about_the_task_is_relayed_unread(self) -> None:
         transports = _Transports()
         ai = ApplicationAI(("comment_code",), transports)
