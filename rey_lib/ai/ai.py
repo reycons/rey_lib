@@ -558,6 +558,68 @@ class AI:
             with self._running_lock:
                 del self._running[task.id]
 
+    def execute_recorded(
+        self,
+        task: AITask,
+        operations: Mapping[str, Operation] | None = None,
+        evidence: Any = None,
+        *,
+        source: Mapping[str, Any] | None = None,
+        source_record_type: str = "",
+        runtime: Any = None,
+        observe: Callable[[AIEvent], None] | None = None,
+    ) -> AIResult:
+        """Run ``task`` as :meth:`execute_task` does, recording what was sent and what
+        came back under the parent its caller supplied (#1305).
+
+        The task's ``origin_id`` is the calling application's place -- its run, the
+        record a new record is parented to, its nesting and correlation. With one,
+        and ``evidence`` (the run log of the process executing, the vehicle only),
+        this records before the engine is called the package it is sent -- the
+        task's contract beside ``source``, the record the application sent, in the
+        structure the finalization stage used to write -- and, when the run ends,
+        its result (LLM_INTERPRETATION for the log interpretation, LLM_ANALYSIS_RESULT
+        for any other task) or its failure or cancellation (LLM_ANALYSIS_FAILURE).
+        Every record is that caller's run's: ``RunLog.append_under``.
+
+        A task carrying no origin records nothing and runs as any other. An origin
+        that is not an execution context is refused before the engine is called. A
+        write that fails is reported by the run log and changes nothing here: the
+        answer, the events and the raised error are what ``execute_task`` gives.
+        ``runtime`` only resolves the paths of the references the task's contract
+        declares.
+
+        Raises:
+            AIRequestError: When the origin is malformed or incomplete; and as
+                ``execute_task`` does.
+            AIError, AICancelled: As ``execute_task`` does, after the failure or
+                cancellation has been recorded.
+        """
+        from rey_lib.ai import evidence as recording
+
+        parent = recording.origin_of(task)
+        if parent is None or evidence is None:
+            return self.execute_task(task, operations, observe=observe)
+        evidence.append_under(
+            parent, recording.PACKAGE_RECORD, record_group="results",
+            **recording.package_of(task, source, source_record_type, runtime))
+        try:
+            result = self.execute_task(task, operations, observe=observe)
+        except AICancelled as withdrawn:
+            evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
+                                  **recording.failure_of(task, "cancelled", str(withdrawn)))
+            raise
+        except AIError as error:
+            evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
+                                  **recording.failure_of(task, "failed", str(error)))
+            raise
+        record_type = (recording.INTERPRETATION_RECORD
+                       if task.task_key == recording.INTERPRETATION_TASK
+                       else recording.RESULT_RECORD)
+        evidence.append_under(parent, record_type, record_group="results",
+                              **recording.result_of(task, result))
+        return result
+
     def _run_pydantic_ai(
         self,
         task: AITask,

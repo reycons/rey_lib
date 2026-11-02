@@ -34,6 +34,7 @@ from rey_lib.repository_map.python_extractor import (
     extract_python_references,
     extract_python_symbols,
 )
+from rey_lib.repository_map.control_flow import FlowFact, python_control_flow, javascript_control_flow
 from rey_lib.repository_map.records import ReferenceEdge, SymbolInventory
 from rey_lib.errors.error_utils import ConfigError
 
@@ -73,6 +74,7 @@ class LanguageExtractor:
     """
 
     language: str
+    control_flow: Callable[[Path, str, str | None], list[FlowFact]]
     symbols: Callable[[Path, str, str | None], SymbolInventory]
     references: Callable[[Path, str, str | None], list[ReferenceEdge]]
     parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
@@ -91,6 +93,7 @@ class LanguageExtractor:
 LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
     "Python": LanguageExtractor(
         language="Python",
+        control_flow=python_control_flow,
         symbols=extract_python_symbols,
         references=extract_python_references,
         parameters=extract_python_parameters,
@@ -108,6 +111,7 @@ LANGUAGE_EXTRACTORS.update(
     {
         language: LanguageExtractor(
             language=language,
+            control_flow=javascript_control_flow,
             symbols=extract_js_symbols,
             references=extract_js_references,
             parameters=extract_js_parameters,

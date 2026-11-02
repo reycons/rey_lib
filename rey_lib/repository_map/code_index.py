@@ -117,7 +117,8 @@ class IndexedRepository:
     __slots__ = ("repository", "header", "files", "edges", "parameters",
                  "writes", "accesses", "class_attributes", "return_sites",
                  "raise_sites", "call_arguments", "semantic_coverage",
-                 "definition_evidence", "reference_evidence")
+                 "definition_evidence", "reference_evidence", "control_flow_nodes",
+                 "control_flow_edges", "control_flow_coverage")
 
     def __init__(
         self,
@@ -135,7 +136,13 @@ class IndexedRepository:
         semantic_coverage: list[dict[str, Any]] | None = None,
         definition_evidence: list[dict[str, Any]] | None = None,
         reference_evidence: list[dict[str, Any]] | None = None,
+        control_flow_nodes: list[dict[str, Any]] | None = None,
+        control_flow_edges: list[dict[str, Any]] | None = None,
+        control_flow_coverage: list[dict[str, Any]] | None = None,
     ) -> None:
+        self.control_flow_nodes = control_flow_nodes or []
+        self.control_flow_edges = control_flow_edges or []
+        self.control_flow_coverage = control_flow_coverage or []
         self.repository = repository
         self.header = header
         self.files = files
@@ -250,7 +257,7 @@ def _owned_rows(
             logger.warning(
                 "%s: %s at %s:%s names a file the inventory does not carry",
                 repository, record_type, record["source_path"],
-                record["source_line"],
+                record.get("source_line", record.get("owner_line")),
             )
             continue
         rows.append({
@@ -330,7 +337,7 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "%s: edge at %s:%s names a file the inventory does not carry",
                 repository,
                 record["source_path"],
-                record["source_line"],
+                record.get("source_line", record.get("owner_line")),
             )
             continue
         edges.append(
@@ -411,6 +418,13 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
             repository, repository_map, files,
             RECORD_TYPE_CALL_ARGUMENT, _CALL_ARGUMENT_FIELDS,
         ),
+        control_flow_nodes=_owned_rows(repository, repository_map, files, "control_flow_node",
+            ("owner_qualified_name", "owner_line", "owner_column", "node_key", "kind", "source_line", "source_column", "end_line", "end_column",
+             "text", "callee", "call_edge_kind", "commands")),
+        control_flow_edges=_owned_rows(repository, repository_map, files, "control_flow_edge",
+            ("owner_qualified_name", "owner_line", "owner_column", "from_key", "to_key", "kind")),
+        control_flow_coverage=_owned_rows(repository, repository_map, files, "control_flow_coverage",
+            ("owner_qualified_name", "owner_line", "owner_column", "status", "reason", "producer_version")),
         # Coverage belongs to the repository, not to a file.
         semantic_coverage=[
             {field: record[field] for field in _SEMANTIC_COVERAGE_FIELDS}

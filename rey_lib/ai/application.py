@@ -27,6 +27,8 @@ exactly as ai_app emitted them, reading none of them.
 
 from __future__ import annotations
 
+import json
+
 import threading
 
 from typing import Any, Callable, Mapping, Sequence
@@ -117,7 +119,8 @@ class ApplicationAI:
         return self._task_keys
 
     def call(self, runtime: Any, task_key: str, text: str, relay: Relay,
-             context: Mapping[str, Any] | None = None) -> None:
+             context: Mapping[str, Any] | None = None,
+             origin: Mapping[str, Any] | None = None) -> None:
         """Run one available task on ai_app's live AI with ``text`` as its input.
 
         The AI's own sequence over its hosted commands: ``task`` opens the governed
@@ -125,9 +128,14 @@ class ApplicationAI:
         text as its prompt -- and ``context`` beside it, where the application
         supplies one: what its live object already holds (a database object's own
         definition, #1301), which the task's tools answer from -- ``run`` executes
-        it. Every message ai_app emits about that task -- its projection after the
-        edit, each event as it happens, the projection as it ended, or the refusal
-        -- goes to ``relay`` as emitted.
+        it. ``origin`` is the calling application's own place -- its run, the record
+        a new record is parented to, its nesting and correlation
+        (``RunLog.parent_context``) -- carried to the task as its ``origin_id``
+        (#1305): what AI records of the run, the package it was sent and the
+        result, is recorded under exactly that, and under nothing else. Every
+        message ai_app emits about that task -- its projection after the edit,
+        each event as it happens, the projection as it ended, or the refusal --
+        goes to ``relay`` as emitted.
 
         Blocks only for the opening; call it off the thread reading commands, as
         any work that outlives a command runs.
@@ -144,8 +152,12 @@ class ApplicationAI:
                 f"{', '.join(self._task_keys) or 'none'}."
             )
         transport = self._ai_app(runtime)
-        opened = transport.request({"command": "task", "task_key": key,
-                                    "object": self._ai_object})
+        request: dict[str, Any] = {"command": "task", "task_key": key,
+                                   "object": self._ai_object}
+        if origin is not None:
+            # The task's origin is a string fact (AITask.origin_id): the place, as text.
+            request["origin_id"] = json.dumps(dict(origin), default=str)
+        opened = transport.request(request)
         if "error" in opened:
             raise AIRequestError(str(opened["error"]))
         object_id = str((opened.get("opened") or {}).get("object") or "")

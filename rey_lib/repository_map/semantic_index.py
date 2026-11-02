@@ -652,8 +652,8 @@ def _qualified_name(symbol: str) -> str | None:
     are dropped, since the defining file already says which module this is;
     types, terms and methods join with dots, as Rey qualifies a method by its
     class. Anything Rey does not record as a symbol answers None: a parameter,
-    a type parameter, a meta or macro descriptor, and anything declared inside
-    a callable.
+    a type parameter, or a meta or macro descriptor. Nested callable descriptors
+    keep their lexical owner; the existing inventory decides which are recorded.
 
     Args:
         symbol: A global SCIP symbol name.
@@ -666,8 +666,6 @@ def _qualified_name(symbol: str) -> str | None:
         return None
     named = [(name, kind) for name, kind in descriptors if kind != "namespace"]
     if not named or any(kind not in ("type", "term", "method") for _name, kind in named):
-        return None
-    if any(kind == "method" for _name, kind in named[:-1]):
         return None
     return ".".join(name for name, _kind in named)
 

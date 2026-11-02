@@ -180,6 +180,25 @@ class TestACallOnAiApp:
         }
         assert transports.transport.sent[1] == {"command": "run", "object": "t1"}
 
+    def test_the_callers_place_travels_as_the_tasks_origin(self) -> None:
+        """#1305: the origin -- the caller's run, record, nesting, correlation -- goes
+        in the task request as origin_id, text, so AI records under it."""
+        import json
+
+        transports = _Transports()
+        ai = ApplicationAI(("log_interpretation",), transports)
+        origin = {"run_id": 3981, "parent_run_log_id": 2849915, "nest_level": 4,
+                  "correlation_id": "c1", "app": "workflow_app"}
+
+        ai.call(object(), "log_interpretation", "{}", lambda m: None, origin=origin)
+
+        opened = transports.transport.requested[-1]
+        assert opened["command"] == "task"
+        assert json.loads(opened["origin_id"]) == origin
+        # Without one, the request names no origin at all.
+        ai.call(object(), "log_interpretation", "{}", lambda m: None)
+        assert "origin_id" not in transports.transport.requested[-1]
+
     def test_what_ai_app_says_about_the_task_is_relayed_unread(self) -> None:
         transports = _Transports()
         ai = ApplicationAI(("comment_code",), transports)

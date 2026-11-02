@@ -502,3 +502,39 @@ def test_a_republished_import_spans_its_import_statement(tmp_path: Path) -> None
     assert thing.source_line == 1
     # The whole parenthesised import, not just its first line.
     assert thing.end_line == 3
+
+
+def test_returned_catalogue_callable_has_its_own_symbol_and_source_facts(tmp_path):
+    from rey_lib.repository_map.python_extractor import extract_python_parameters
+    from rey_lib.repository_map.control_flow import python_control_flow
+    path = tmp_path / 'catalogue.py'
+    path.write_text('''def catalog(adapter):
+    def export(ctx):
+        return adapter.export(ctx)
+    def private():
+        return None
+    return {"export_database_ddl": export}
+def registration():
+    return {"approved_implementations": catalog(adapter())}
+''')
+    inventory = extract_symbols(path, 'Python')
+    assert {s.qualified_name for s in inventory.symbols} == {'catalog', 'catalog.export', 'registration'}
+    edges = extract_executable_references(path, 'Python')
+    registrations = {(e.evidence,e.to) for e in edges if e.edge_kind=='registration'}
+    assert registrations == {('ast.Dict.key:export_database_ddl','export'),
+                             ('ast.Dict.key:approved_implementations','catalog')}
+    assert any(p.owner_qualified_name=='catalog.export' and p.name=='ctx'
+               for p in extract_python_parameters(path,'Python'))
+    flow = [f.fields for f in python_control_flow(path,'Python')]
+    assert any(f['owner_qualified_name']=='catalog.export' and f.get('callee')=='adapter.export' for f in flow)
+    assert not any(f['owner_qualified_name']=='catalog.private' for f in flow)
+
+
+def test_unpacking_and_duplicate_dictionary_keys_never_claim_registration(tmp_path):
+    path = tmp_path / 'ambiguous.py'
+    path.write_text('''def catalog():
+    return {"export": first, **other}
+def duplicate():
+    return {"export": first, "export": second}
+''')
+    assert not any(e.edge_kind=='registration' for e in extract_executable_references(path,'Python'))

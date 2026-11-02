@@ -271,11 +271,11 @@ class TestDescriptors:
         ("scip-python python p 1 `pkg.mod`/use().(t)", None),
         ("scip-typescript npm . . src/`mod.ts`/Box#[T]", None),
         ("scip-python python p 1 `pkg.mod`/__init__:", None),
-        ("scip-python python p 1 `pkg.mod`/outer().inner().", None),
+        ("scip-python python p 1 `pkg.mod`/outer().inner().", "outer.inner"),
         ("local 4", None),
     ])
     def test_qualified_names(self, symbol: str, expected: str | None) -> None:
-        """Parameters, type parameters, meta and nested declarations are not Rey's."""
+        """Parameters, type parameters and meta descriptors are not declarations."""
         assert semantic_index._qualified_name(symbol) == expected
 
 

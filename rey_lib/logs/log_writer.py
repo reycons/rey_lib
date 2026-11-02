@@ -296,6 +296,30 @@ class LogWriter:
             self._json.write(record)
         return run_log_id
 
+    def write_database(self, record: dict[str, Any]) -> Optional[int]:
+        """Write one built record to the database output only; the id it minted.
+
+        For evidence that belongs to ANOTHER run than this writer's (#1305): the
+        control database is the one output every process shares, so a record
+        stamped with another run's identity goes there and nowhere else -- the
+        JSONL file is this process's own run's, and a line in it would be
+        evidence under the wrong run.
+
+        Raises:
+            ConfigError: When the database is not a selected output.
+        """
+        from rey_lib.errors.error_utils import ConfigError
+
+        if self._database is None:
+            raise ConfigError(
+                "run_store selects no database output: evidence of another run has "
+                "nowhere this process may write it."
+            )
+        if self._persisting:
+            return None
+        with self.persistence():
+            return self._database.write(record)
+
     def require_persisted(self, run_log_id: Optional[int], record_type: str) -> None:
         """Escalate a record the caller requires that was not written everywhere.
 

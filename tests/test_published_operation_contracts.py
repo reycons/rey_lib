@@ -30,6 +30,8 @@ _PUBLISHED = {
                      "recreate_objects", "verify_diff"},
     "rey_repository_map": {"index", "publish-database", "publish-capability-generation",
                            "publish-architecture-generation", "index-synopsis"},
+    # The explicit interpretation of a run's summary, selectable as a step (#1305).
+    "workflow_app": {"interpret_run_log"},
 }
 
 #: Retired or refused keys, never published by any operation.
@@ -47,7 +49,7 @@ _ALIASES = {
 def operations() -> dict[tuple[str, str], Any]:
     registrations = discover_registrations()
     if not set(_PUBLISHED) <= set(registrations):
-        pytest.skip("the five publishing applications are not all installed")
+        pytest.skip("the six publishing applications are not all installed")
     return {
         (name, op.name): op
         for name, registration in registrations.items()
@@ -74,7 +76,7 @@ def test_each_published_operation_has_exactly_one_contract(operations) -> None:
     for application, name in operations:
         published.setdefault(application, set()).add(name)
     assert published == _PUBLISHED
-    assert len(operations) == 27
+    assert len(operations) == 28
 
 
 def test_canonical_names_only(operations) -> None:

@@ -268,7 +268,8 @@ class TestIsGenerator:
 class TestTheBenchmarkSubject:
     """The subject did not move, so its true answer is asserted here."""
 
-    def test_finalize_run_log_returns_three_collection_literals(self) -> None:
+    def test_finalize_run_log_returns_one_collection_literal(self) -> None:
+        """Since #1305 finalization returns once: the summary, and no package."""
         path = Path(__file__).resolve().parents[1] / "rey_lib/logs/summary.py"
 
         found = [
@@ -277,8 +278,4 @@ class TestTheBenchmarkSubject:
             if r.owner_qualified_name == "finalize_run_log"
         ]
 
-        assert found == [
-            (0, "collection_literal"),
-            (1, "collection_literal"),
-            (2, "collection_literal"),
-        ]
+        assert found == [(0, "collection_literal")]

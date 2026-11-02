@@ -33,9 +33,6 @@ from rey_lib.logs.evidence_projection import (
     runs_in_run_log,
 )
 from rey_lib.logs.summary import create_results_summary, finalize_run_log
-from rey_lib.logs.llm_package import (
-    create_llm_package,
-)
 from rey_lib.logs.execution_records import (
     log_app_execution,
     log_execution_plan,
@@ -110,7 +107,6 @@ __all__ = [
     "log_execution_plan",
     "create_results_summary",
     "finalize_run_log",
-    "create_llm_package",
     "log_step_start",
     "finalize_run_phases",
     "log_step_end",

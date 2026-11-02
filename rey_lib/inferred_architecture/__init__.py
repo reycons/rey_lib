@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from rey_lib.inferred_architecture.object_map import (
     CLAIM_NODE_TYPE,
+    FLOW_PROJECTION,
     OBJECT_PROJECTION,
     SCHEMA_PROJECTION,
     ObjectMap,
@@ -32,6 +33,7 @@ from rey_lib.inferred_architecture.publication import (
 
 __all__ = [
     "CLAIM_NODE_TYPE",
+    "FLOW_PROJECTION",
     "OBJECT_PROJECTION",
     "SCHEMA_PROJECTION",
     "ObjectMap",

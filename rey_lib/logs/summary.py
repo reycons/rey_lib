@@ -32,8 +32,10 @@ _MAX_EMBEDDED_STEPS = 250
 _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
-#: The governed AI task that interprets a run log. No stage runs it since the
-#: legacy AI was removed (#1025); running it on the live AI is #1284.
+#: The governed AI task that interprets a run log. No finalization stage runs it
+#: (#1305): the application that owns a run asks for it explicitly -- a call or a
+#: selected workflow operation -- through ApplicationAI, and AI records what it
+#: was sent and what it answered under that call's own parent.
 #:
 #: **Permanent.** It is half of a standing invariant; the other half is the
 #: ``log_interpretation`` task declared in AI settings, which answers it with a
@@ -45,34 +47,19 @@ LOG_INTERPRETATION_TASK = "log_interpretation"
 
 
 def finalize_run_log(run_log: Any) -> dict[str, Any]:
-    """Run the canonical post-run log processing sequence.
+    """Run the canonical post-run log processing: the RESULTS_SUMMARY, and nothing else.
 
-    Order: RESULTS_SUMMARY, then the package the log interpreter reads
-    (RESULTS_SUMMARY -> LLM_PACKAGE). Neither fails the run: post-run processing
-    runs after the run it describes has finished.
-
-    The log interpretation that followed (LLM_PACKAGE -> LLM_INTERPRETATION) was
-    removed with the legacy AI (#1025). No interpretation is attempted, so no
-    interpretation or failure record is written and ``analysis`` is always
-    ``None``. Running it on the live AI is #1284.
+    The summary is deterministic and automatic, and never fails the run: post-run
+    processing runs after the run it describes has finished. No LLM package is
+    built here and no interpretation is attempted (#1305): what AI is sent and
+    what it answers is AI's own evidence, recorded by AI at the run it is asked
+    for -- an explicit application call, or a selected workflow operation --
+    under the parent that call supplies. ``package`` and ``analysis`` are
+    therefore always ``None``; a caller reads ``summary``.
     """
-    from rey_lib.logs.llm_package import create_llm_package
-
     run_log.enter_phase("summarize")
     result = create_results_summary(run_log)
-    if result.get("summary") is None:
-        return {**result, "package": None, "analysis": None}
-    run_log.enter_phase("package")
-    try:
-        package = create_llm_package(
-            run_log,
-            source_record_type="RESULTS_SUMMARY",
-            package_record_type="LLM_PACKAGE",
-        )
-    except Exception as exc:  # noqa: BLE001 — post-run processing must preserve the run
-        return {**result, "package": None, "package_failures": [str(exc)],
-                "analysis": None}
-    return {**result, "package": package, "package_failures": [], "analysis": None}
+    return {**result, "package": None, "analysis": None}
 
 
 def create_results_summary(

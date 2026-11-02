@@ -553,6 +553,86 @@ class RunLog:
             )
             return None
 
+    def parent_context(self) -> dict[str, Any]:
+        """This run's current place, for evidence another process records under it.
+
+        What ``append`` would stamp a record with right now (#1305): the run, the
+        record a new record is parented to at the current nesting, that nesting,
+        the ambient correlation, and the application. Handed to a call that another
+        process executes -- an AI task through ApplicationAI -- so the evidence it
+        records is this run's, under this record, and never the executing
+        process's own.
+        """
+        from rey_lib.logs.record_enrichment import current_correlation
+
+        fields = self.run_fields()
+        correlation = current_correlation() or {}
+        return {
+            "run_id": fields["run_id"],
+            "parent_run_log_id": fields["parent_run_log_id"],
+            "nest_level": fields["nest_level"],
+            "correlation_id": str(correlation.get("correlation_id") or ""),
+            "app": self.app or "",
+        }
+
+    def append_under(self, parent: Any, record_type: str, *, message: str = "",
+                     **fields: Any) -> int | None:
+        """Build one typed record under an explicitly supplied parent and write it.
+
+        ``parent`` is another execution's place, as its owner stated it
+        (``parent_context``): ``run_id`` and ``parent_run_log_id``, both required;
+        ``nest_level``, ``correlation_id`` and ``app`` as it had them. The record
+        is THAT run's -- its identity, parent and nesting come from ``parent`` and
+        from nothing of this run -- and goes to the database output only
+        (``LogWriter.write_database``), the one output shared across processes
+        (#1305).
+
+        A write that fails is reported once and answers None, as ``append`` does:
+        logging must not mask execution. A parent that is not one is refused
+        instead: evidence is never attached to a substituted run.
+
+        Raises:
+            ConfigError: When ``parent`` lacks an integer ``run_id`` or
+                ``parent_run_log_id``.
+        """
+        from rey_lib.errors.error_utils import AppError, ConfigError
+        from rey_lib.logs.record_validation import _validate_run_record_fields
+
+        try:
+            run_id = int(parent["run_id"])
+            parent_run_log_id = int(parent["parent_run_log_id"])
+        except (KeyError, TypeError, ValueError) as missing:
+            raise ConfigError(
+                "A record written under a supplied parent needs that parent's run_id "
+                f"and parent_run_log_id; got {parent!r}."
+            ) from missing
+        if self.writer.persisting:
+            return None
+        _validate_run_record_fields(record_type, fields)
+        run: dict[str, Any] = {
+            "run_id": run_id, "run_timestamp": "", "lineage": {},
+            "nest_level": int(parent.get("nest_level") or 0),
+            "parent_run_log_id": parent_run_log_id,
+        }
+        if parent.get("app"):
+            run["app"] = str(parent["app"])
+        if parent.get("correlation_id"):
+            fields = {**fields, "correlation_id": str(parent["correlation_id"])}
+        try:
+            record = self._builder.run_record(record_type, message, fields, run=run)
+            return self.writer.write_database(record)
+        except AppError as refused:
+            refused.report(f"run log: could not record {record_type} under run {run_id}",
+                           source=__name__)
+            return None
+        except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
+            from rey_lib.logs.app_logger import AppLogger
+
+            AppLogger(__name__).warning(
+                "run log: could not append %s under run %s: %s", record_type, run_id, exc
+            )
+            return None
+
     # -- structural records and steps ----------------------------------------
 
     def require_structural_record(self, run_log_id: Optional[int],

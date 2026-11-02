@@ -49,7 +49,7 @@ logger = AppLogger(__name__)
 
 # Bumped when the generated fact model changes, so a stale map is detectable
 # even when the commit and rules are unchanged.
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.4.0"
 
 # Wall-clock only. Excluded from hashing and byte-equivalence so two runs of
 # the same commit agree.

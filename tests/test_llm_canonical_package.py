@@ -9,6 +9,7 @@ and inputs always an ordered collection.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from rey_lib.encryption import sha256_file
 from rey_lib.analysis.package import (
@@ -147,62 +148,50 @@ def test_builder_does_not_invoke_a_provider() -> None:
         assert forbidden not in imported, forbidden
 
 
-# --- Legacy provider wire package is preserved (TEST-008) ---------------------
-# SGC reconciliation (c): the log-analysis LLM_PACKAGE is the existing provider
-# wire package, not the canonical representation, and is preserved unchanged.
+# --- The log-analysis package AI records (TEST-008, #1305) ---------------------
+# The package the finalization stage used to write is now the AI's own evidence,
+# built at the run from the task it executes: the contract beside the record it
+# was sent, in the structure the stage wrote. Still not the canonical shape.
 
-def test_the_legacy_package_carries_the_situation_and_not_the_contract() -> None:
-    """The log-analysis package states what to read, never what governs it.
+def _task(contract_body: str = "contract:\n  name: rey_log_interpreter\n") -> SimpleNamespace:
+    return SimpleNamespace(instruction_key="log_interpreter", contract_key="rey_log_interpreter",
+                           contract_version="1.3.1", contract_body=contract_body)
 
-    Supersedes SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence
-    reconciliation (c), which preserved a four-field shape carrying the contract
-    inline. The contract now arrives as the instruction the task resolves through
-    the canonical AI settings object, so carrying it here as well would send it
-    twice and let this path disagree with the setting a reader can see.
-    """
-    from rey_lib.logs.llm_package import _build_analysis_package
 
-    # No references are declared, so ctx is never consulted.
-    package = _build_analysis_package(
-        ctx=None,
-        analysis_name="log_interpreter",
-        source_record_type="RESULTS_SUMMARY",
-        instructions={"rules": ["explain failures"]},
-        source={"record_type": "RESULTS_SUMMARY", "summary": "..."},
-    )
-    assert set(package) == {"analysis_name", "source_record_type", "source"}
-    # The contract is resolved as an instruction, not embedded here.
-    assert "instructions" not in package
+def test_the_log_package_carries_the_contract_beside_the_situation() -> None:
+    """The package AI records pairs the task's contract (``instructions``) with the
+    record it was sent (``source``), named as the application named it (#1305)."""
+    from rey_lib.ai.evidence import package_of
+
+    package = package_of(_task(), {"record_type": "RESULTS_SUMMARY", "summary": "..."},
+                         "RESULTS_SUMMARY", runtime=None)
+
+    assert set(package) == {"analysis_name", "source_record_type", "instructions", "source"}
+    assert package["analysis_name"] == "log_interpreter"
+    assert package["instructions"]["contract"] == {"name": "rey_log_interpreter"}
+    assert package["source"] == {"record_type": "RESULTS_SUMMARY", "summary": "..."}
     # Still not the canonical shape.
     assert "contract" not in package
     assert "inputs" not in package
     assert "execution_context" not in package
 
 
-def test_a_contract_declaring_references_still_has_them_resolved() -> None:
-    """The contract is still parsed for what it declares; only where it is sent
-    changed."""
-    from rey_lib.logs.llm_package import _build_analysis_package
+def test_a_contract_declaring_no_references_has_no_references_key() -> None:
+    """Nothing declared, so nothing resolved -- and no empty key invented for it."""
+    from rey_lib.ai.evidence import package_of
 
-    package = _build_analysis_package(
-        ctx=None,
-        analysis_name="a",
-        source_record_type="RESULTS_SUMMARY",
-        instructions={"rules": []},
-        source={"record_type": "RESULTS_SUMMARY"},
-    )
+    package = package_of(_task(), {"record_type": "RESULTS_SUMMARY"}, "RESULTS_SUMMARY",
+                         runtime=None)
 
-    # Nothing declared, so nothing resolved -- and no empty key invented for it.
     assert "references" not in package
 
 
 def test_legacy_and_canonical_packages_are_distinct_shapes() -> None:
     """The two representations are intentionally different structures."""
-    from rey_lib.logs.llm_package import _build_analysis_package
+    from rey_lib.ai.evidence import package_of
 
-    legacy = _build_analysis_package(
-        None, "a", "RESULTS_SUMMARY", {"r": 1}, {"record_type": "RESULTS_SUMMARY"},
-    )
+    legacy = package_of(_task(), {"record_type": "RESULTS_SUMMARY"}, "RESULTS_SUMMARY",
+                        runtime=None)
     canonical = build_package(
         analysis="a", contract=LlmPackageContract(path="/c", hash="h", content="R"),
         inputs=[LlmPackageInput(source_path="/s", content="X")],

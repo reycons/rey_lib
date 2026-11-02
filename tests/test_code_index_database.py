@@ -156,6 +156,9 @@ class TestTheWriteBoundary:
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
+            'DELETE FROM "code_stage"."control_flow_edge_stage"',
+            'DELETE FROM "code_stage"."control_flow_node_stage"',
+            'DELETE FROM "code_stage"."control_flow_coverage_stage"',
             'DELETE FROM "code_stage"."reference_evidence_stage"',
             'DELETE FROM "code_stage"."definition_evidence_stage"',
             'DELETE FROM "code_stage"."semantic_coverage_stage"',

@@ -115,6 +115,15 @@ _EDGE_COLUMNS = (
 )
 
 
+_FLOW_OWNER_COLUMNS = ("repository_key", "relative_path", "owner_qualified_name", "owner_line", "owner_column")
+_FLOW_COLUMNS = {
+    "node": _FLOW_OWNER_COLUMNS + ("node_key", "kind", "source_line", "source_column",
+                                   "end_line", "end_column", "text", "callee", "call_edge_kind", "commands"),
+    "edge": _FLOW_OWNER_COLUMNS + ("from_key", "to_key", "kind"),
+    "coverage": _FLOW_OWNER_COLUMNS + ("status", "reason", "producer_version"),
+}
+
+
 class CodeIndexDatabaseWriter:
     """Writes one snapshot through the code schema's own write API."""
 
@@ -214,6 +223,11 @@ class CodeIndexDatabaseWriter:
         ]
         self._stage("call_argument_stage", call_arguments,
                     _CALL_ARGUMENT_COLUMNS)
+        for kind, attribute in (("node", "control_flow_nodes"), ("edge", "control_flow_edges"),
+                                ("coverage", "control_flow_coverage")):
+            rows = [{"repository_key": entry.header["repository_key"], **row}
+                    for entry in indexed for row in getattr(entry, attribute)]
+            self._stage(f"control_flow_{kind}_stage", rows, _FLOW_COLUMNS[kind])
         # Semantic evidence (backlog 872): staged per repository, correlated
         # across all of them by the promotion, which alone sees every one.
         semantic_coverage = [
@@ -275,7 +289,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("reference_evidence_stage", "definition_evidence_stage",
+        for table in ("control_flow_edge_stage", "control_flow_node_stage",
+                      "control_flow_coverage_stage", "reference_evidence_stage", "definition_evidence_stage",
                       "semantic_coverage_stage", "call_argument_stage",
                       "raise_site_stage", "return_site_stage",
                       "class_attribute_stage",

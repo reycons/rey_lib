@@ -174,6 +174,17 @@ class ScanContext:
         return (references, symbols, edges, parameters, writes, accesses,
                 class_attributes, return_sites, raise_sites, call_arguments)
 
+    @cached_property
+    def control_flow(self) -> list[dict[str, Any]]:
+        """Flow evidence from each language's existing syntax owner."""
+        records = []
+        for file in self.files:
+            extractor = LANGUAGE_EXTRACTORS.get(file.language)
+            if extractor is not None and self.rules.extracts_facts_from(file):
+                records.extend(record.to_dict() for record in extractor.control_flow(
+                    self.repo_root / file.path, file.language, file.path))
+        return records
+
     @property
     def references(self) -> list[Any]:
         """Return the executable reference edges."""
@@ -265,6 +276,9 @@ RECORD_EMITTERS: tuple[RecordEmitter, ...] = (
     RecordEmitter("return_site", lambda ctx: list(ctx._extraction[7])),
     RecordEmitter("raise_site", lambda ctx: list(ctx._extraction[8])),
     RecordEmitter("call_argument", lambda ctx: list(ctx._extraction[9])),
+    *(RecordEmitter(kind, lambda ctx, kind=kind: [r for r in ctx.control_flow
+                                                 if r["record_type"] == kind])
+      for kind in ("control_flow_node", "control_flow_edge", "control_flow_coverage")),
     RecordEmitter("registration", lambda ctx: [r.to_dict() for r in ctx.registrations]),
     RecordEmitter("entry_point", lambda ctx: [r.to_dict() for r in ctx.entry_points]),
     RecordEmitter(

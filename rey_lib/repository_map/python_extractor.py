@@ -29,6 +29,7 @@ from rey_lib.repository_map.records import (
     EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
+    EDGE_KIND_REGISTRATION,
     RECORD_TYPE_FILE,
     SYMBOL_KIND_CLASS,
     SYMBOL_KIND_EXPORT,
@@ -147,9 +148,8 @@ def extract_python_symbols(
     """Extract a Python file's declarations.
 
     ``module.body``, and one level further: the methods a top-level class
-    declares. Nothing inside a function body reaches the inventory, and neither
-    does a class nested inside a class (REQ-022, as amended) -- architecture
-    names a class's behaviour, never a closure's.
+    declares, plus local callables explicitly returned in literal catalogues.
+    Other local declarations and nested classes remain outside the inventory.
 
     Each declared name yields exactly one symbol record. A name listed in
     ``__all__`` is marked exported rather than duplicated as a second record;
@@ -254,6 +254,21 @@ def extract_python_symbols(
             )
         )
 
+    # A callable explicitly returned in a literal catalogue has a source identity
+    # even when its factory defines it locally. Do not inventory arbitrary locals.
+    known = {(one.source_line, one.source_column) for one in symbols}
+    for node, qualified in _recorded_bodies(tree):
+        if (node.lineno, node.col_offset) in known:
+            continue
+        owner, _, name = qualified.rpartition(".")
+        name_line, name_column = _name_position(source_lines, node.lineno, node.col_offset, name)
+        symbols.append(SymbolRecord(
+            source_path=recorded_path, source_line=node.lineno, source_column=node.col_offset,
+            name=name, owner=owner, symbol_kind=SYMBOL_KIND_FUNCTION,
+            end_line=node.end_lineno, end_column=node.end_col_offset,
+            returns_annotation=ast.unparse(node.returns) if node.returns else None,
+            is_generator=_is_generator(node), name_line=name_line, name_column=name_column))
+
     symbols.sort(key=lambda symbol: (symbol.source_line, symbol.source_column, symbol.name))
     return SymbolInventory(path=recorded_path, language=language, symbols=tuple(symbols))
 
@@ -293,6 +308,11 @@ def extract_python_references(
     # reporting below.
     callee_nodes = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
 
+    callable_names = {node.name for node in ast.walk(tree)
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    imported_names = {record.local_name for record in _collect_imports(tree)}
+    returned_dicts = {id(node.value) for node in ast.walk(tree)
+                      if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)}
     edges: list[ReferenceEdge] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -302,6 +322,26 @@ def extract_python_references(
             edges.append(
                 _edge(recorded_path, node, from_id, target, kind, "ast.Call", end=node.func)
             )
+        elif isinstance(node, ast.Dict):
+            # Literal catalogue entries are registration evidence, not calls.
+            # Preserve the referenced token for the existing semantic resolver.
+            # Unpacking/dynamic keys can overwrite entries, so claim no binding.
+            if not all(isinstance(key, ast.Constant) and isinstance(key.value, str)
+                       for key in node.keys) or len({key.value for key in node.keys}) != len(node.keys):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if id(node) not in returned_dicts:
+                    continue
+                if isinstance(value, ast.Call) and key.value != "approved_implementations":
+                    continue  # Data produced by a call is not a callable registration.
+                target = value.func if isinstance(value, ast.Call) else value
+                reference = _dotted_name(target)
+                if key.value != "approved_implementations" and (
+                        reference is None or reference.partition(".")[0] not in callable_names | imported_names):
+                    continue
+                if reference is not None:
+                    edges.append(_edge(recorded_path, target, from_id, reference,
+                                       EDGE_KIND_REGISTRATION, "ast.Dict.key:" + key.value))
         elif isinstance(node, ast.ClassDef):
             # One edge per base, located at the base itself -- which sits on
             # the class's own line, before any method begins, so attribution
@@ -588,9 +628,8 @@ def extract_python_parameters(
 ) -> list[ParameterRecord]:
     """Extract every parameter declared by a top-level function or method.
 
-    The same boundary the symbol inventory keeps: module-level declarations and
-    one level of methods. A closure's parameters are not an addressable
-    identity, so they are not recorded.
+    Uses the same declaration identities as the symbol inventory, including
+    locally defined callables explicitly returned in literal catalogues.
 
     Declaration order is preserved across all five forms, which is what
     ``ordinal`` means. Python writes them positional-only, positional,
@@ -611,17 +650,8 @@ def extract_python_parameters(
     recorded_path = source_path if source_path is not None else path.as_posix()
 
     parameters: list[ParameterRecord] = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            parameters.extend(_parameters_of(recorded_path, node, node.name))
-        elif isinstance(node, ast.ClassDef):
-            for member in node.body:
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    parameters.extend(
-                        _parameters_of(
-                            recorded_path, member, f"{node.name}.{member.name}"
-                        )
-                    )
+    for node, qualified_name in _recorded_bodies(tree):
+        parameters.extend(_parameters_of(recorded_path, node, qualified_name))
     return parameters
 
 
@@ -822,8 +852,8 @@ def extract_python_writes_and_accesses(
 ) -> tuple[list[AssignmentRecord], list[AccessRecord]]:
     """Extract the writes and indexed access forms inside recorded declarations.
 
-    The inventory's boundary again: module-level functions and one level of
-    methods. A closure's writes are not an addressable identity.
+    Uses the inventory's declaration boundary, including locally defined
+    callables explicitly returned in literal catalogues.
 
     Both are produced from one walk because both are found in the same bodies,
     and walking twice would parse the same tree for the same facts.
@@ -1190,6 +1220,13 @@ def _recorded_bodies(
             for member in node.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     bodies.append((member, f"{node.name}.{member.name}"))
+    for owner, qualified in list(bodies):
+        returned = {value.id for node in _own_nodes(owner) if isinstance(node, ast.Return)
+                    and isinstance(node.value, ast.Dict) for value in node.value.values
+                    if isinstance(value, ast.Name)}
+        for child in owner.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name in returned:
+                bodies.append((child, f"{qualified}.{child.name}"))
     return bodies
 
 

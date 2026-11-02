@@ -17,6 +17,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.inferred_architecture import object_map as module
 from rey_lib.inferred_architecture import (
     CLAIM_NODE_TYPE,
+    FLOW_PROJECTION,
     OBJECT_PROJECTION,
     SCHEMA_PROJECTION,
     ObjectMap,
@@ -496,3 +497,349 @@ def test_inspect_of_a_schema_relates_its_tables_and_never_carries_their_columns(
     assert [(r["source"], r["target"]) for r in inspected["relations"]] == [
         ("table:run_log", "table:run"), ("table:run_log", "external:code.installation")]
     assert not _keys(inspected) & _NOT_MAP_STATE
+
+
+# -- the flow reading (#1304): one object, two readings; a flow is read from the index --
+
+def _flow_rows(symbol_id=100):
+    base = {"code_symbol_id": symbol_id, "repository_key": "example",
+            "relative_path": "example/main.py", "qualified_name": "run",
+            "dotted_identity": "example.main.run", "source_line": 10, "source_column": 4,
+            "end_line": 10, "end_column": 20, "coverage_status": "partial",
+            "coverage_reason": "context-manager exit/suppression",
+            "target_code_symbol_id": None, "target_identity": None,
+            "resolution": None, "is_resolved": None, "code_edge_id": None,
+            "parameter_names": ["arg"], "symbol_name":"run", "symbol_kind":"function",
+            "callee_reference":"next_task", "target_symbol_kind":"function",
+            "target_symbol_name":"next_task", "target_label":"Perform next task."}
+    return [
+        {**base,"node_key":"entry","kind":"entry","text":"run","to_key":"test","transition_kind":"next"},
+        {**base,"node_key":"test","kind":"condition","text":"flag","end_column":8,"to_key":"call","transition_kind":"true"},
+        {**base,"node_key":"test","kind":"condition","text":"flag","end_column":8,"to_key":"exit","transition_kind":"false"},
+        {**base,"node_key":"call","kind":"call","text":"next_task(arg)","to_key":"exit","transition_kind":"next",
+         "target_code_symbol_id":200,"target_identity":"other.next_task","resolution":"semantic_binding","code_edge_id":42},
+        {**base,"node_key":"exit","kind":"exit","text":"end","to_key":None,"transition_kind":None},
+    ]
+
+
+def _with_flows():
+    read={**READ,"flows":[{"flow_key":"example","label":"main","entry_repository_key":"example",
+                          "entry_code_symbol_id":100,"entry_identity":"example.main.run"},
+                         {"flow_key":"missing","label":"main.py","entry_repository_key":"missing",
+                          "entry_code_symbol_id":None,"entry_identity":"main.py"}],
+          "flow_steps":_flow_rows()}
+    return ObjectMap({"kind":"inferred_architecture","installation":"admin"},OBJECT_PROJECTION,read)
+
+
+def test_application_without_input_evidence_never_falls_back_to_whole_main():
+    held=_with_flows();held.focus(reading="flow")
+    assert [n["id"] for n in held.projection()["nodes"]]==["application:example","application:missing"]
+    held.double_click("application:example")
+    projection = held.projection()
+    assert projection["nodes"][0]["kind"] == "boundary"
+    assert "CLI commands or requests" in projection["nodes"][0]["label"]
+    assert projection["edges"] == []
+
+
+def test_application_overview_lists_cli_and_requests_without_main():
+    held = _with_flows()
+    held._read["flow_commands"] = [{"application_name":"example", "application_command_id":7,
+        "command_name":"run", "description":"CLI run", "code_symbol_id":100, "node_key":"test"}]
+    held._read["flow_requests"] = [{"application_name":"example", "application_request_id":"100:run",
+        "request_name":"run", "description":"Requested run", "code_symbol_id":100, "node_key":"test"}]
+    held.focus(reading="flow", application="example")
+    assert {n["label"] for n in held.projection()["nodes"]} == {"CLI: run", "Request: run"}
+    held.double_click("request:100:run")
+    projection = held.projection()
+    assert projection["focus"] == {"flow":"example", "request_id":"100:run"}
+    assert not any(e["source"] == "control:100:test" and e["label"] == "false"
+                   for e in projection["edges"])
+    assert projection["path"][-1]["label"] == "run"
+
+
+def test_cli_dictionary_binding_enters_handler_without_a_true_guard():
+    held = _with_flows()
+    held._read["flow_commands"] = [{"application_name":"example", "application_command_id":7,
+        "command_name":"run", "description":"CLI run", "code_symbol_id":100, "node_key":"entry"}]
+    held.focus(reading="flow", flow="example", command_id=7, detail=True)
+    assert {n["id"] for n in held.projection()["nodes"]} == {
+        "control:100:entry", "control:100:test", "control:100:call", "control:100:exit"}
+
+
+def test_one_request_stops_at_next_receive_and_excludes_sibling_dispatch():
+    held = _with_flows()
+    base = _flow_rows()[0]
+    held._read["flow_steps"] = [
+        {**base,"node_key":"loop","kind":"loop","source_line":1,"end_line":30,"to_key":"test","transition_kind":"body"},
+        {**base,"node_key":"test","kind":"condition","text":"name == 'run'","to_key":"run","transition_kind":"true"},
+        {**base,"node_key":"test","kind":"condition","text":"name == 'run'","to_key":"other","transition_kind":"false"},
+        {**base,"node_key":"run","kind":"call","to_key":"loop","transition_kind":"next"},
+        {**base,"node_key":"other","kind":"call","to_key":"loop","transition_kind":"next"}]
+    held._read["flow_requests"] = [{"application_name":"example", "application_request_id":"100:run",
+        "request_name":"run", "code_symbol_id":100,"node_key":"test"}]
+    held.focus(reading="flow", flow="example", request_id="100:run", detail=True)
+    assert {n["id"] for n in held.projection()["nodes"]} == {"control:100:test", "control:100:run"}
+    assert len(held.projection()["edges"]) == 1
+
+
+def test_step_inspection_exposes_actual_code_source_and_coverage():
+    held=_with_flows();held.focus(reading="flow",flow="example",detail=True)
+    held.click("control:100:call")
+    rows=held.projection()["details"]["rows"]
+    assert ["Code","next_task(arg)"] in rows
+    assert ["Call target","other.next_task"] in rows
+    assert ["File","example/main.py"] in rows
+    assert ["Line",10] in rows
+    assert ["Coverage","partial"] in rows
+    assert held.context_click("control:100:call")=={"identity":{
+        "kind":"configured_file","root":"{apps}","relative_path":"example/example/main.py"}}
+
+
+def test_transition_inspection_reports_indexed_branch_not_fabricated_call_order():
+    held=_with_flows();held.focus(reading="flow",flow="example",detail=True)
+    edge=next(e for e in held.projection()["edges"] if e["label"]=="false")
+    held.double_click(edge["id"])
+    assert ["Transition","false"] in held.projection()["details"]["rows"]
+    assert held.projection()["focus"]=={"flow":"example","detail":True}
+
+
+def test_drill_enters_exact_resolved_callee_and_breadcrumb_returns(monkeypatch):
+    held=_with_flows()
+    held._index_connection=SimpleNamespace(handle=lambda:"existing-index")
+    calls=[]
+    class Query:
+        def __init__(self,statement,params):
+            assert "code.control_flow_node_vw" in statement
+            self.params=params
+        def rows(self,handle):
+            assert handle=="existing-index"
+            calls.append(self.params["symbol_id"])
+            return _flow_rows(self.params["symbol_id"])
+    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    held.focus(reading="flow",flow="example")
+    held.double_click("control:100:call")
+    focus = held.projection()["focus"]
+    assert {k: v for k, v in focus.items() if k != "call_site"} == {"flow":"example","symbol":200}
+    assert focus["call_site"]["caller_symbol_id"] == 100
+    assert focus["call_site"]["code_edge_id"] == 42
+    assert focus["call_site"]["continuations"] == [{"node_key":"exit","kind":"next"}]
+    held.focus(**held.projection()["path"][-2]["focus"])
+    assert calls==[100,200,100]
+    assert held.projection()["focus"]=={"flow":"example"}
+
+
+def test_missing_evidence_is_a_boundary_not_a_fallback_call_graph():
+    held=_with_flows();held._read["flow_steps"]=[]
+    held.focus(reading="flow",flow="example")
+    assert held.projection()["nodes"][0]["kind"]=="boundary"
+    assert held.projection()["edges"]==[]
+    held.focus(flow="missing")
+    assert held.projection()["nodes"][0]["kind"]=="boundary"
+
+
+def test_unknown_call_refuses_drilling_but_keeps_source_inspectable():
+    held=_with_flows()
+    held._read["flow_steps"][3]["target_code_symbol_id"]=None
+    held.focus(reading="flow",flow="example")
+    with pytest.raises(module.AppError,match="does not resolve"):
+        held.double_click("control:100:call")
+    assert held.context_click("control:100:call")["identity"]["kind"]=="configured_file"
+
+
+def test_switching_readings_retains_same_map_and_its_flow_path():
+    held=_with_flows();held.focus(reading="flow",flow="example")
+    held.focus(reading="object")
+    held.focus(reading="flow")
+    assert held.projection()["focus"]=={"flow":"example"}
+    assert held.projection()["readings"]==[OBJECT_PROJECTION,FLOW_PROJECTION]
+
+
+def test_failed_flow_read_keeps_previous_focus(monkeypatch):
+    held=_with_flows();held.focus(reading="flow",flow="example")
+    before=held.projection()
+    held._index_connection=SimpleNamespace(handle=lambda:"handle")
+    class Query:
+        def __init__(self,*args): pass
+        def rows(self,handle): raise module.AppError("read refused")
+    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    with pytest.raises(module.AppError,match="read refused"):
+        held.double_click("control:100:call")
+    assert held.projection()["focus"]==before["focus"]
+    assert held.projection()["nodes"]==before["nodes"]
+
+
+def test_command_and_workflow_declarations_are_discovered_without_name_inference():
+    held = _with_flows()
+    held._read["flow_commands"] = [{"application_name":"example", "application_command_id":7,
+        "command_name":"serve", "description":"Serve the application", "ordinal":1,
+        "code_symbol_id":100,"node_key":"test"}]
+    held._read["flow_operations"] = [{"application_name":"example", "application_operation_id":8,
+        "operation_name":"serve", "description":"Workflow declaration", "ordinal":1}]
+    held.focus(reading="flow", application="example")
+    nodes = {n["id"]:n for n in held.projection()["nodes"]}
+    assert nodes["command:7"]["role"] == ""
+    assert nodes["operation:8"]["role"] == "unresolved"
+    # Equal names never make the workflow declaration an implementation edge.
+    held.double_click("operation:8")
+    assert held.projection()["nodes"][0]["kind"] == "boundary"
+    assert held.projection()["edges"] == []
+    held.focus(application="example")
+    held.double_click("command:7")
+    p = held.projection()
+    assert p["focus"] == {"flow":"example", "command_id":7}
+    assert {n["id"] for n in p["nodes"]} == {"control:100:test","control:100:call","control:100:exit"}
+    assert not any(e["source"] == "control:100:test" and e["label"] == "false" for e in p["edges"])
+
+
+def test_call_sites_to_same_callee_remain_distinct_with_their_return_paths(monkeypatch):
+    held = _with_flows()
+    first = dict(_flow_rows()[3])
+    first.update(node_key="first",to_key="second")
+    second = {**first,"node_key":"second","to_key":"exit","code_edge_id":43,"source_line":11,"end_line":11}
+    caller = [_flow_rows()[0] | {"to_key":"first"},first,second,_flow_rows()[-1]]
+    held._read["flow_steps"] = caller
+    class Query:
+        def __init__(self, statement, params): self.symbol = params["symbol_id"]
+        def rows(self, handle): return caller if self.symbol == 100 else _flow_rows(200)
+    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    held._index_connection = SimpleNamespace(handle=lambda:"index")
+    held.focus(reading="flow",flow="example")
+    held.double_click("control:100:first")
+    first_focus = held.projection()["focus"]
+    first_path = held.projection()["path"][-1]["value"]
+    held.focus(flow="example")
+    held.double_click("control:100:second")
+    assert held.projection()["path"][-1]["value"] != first_path
+    assert first_focus["call_site"]["continuations"] == [{"node_key":"second","kind":"next"}]
+    assert held.projection()["focus"]["call_site"]["continuations"] == [{"node_key":"exit","kind":"next"}]
+
+
+def test_object_interactions_are_the_overview_and_cfg_is_explicit_detail():
+    held = _with_flows()
+    base = {**_flow_rows()[0], "parameter_names":["source","transform","target"],
+            "parameter_annotations":["Source","Transform","Target"]}
+    rows = [{**base,"node_key":"entry","kind":"entry","text":"Execute one load", "to_key":"source","transition_kind":"next"}]
+    for index,(owner,after) in enumerate((("Source","transform"),("Transform","target"),("Target","exit")),1):
+        rows.append({**base,"node_key":owner.lower(),"kind":"call","text":owner.lower()+".resolve(ctx)",
+            "source_line":10+index,"end_line":10+index,"target_symbol_kind":"method",
+            "callee_reference":owner.lower()+".resolve", "target_symbol_name":"resolve",
+            "target_owner_name":owner,"target_label":owner+".resolve", "target_code_symbol_id":200+index,
+            "to_key":after,"transition_kind":"next"})
+    rows.append({**base,"node_key":"exit","kind":"exit","to_key":None,"transition_kind":None})
+    held._read["flow_steps"] = rows
+    held.focus(reading="flow",flow="example")
+    projection=held.projection()
+    assert [n["label"] for n in projection["nodes"] if n["kind"]=="activity"] == ["Source.resolve","Transform.resolve","Target.resolve"]
+    assert len(projection["edges"])==4
+    assert {n["label"] for n in projection["nodes"] if n["kind"]=="participant"} == {
+        "source: Source", "transform: Transform", "target: Target"}
+    assert all(n.get("parent", "").startswith("participant:100:")
+               for n in projection["nodes"] if n["kind"]=="activity")
+    held.double_click("control:100:entry")
+    assert held.projection()["focus"]["detail"] is True
+    assert {n["kind"] for n in held.projection()["nodes"]}=={"entry","call","exit"}
+
+
+def test_activity_overview_does_not_show_unreachable_code_or_exception_spaghetti():
+    held=_with_flows()
+    base=_flow_rows()[0]
+    held._read["flow_steps"]=_flow_rows()+[
+        {**base,"node_key":"dead","kind":"call","text":"never_reached()","to_key":"exit","transition_kind":"next","target_code_symbol_id":999},
+        {**base,"node_key":"call","kind":"call","text":"next_task(arg)","to_key":"error","transition_kind":"exception","target_code_symbol_id":200},
+        {**base,"node_key":"error","kind":"exception_exit","to_key":None,"transition_kind":None}]
+    held.focus(reading="flow",flow="example")
+    projection=held.projection()
+    assert not any(n["id"].endswith(":dead") or n["kind"]=="exception_exit" for n in projection["nodes"])
+    assert not any(e["label"]=="exception" for e in projection["edges"])
+    held.click("control:100:entry")
+    assert dict(held.projection()["details"]["rows"])["Indexed failure transitions"]==1
+
+
+def test_activity_arrows_keep_actual_condition_witnesses_and_partial_boundaries():
+    held=_with_flows()
+    base=_flow_rows()[0]
+    held._read["flow_steps"]=_flow_rows()+[
+        {**base,"node_key":"entry","kind":"entry","to_key":"gap","transition_kind":"next"},
+        {**base,"node_key":"gap","kind":"boundary","text":"unsupported comprehension","source_column":0,"end_column":1,"to_key":"test","transition_kind":"unknown"}]
+    # Replace the old entry edge: no alternative bypass is fabricated.
+    held._read["flow_steps"]=[r for r in held._read["flow_steps"] if not(r["node_key"]=="entry" and r["to_key"]=="test")]
+    held.focus(reading="flow",flow="example")
+    projection=held.projection()
+    assert not any(n["kind"] in ("boundary","code_section") for n in projection["nodes"])
+    assert any(n["kind"] == "condition" and n["label"] == "flag" for n in projection["nodes"])
+    to_call=next(e for e in projection["edges"] if e["target"]=="control:100:call")
+    assert to_call["label"]=="true"
+    partial=next(e for e in projection["edges"] if e["target"]=="control:100:test")
+    assert partial["label"]=="partial"
+    held.click(partial["id"])
+    witness=dict(held.projection()["details"]["rows"])["Indexed transitions"]
+    assert any(r["transition_kind"]=="unknown" for r in witness)
+    assert {e["label"] for e in projection["edges"] if e["source"]=="control:100:test"} == {"true","false"}
+
+
+def test_missing_function_coverage_remains_an_explicit_boundary_in_the_overview():
+    held=_with_flows()
+    held._read["flow_steps"]=[{**_flow_rows()[0],"node_key":None,"kind":None,
+                              "to_key":None,"coverage_status":None}]
+    held.focus(reading="flow",flow="example")
+    assert held.projection()["nodes"][0]["kind"]=="boundary"
+    assert "not published" in held.projection()["nodes"][0]["label"]
+
+
+def test_operation_uses_registered_index_binding_and_reads_exact_callable(monkeypatch):
+    held = _with_flows()
+    held._read["flow_operations"] = [{"application_name":"example", "application_operation_id":8,
+        "operation_name":"export", "description":"Export database DDL", "ordinal":1,
+        "code_symbol_id":200}]
+    reads = []
+    class Query:
+        def __init__(self, statement, params):
+            reads.append(params)
+        def rows(self, handle):
+            return _flow_rows(200)
+    monkeypatch.setattr(module, "DatabaseQuery", Query)
+    held._index_connection = SimpleNamespace(handle=lambda: "handle")
+    held.focus(reading="flow", application="example")
+    held.double_click("operation:8")
+    projection = held.projection()
+    assert reads == [{"symbol_id":200}]
+    assert any(n["id"] == "control:200:entry" for n in projection["nodes"])
+    assert not any(n["kind"] == "boundary" for n in projection["nodes"])
+    assert projection["path"][-1]["label"] == "export"
+
+
+def test_overview_retains_construction_decision_and_explicit_refusal():
+    held = _with_flows()
+    base = _flow_rows()[0]
+    held._read["flow_steps"] = [
+        {**base,"node_key":"entry","kind":"entry","text":"Export","to_key":"create","transition_kind":"next"},
+        {**base,"node_key":"create","kind":"call","text":"Request()","callee_reference":"Request", "source_line":9,"end_line":9,
+         "target_symbol_kind":"class","target_symbol_name":"Request","target_identity":"domain.Request",
+         "target_code_symbol_id":201,"to_key":"test","transition_kind":"next"},
+        {**base,"node_key":"test","kind":"condition","text":"not selected","to_key":"refuse","transition_kind":"true"},
+        {**base,"node_key":"test","kind":"condition","text":"not selected","to_key":"exit","transition_kind":"false"},
+        {**base,"node_key":"refuse","kind":"raise","text":"raise AppError('No selection')","to_key":"error","transition_kind":"exception"},
+        {**base,"node_key":"error","kind":"exception_exit","to_key":None,"transition_kind":None},
+        {**base,"node_key":"exit","kind":"exit","to_key":None,"transition_kind":None}]
+    held.focus(reading="flow", flow="example")
+    projection = held.projection()
+    labels = {n["id"]:n["label"] for n in projection["nodes"]}
+    assert labels["control:100:create"] == "Create domain.Request"
+    assert labels["control:100:refuse"] == "raise AppError('No selection')"
+    assert labels["control:100:error"] == "Failure / refusal to caller"
+    assert {(e["label"], e["target"]) for e in projection["edges"]
+            if e["source"]=="control:100:test"} == {
+                ("true","control:100:refuse"), ("false","control:100:exit")}
+
+
+def test_request_root_detail_keeps_the_selected_request_instead_of_full_dispatcher():
+    held = _with_flows()
+    held._read['flow_requests'] = [{'application_name':'example', 'application_request_id':'100:run',
+        'request_name':'run', 'code_symbol_id':100, 'node_key':'test'}]
+    held.focus(reading='flow', flow='example', request_id='100:run')
+    held.double_click('control:100:test')
+    projection = held.projection()
+    assert projection['focus'] == {'flow':'example', 'request_id':'100:run', 'detail':True}
+    assert {n['id'] for n in projection['nodes']} == {
+        'control:100:test', 'control:100:call', 'control:100:exit'}
+    assert not any(e['label'] == 'false' for e in projection['edges'])
