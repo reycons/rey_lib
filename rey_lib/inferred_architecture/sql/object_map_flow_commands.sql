@@ -21,7 +21,7 @@ WITH governed AS (
 )
 SELECT d.application_name,d.application_command_id,d.command_name,d.description,d.ordinal,
        n.code_symbol_id,n.node_key,n.dotted_identity,n.repository_key,n.relative_path,
-       n.coverage_status,n.coverage_reason
+       n.coverage_status,n.coverage_reason,n.source_line
 FROM declarations d
 LEFT JOIN bindings n ON n.repository_key=d.application_name AND d.command_name=ANY(n.commands)
   AND (n.kind='entry' OR NOT EXISTS (

@@ -24,7 +24,7 @@ WITH catalogues AS (
 )
 SELECT o.application_name,o.application_operation_id,o.operation_name,o.description,o.ordinal,
        b.code_symbol_id,n.dotted_identity,n.repository_key,n.relative_path,
-       n.coverage_status,n.coverage_reason
+       n.coverage_status,n.coverage_reason,n.source_line
 FROM code.object_map_flow_operation_vw o
 LEFT JOIN bindings b USING (application_name,application_operation_id)
 LEFT JOIN code.control_flow_node_vw n ON n.code_symbol_id=b.code_symbol_id

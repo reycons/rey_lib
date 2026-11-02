@@ -523,6 +523,16 @@ class Application:
     #: its shared registration or the browser. Not configuration persistence.
     _run_settings: dict[str, Any] = field(default_factory=dict, init=False,
                                          repr=False, compare=False, hash=False)
+    _maps: dict[str, Any] = field(default_factory=dict, init=False,
+                                  repr=False, compare=False, hash=False)
+
+    def application_map(self, ctx: Any) -> Any:
+        """This live Application's retained, independently navigable input map."""
+        if "flow" not in self._maps:
+            from rey_lib.db.connection import shared_connection
+            from rey_lib.inferred_architecture.object_map import ObjectMap
+            self._maps["flow"] = ObjectMap.for_application(shared_connection(ctx, "tree"), self.name)
+        return self._maps["flow"]
 
     def for_console(self, ctx: Any) -> "Application":
         """An independent live Application for one Console opening (#1255)."""
@@ -697,6 +707,7 @@ class Application:
         return {
             "panel_type": self.PANEL_TYPE,
             "application_id": self.name,
+            **({"map": self._maps["flow"].projection()} if "flow" in self._maps else {}),
             **({"settings": self.settings_projection()} if self._run_settings else {}),
             "label": self.label,
             # The AI this installation gives the application, as carried (#1296).

@@ -238,6 +238,20 @@ class File:
         self._working_text: str | None = None
         self._original_bytes: bytes | None = None
         self._editing_limit = 0
+        self._location: dict[str, int] | None = None
+        self._focus_revision = 0
+
+    @property
+    def location(self) -> dict[str, int] | None:
+        """The position this File was asked to show, independent of its content."""
+        return dict(self._location) if self._location is not None else None
+
+    def focus(self, *, line: int) -> None:
+        """Show this one-based source line. Repeated navigation is a new focus."""
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            raise AppError("File focus requires a positive source line.")
+        self._focus_revision += 1
+        self._location = {"line": line, "revision": self._focus_revision}
 
     # -- what kind of file ------------------------------------------------------
 

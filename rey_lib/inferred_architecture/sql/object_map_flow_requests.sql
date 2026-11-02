@@ -4,7 +4,7 @@ SELECT n.repository_key AS application_name,
        substring(command FROM 9) AS request_name,
        n.dotted_identity AS description,
        n.code_symbol_id,n.node_key,n.dotted_identity,n.repository_key,n.relative_path,
-       n.coverage_status,n.coverage_reason
+       n.coverage_status,n.coverage_reason,n.source_line
 FROM code.control_flow_node_vw n
 CROSS JOIN LATERAL unnest(n.commands) AS command
 WHERE n.kind='condition' AND command LIKE 'request:%'

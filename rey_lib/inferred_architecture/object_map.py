@@ -148,8 +148,7 @@ class ObjectMap:
 
     @classmethod
     def for_architecture(cls, connection: Any, installation: str) -> "ObjectMap":
-        """The estate's map, read on the shared ``connection``: its object reading
-        and its flow reading (#1304), the object reading active.
+        """The estate's object map, read on the shared ``connection``.
 
         Args:
             connection: The shared Connection the host resolved; held by the
@@ -158,10 +157,24 @@ class ObjectMap:
         """
         handle = connection.handle()
         read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
-                for name in _OBJECT_READS + _FLOW_READS}
+                for name in _OBJECT_READS}
         held = cls({"kind": "inferred_architecture", "installation": installation},
                    OBJECT_PROJECTION, read)
         held._index_connection = connection
+        return held
+
+    @classmethod
+    def for_application(cls, connection: Any, application: str) -> "ObjectMap":
+        """The selected application's input flows, with no estate-level navigation."""
+        handle = connection.handle()
+        read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
+                for name in _FLOW_READS}
+        read["flows"] = [row for row in read["flows"] if row["entry_repository_key"] == application]
+        for name in ("flow_commands", "flow_operations", "flow_requests"):
+            read[name] = [row for row in read[name] if row["application_name"] == application]
+        held = cls({"kind": "application", "application": application}, FLOW_PROJECTION, read)
+        held._index_connection = connection
+        held.focus(application=application)
         return held
 
     @classmethod
@@ -303,8 +316,13 @@ class ObjectMap:
         """Application declarations, proved operation branches, or exact function flow."""
         key = focus.get("flow")
         application = focus.get("application")
+        owned_application = self.subject.get("application") if self.subject.get("kind") == "application" else None
+        if owned_application:
+            if application and application != owned_application:
+                raise AppError("This map belongs to another application.")
+            application = owned_application
         if not key:
-            if application and not any(f["entry_repository_key"] == application
+            if application and not owned_application and not any(f["entry_repository_key"] == application
                                        for f in self._read.get("flows", [])):
                 raise AppError(f"This map holds no application {application!r}.")
             self._focus = {"flow": None, **({"application": application} if application else {})}
@@ -830,6 +848,8 @@ class ObjectMap:
         Each map retains the traversed objects after its root.
         """
         if self.projection_kind == FLOW_PROJECTION:
+            if self.subject.get("kind") == "application":
+                return list(self._context_path)
             return [{"value": "flows", "label": "Applications", "focus": {"flow": None}},
                     *self._context_path]
         if self.projection_kind == SCHEMA_PROJECTION:
@@ -942,13 +962,19 @@ class ObjectMap:
         Raises:
             AppError: When the node is absent or an indexing boundary.
         """
-        element = next((n for n, _ in self._flow_scope()[0] if n["id"] == node_id), None)
-        if element is None:
+        pair = next(((n, row) for n, row in self._flow_scope()[0] if n["id"] == node_id), None)
+        if pair is None:
             raise AppError(f"The map has no node {node_id!r}.")
-        if element.get("relative_path") and element.get("repository_key"):
+        element, evidence = pair
+        evidence = evidence or {}
+        target = bool(evidence.get("target_relative_path") and evidence.get("target_start_line"))
+        repository = (evidence.get("target_source_repository") if target else None) or element.get("repository_key") or evidence.get("repository_key")
+        path = evidence.get("target_relative_path") if target else element.get("relative_path") or evidence.get("relative_path")
+        line = evidence.get("target_start_line") if target else evidence.get("source_line")
+        if path and repository:
             return {"identity": {"kind": _CLAIM_FILE_KIND, "root": _CLAIM_FILE_ROOT,
-                                 "relative_path": f"{element['repository_key']}/"
-                                                  f"{element['relative_path']}"}}
+                                 "relative_path": f"{repository}/{path}"},
+                    **({"focus": {"line": int(line)}} if line and int(line) > 0 else {})}
         if element["kind"] == "boundary":
             raise AppError("This boundary is where the index stops: it names no source file.")
         return None
@@ -963,6 +989,10 @@ class ObjectMap:
                 applications = sorted({f["entry_repository_key"] for f in flows})
                 return [({"id": f"{_APPLICATION}{name}", "kind": "flow", "label": name,
                           "role": ""}, {"application": name}) for name in applications], []
+            if not any(f["entry_repository_key"] == application for f in flows):
+                return [({"id": f"boundary:inputs:{application}", "kind": "boundary",
+                          "label": "This application is not present in the code index", "role": "boundary"},
+                         {"resolution": "application_not_indexed"})], []
             declarations: dict[str, _Mapped] = {}
             for kind, read, id_key, name_key in (
                     ("command", "flow_commands", "application_command_id", "command_name"),
@@ -1142,7 +1172,6 @@ class ObjectMap:
                     "expand_symbol_id": symbol_id}, {"resolution": "operation_metadata_not_published"}))
                 continue
             adjacency: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
-            incoming: dict[str, list[str]] = {}
             failure_edges = []
             for edge, evidence in edges:
                 if edge["source"] not in scope or edge["target"] not in scope:
@@ -1152,15 +1181,7 @@ class ObjectMap:
                     if scope[edge["source"]][0]["kind"] != "raise":
                         continue
                 adjacency.setdefault(edge["source"], []).append((edge, evidence))
-                incoming.setdefault(edge["target"], []).append(edge["source"])
             exits = {key for key, (node, _) in scope.items() if node["kind"] in ("exit", "exception_exit")}
-            successful = set(exits)
-            pending = list(exits)
-            while pending:
-                for before in incoming.get(pending.pop(), []):
-                    if before not in successful:
-                        successful.add(before)
-                        pending.append(before)
             roots = [key for key, (node, _) in scope.items()
                      if node["kind"] == "entry" or node.get("operation_root")]
             reached = set(roots)
@@ -1170,7 +1191,10 @@ class ObjectMap:
                     if edge["target"] not in reached:
                         reached.add(edge["target"])
                         pending.append(edge["target"])
-            successful.intersection_update(reached)
+            # A handled request returns to the next channel receive, where its
+            # scoped graph stops. It need not reach the serving function's exit.
+            # Keep every reachable activity, including non-returning loops.
+            successful = reached
             visible: dict[str, _Mapped] = {}
             conditions = [row for node, row in scope.values() if node["kind"] in ("condition", "loop")]
             calls = [row for node, row in scope.values() if node["kind"] == "call"]

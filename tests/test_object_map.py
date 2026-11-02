@@ -592,7 +592,7 @@ def test_step_inspection_exposes_actual_code_source_and_coverage():
     assert ["Line",10] in rows
     assert ["Coverage","partial"] in rows
     assert held.context_click("control:100:call")=={"identity":{
-        "kind":"configured_file","root":"{apps}","relative_path":"example/example/main.py"}}
+        "kind":"configured_file","root":"{apps}","relative_path":"example/example/main.py"}, "focus":{"line":10}}
 
 
 def test_transition_inspection_reports_indexed_branch_not_fabricated_call_order():
@@ -843,3 +843,88 @@ def test_request_root_detail_keeps_the_selected_request_instead_of_full_dispatch
     assert {n['id'] for n in projection['nodes']} == {
         'control:100:test', 'control:100:call', 'control:100:exit'}
     assert not any(e['label'] == 'false' for e in projection['edges'])
+
+
+def test_request_overview_keeps_activities_that_return_to_the_command_loop():
+    held = _with_flows()
+    base = _flow_rows()[0]
+    held._read['flow_steps'] = [
+        {**base, 'node_key':'receive', 'kind':'loop', 'source_line':1, 'end_line':30,
+         'to_key':'test', 'transition_kind':'body'},
+        {**base, 'node_key':'test', 'kind':'condition', 'text':"name == 'execute'",
+         'to_key':'execute', 'transition_kind':'true'},
+        {**base, 'node_key':'test', 'kind':'condition', 'text':"name == 'execute'",
+         'to_key':'other', 'transition_kind':'false'},
+        {**base, 'node_key':'execute', 'kind':'call', 'text':'query.execute()',
+         'source_line':11, 'end_line':11,
+         'to_key':'receive', 'transition_kind':'next'},
+        {**base, 'node_key':'other', 'kind':'call', 'text':'query.lint()',
+         'source_line':12, 'end_line':12,
+         'to_key':'receive', 'transition_kind':'next'},
+    ]
+    held._read['flow_requests'] = [{'application_name':'example',
+        'application_request_id':'100:execute', 'request_name':'execute',
+        'code_symbol_id':100, 'node_key':'test'}]
+    held.focus(reading='flow', application='example')
+    held.double_click('request:100:execute')
+    projection = held.projection()
+    assert {n['id'] for n in projection['nodes']} == {'control:100:test', 'control:100:execute'}
+    assert len(projection['edges']) == 1
+    held.double_click('control:100:test')
+    assert held.projection()['focus']['detail'] is True
+    assert {n['id'] for n in held.projection()['nodes']} == {'control:100:test', 'control:100:execute'}
+
+
+def test_flow_right_click_opens_resolved_function_definition_in_its_own_file():
+    held = _with_flows()
+    held._read['flow_steps'] = [
+        {**row, **({'target_source_repository':'other', 'target_relative_path':'other/worker.py',
+                   'target_start_line':72} if row['node_key']=='call' else {})}
+        for row in _flow_rows()]
+    held.focus(reading='flow', flow='example', detail=True)
+    assert held.context_click('control:100:call') == {
+        'identity': {'kind':'configured_file', 'root':'{apps}', 'relative_path':'other/other/worker.py'},
+        'focus': {'line':72}}
+
+
+def test_flow_input_right_click_opens_the_bound_handler_at_its_indexed_line():
+    held = _with_flows()
+    held._read['flow_commands'] = [{'application_name':'example', 'application_command_id':7,
+        'command_name':'scan', 'code_symbol_id':100, 'node_key':'entry',
+        'repository_key':'example', 'relative_path':'main.py', 'source_line':52}]
+    held.focus(reading='flow', application='example')
+    assert held.context_click('command:7') == {
+        'identity': {'kind':'configured_file', 'root':'{apps}', 'relative_path':'example/main.py'},
+        'focus': {'line':52}}
+
+
+def test_application_map_is_scoped_and_has_no_estate_navigation(monkeypatch):
+    flows = _with_flows()._read['flows']
+    class Query:
+        def __init__(self, statement): self.statement = statement
+        def rows(self, handle):
+            assert handle == 'index'
+            return flows if 'FROM\tcode.object_map_flow_vw' in self.statement else []
+    monkeypatch.setattr(module, 'DatabaseQuery', Query)
+    held = ObjectMap.for_application(SimpleNamespace(handle=lambda:'index'), 'example')
+    assert held.projection()['subject'] == {'kind':'application', 'application':'example'}
+    assert held.projection()['focus'] == {'flow':None, 'application':'example'}
+    assert all(s['label'] != 'Applications' for s in held.projection()['path'])
+    held.focus()
+    assert held.projection()['focus']['application'] == 'example'
+    with pytest.raises(module.AppError, match='another application'):
+        held.focus(application='missing')
+    with pytest.raises(module.AppError, match='no flow'):
+        held.focus(flow='missing')
+
+
+def test_architecture_factory_holds_only_the_object_reading(monkeypatch):
+    statements = []
+    class Query:
+        def __init__(self, statement): statements.append(statement)
+        def rows(self, handle): return []
+    monkeypatch.setattr(module, 'DatabaseQuery', Query)
+    held = ObjectMap.for_architecture(SimpleNamespace(handle=lambda:None), 'local')
+    assert held.projection()['readings'] == ['object']
+    assert len(statements) == 5
+    assert not any('object_map_flow' in statement for statement in statements)
