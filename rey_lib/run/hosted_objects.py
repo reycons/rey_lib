@@ -45,6 +45,15 @@ __all__ = ["Emit", "Hosted", "HostedObjects"]
 
 _logger = AppLogger(__name__)
 
+
+def _release_idle_sessions() -> None:
+    """Give back every idle database session the runtime's owner holds (#1309)."""
+    # rey_lib.run is never an import-time dependency of rey_lib.db.
+    from rey_lib.db.connection import connection_owner  # noqa: PLC0415
+
+    connection_owner().release_idle()
+
+
 #: Sends one message about one hosted object; the object's id is added to it.
 Emit = Callable[[dict[str, Any]], None]
 
@@ -177,6 +186,10 @@ class HostedObjects:
                 if name == "close":
                     break
                 self._answer(channel, name, command)
+                # Idle until the next command: no database session is held for
+                # the wait (#1309). The runtime's owner ends them; no object
+                # or application manages a session.
+                _release_idle_sessions()
             else:
                 _logger.info("hosted objects: the launcher detached holding %d object(s).",
                              len(self._held))

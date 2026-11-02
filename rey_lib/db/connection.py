@@ -183,6 +183,24 @@ class Connection:
         except Exception:  # noqa: BLE001 — a failed close must not mask shutdown.
             pass
 
+    def release_idle(self) -> bool:
+        """End the physical session the handle holds idle, keeping the handle (#1309).
+
+        The logical connection stays open and shared; the next operation checks
+        a fresh session out. A session a cursor or transaction still holds is
+        never ended. A handle that holds no session, or one with no notion of
+        an idle session (DuckDB, HTTP), answers False.
+        """
+        handle = self._handle
+        releaser = getattr(handle, "release_idle", None)
+        if handle is None or not callable(releaser):
+            return False
+        # logs reaches the control layer, which uses this module.
+        from rey_lib.logs import AppLogger  # noqa: PLC0415
+
+        AppLogger(__name__).debug("connection: releasing the idle session of %s", self._name)
+        return bool(releaser())
+
     # -- operations ---------------------------------------------------------
 
     def execute(self, sql_text: str, named_params: dict[str, Any],
@@ -339,6 +357,19 @@ class ConnectionOwner:
         self._definitions = {}
         for connection in held:
             connection.close()
+
+    def release_idle(self) -> int:
+        """End every idle physical session held, keeping every connection (#1309).
+
+        Called by the common runtime at the point a process waits for its next
+        work; never by an application. Returns how many sessions were ended.
+        """
+        released = 0
+        for connection in list(self._owned.values()):
+            releaser = getattr(connection, "release_idle", None)
+            if callable(releaser) and releaser():
+                released += 1
+        return released
 
 
 _OWNER = ConnectionOwner()

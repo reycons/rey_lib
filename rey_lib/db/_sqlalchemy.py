@@ -7,12 +7,38 @@ use while provider implementations use the helpers in this module.
 
 from __future__ import annotations
 
+import threading
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
+
+#: The bound on physical sessions per logical connection configuration (#1309):
+#: one Engine per configuration, at most this many sessions in it, no overflow.
+POOL_SIZE = 1
+POOL_MAX_OVERFLOW = 0
+#: How long a checkout waits for the bound session before it is refused, so that
+#: a second checkout ends in an error rather than a hang.
+POOL_CHECKOUT_SECONDS = 30.0
+
+
+def _has_transaction(session: Any) -> bool:
+    """Whether ``session`` holds a transaction on the server.
+
+    SQLAlchemy begins a transaction object on every first statement, even on a
+    session the driver runs in autocommit, where nothing is held on the server
+    and ending the session loses nothing. Only a session the driver is NOT
+    running in autocommit holds what it has begun.
+    """
+    probe = getattr(session, "in_transaction", None)
+    if not callable(probe) or not probe():
+        return False
+    pooled = getattr(session, "connection", None)
+    driver = getattr(pooled, "driver_connection", pooled)
+    return not bool(getattr(driver, "autocommit", False))
 
 
 def _sqlalchemy() -> tuple[Any, Any]:
@@ -34,30 +60,87 @@ class ReyConnection:
     access solely for approved vendor-specific fallbacks.
     """
 
-    def __init__(self, provider: str, engine: Any, connection: Any) -> None:
+    def __init__(self, provider: str, engine: Any, connection: Any = None) -> None:
+        """Own the Engine for life; hold a session only while it is in use (#1309).
+
+        ``connection`` is the session the opener verified the configuration
+        with, kept as the one in use until ``release_idle``. Every operation on
+        this handle uses that one session, so nested use never asks the bounded
+        pool for a second.
+        """
         self.provider = provider
         self._engine = engine
-        self._connection = connection
+        self._active: Any = connection
+        self._open_cursors = 0
         self._closed = False
+        self._guard = threading.RLock()
+
+    def _session(self) -> Any:
+        """The session in use, checked out of the Engine's pool on first need."""
+        with self._guard:
+            if self._closed:
+                raise DatabaseError("the connection handle is closed")
+            if self._active is None:
+                self._active = self._engine.connect()
+            return self._active
+
+    def _give_back(self) -> Any:
+        """Return the session in use to the pool when nothing holds it; else None.
+
+        Nothing is given back while a cursor is open on it or a transaction has
+        been begun on it: those are the two ways a caller still holds it.
+        """
+        with self._guard:
+            session = self._active
+            if session is None or self._open_cursors > 0 or _has_transaction(session):
+                return None
+            self._active = None
+        session.close()
+        return session
+
+    def release_idle(self) -> bool:
+        """End the idle physical session, if the handle holds one nobody is using.
+
+        Returns True when a session was ended. The Engine stays; the next
+        operation checks a fresh session out. Never ends a session a cursor or
+        a transaction still holds.
+        """
+        if self._closed or self._give_back() is None:
+            return False
+        self._engine.dispose()
+        return True
 
     def close(self) -> None:
         if self._closed:
             return
         try:
-            self._connection.close()
+            with self._guard:
+                session, self._active = self._active, None
+            if session is not None:
+                session.close()
         finally:
             self._engine.dispose()
             self._closed = True
 
     def commit(self) -> None:
-        self._connection.commit()
+        self._session().commit()
 
     def rollback(self) -> None:
-        self._connection.rollback()
+        self._session().rollback()
 
-    def cursor(self, *args: Any, **kwargs: Any) -> Any:
-        """Return a DBAPI cursor for an approved provider-specific fallback."""
-        return raw_dbapi_connection(self).cursor(*args, **kwargs)
+    def cursor(self, *args: Any, **kwargs: Any) -> "ReyCursor":
+        """A DBAPI cursor for an approved provider-specific fallback.
+
+        The session stays in use until the cursor is closed.
+        """
+        with self._guard:
+            cursor = raw_dbapi_connection(self).cursor(*args, **kwargs)
+            self._open_cursors += 1
+        return ReyCursor(self, cursor)
+
+    def _cursor_closed(self) -> None:
+        with self._guard:
+            self._open_cursors = max(0, self._open_cursors - 1)
 
     def __enter__(self) -> "ReyConnection":
         return self
@@ -65,6 +148,40 @@ class ReyConnection:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if exc_type is not None:
             self.rollback()
+        self.close()
+
+
+class ReyCursor:
+    """A DBAPI cursor that keeps its handle's session in use until closed (#1309).
+
+    Everything else is the driver cursor's own: execute, fetch, iteration,
+    description. Closing it, once, lets the handle give its session back.
+    """
+
+    def __init__(self, handle: ReyConnection, cursor: Any) -> None:
+        self._handle = handle
+        self._cursor = cursor
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._cursor.close()
+        finally:
+            self._handle._cursor_closed()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._cursor)
+
+    def __enter__(self) -> "ReyCursor":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self.close()
 
 
@@ -99,6 +216,12 @@ def open_connection(
     engine = create_engine(
         url,
         connect_args=connect_args or {},
+        # The bound (#1309): one session per configuration, none beyond it, a
+        # bounded wait for it, and a stale pooled session noticed before use.
+        pool_size=POOL_SIZE,
+        max_overflow=POOL_MAX_OVERFLOW,
+        pool_timeout=POOL_CHECKOUT_SECONDS,
+        pool_pre_ping=True,
         **({"isolation_level": isolation_level} if isolation_level else {}),
     )
     try:
@@ -113,7 +236,7 @@ def core_connection(conn: Any) -> Any:
     """Return the private SQLAlchemy Connection for a Rey handle."""
     if not isinstance(conn, ReyConnection):
         raise UnsupportedDatabaseCapabilityError("connection is not SQLAlchemy-backed")
-    return conn._connection
+    return conn._session()
 
 
 @contextmanager
@@ -143,7 +266,20 @@ def own_connection(conn: Any, *, isolation_level: str = "") -> Iterator[Any]:
     """
     if not isinstance(conn, ReyConnection):
         raise UnsupportedDatabaseCapabilityError("connection is not SQLAlchemy-backed")
-    borrowed = conn._engine.connect()
+    # The pool is bounded to one session (#1309): the handle's idle session is
+    # given back first so this checkout takes that very session, and a session
+    # still held (an open cursor, a begun transaction) makes the wait end in a
+    # refusal rather than a hang.
+    conn._give_back()
+    from sqlalchemy.exc import TimeoutError as PoolTimeout  # noqa: PLC0415
+
+    try:
+        borrowed = conn._engine.connect()
+    except PoolTimeout as exc:
+        raise DatabaseError(
+            "no session for the operation: the connection's one session is held "
+            f"by an open cursor or transaction (waited {POOL_CHECKOUT_SECONDS:g} s)"
+        ) from exc
     try:
         if isolation_level:
             borrowed = borrowed.execution_options(
