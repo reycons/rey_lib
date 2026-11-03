@@ -285,8 +285,10 @@ class AI:
                                        for field in _EDITABLE_SETTINGS]})
         return {"available": True, "read_only": False, "scopes": scopes,
                 "actions": [_SAVE_SETTINGS_ACTION] if unsaved else [],
+                # Labelled by the profile's own key (user, 2026-11-03): profiles
+                # sharing one provider and model are told apart by it.
                 "profiles": [{"id": key,
-                              "label": f"{row.get('provider') or ''} - {row.get('model') or ''}",
+                              "label": key,
                               "provider": str(row.get("provider") or ""),
                               "model": str(row.get("model") or ""),
                               "access_policy": _access_policy(row)}

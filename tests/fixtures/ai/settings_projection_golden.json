@@ -59,7 +59,7 @@
      "default": "redacted"
     },
     "id": "anthropic",
-    "label": "anthropic - claude-sonnet-4-6",
+    "label": "anthropic",
     "model": "claude-sonnet-4-6",
     "provider": "anthropic"
    },
@@ -72,7 +72,7 @@
      "default": "unredacted"
     },
     "id": "local_precision",
-    "label": "ollama - qwen2.5-coder:32b",
+    "label": "local_precision",
     "model": "qwen2.5-coder:32b",
     "provider": "ollama"
    },
@@ -84,7 +84,7 @@
      "default": "redacted"
     },
     "id": "no_policy",
-    "label": "openai - gpt-4o",
+    "label": "no_policy",
     "model": "gpt-4o",
     "provider": "openai"
    }
