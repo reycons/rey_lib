@@ -430,7 +430,8 @@ class AITask:
 
         Its identity, which governed task it is, the caller's choices and what
         was asked, its lifecycle, and its answer as AI stated it -- text or
-        value with the media type, never rendered. Engine credentials and the
+        value with the media type, never rendered, and beside it the run's tool
+        calls and their results. Engine credentials and the
         contract body stay out: they are execution facts, not display.
 
         With them, what each of its choices may be (``offers``). How it is
@@ -469,6 +470,17 @@ class AITask:
             "run_id": self.run_id,
             "answer": None if answer is None else {
                 "text": answer.text, "value": answer.value, "media_type": answer.media_type,
+                # The run's tool exchange beside the payload (AIResult), as plain data:
+                # each call as the model made it, each result as it came back.
+                "tool_calls": [
+                    {"id": call.id, "name": call.name, "arguments": dict(call.arguments)}
+                    for call in getattr(answer, "tool_calls", ())
+                ],
+                "tool_results": [
+                    {"call_id": result.call_id, "value": result.value,
+                     "failed": result.failed, "message": result.message}
+                    for result in getattr(answer, "tool_results", ())
+                ],
             },
         }
 

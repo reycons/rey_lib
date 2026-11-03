@@ -523,7 +523,7 @@ class AI:
             toolset = AIToolSet(task.tools, bound)
             # Streamed only for an observer: without one the run is exactly the
             # unstreamed request it always was.
-            output, usage = step(
+            output, usage, (tool_calls, tool_results) = step(
                 task, prompt, schema, toolset, token,
                 tell if observe is not None else None, execution_id,
             )
@@ -550,6 +550,10 @@ class AI:
                     finish_reason=AIFinishReason.COMPLETED,
                 ),
                 usage=usage,
+                # The run's tool exchange, as the engine reported it, whether or
+                # not anyone observed the run: beside the payload, never in it.
+                tool_calls=tool_calls,
+                tool_results=tool_results,
             )
             task.answered(result)
             tell(AIEvent.completed(execution_id, result))
@@ -629,11 +633,13 @@ class AI:
         token: Any,
         tell: Callable[[AIEvent], None] | None,
         execution_id: str,
-    ) -> tuple[AIOutput, AIUsage]:
+    ) -> tuple[AIOutput, AIUsage, tuple[tuple[AIToolCall, ...], tuple[AIToolResult, ...]]]:
         """Run one execution through Pydantic AI: :meth:`execute_task`'s step.
 
-        Builds the task's model, runs it once and returns the validated output
-        and what it used; every failure leaves as its AIError. Structured output
+        Builds the task's model, runs it once and returns the validated output,
+        what it used, and its tool exchange -- each function tool call and its
+        result, read from the run's own messages, so it is kept whether or not
+        the run was streamed. Every failure leaves as its AIError. Structured output
         asks Pydantic AI for the model's native JSON-schema output where the
         model's own profile supports it, prompted output otherwise, and never
         tool-call output -- a profile's tool flag is not a promise a local
@@ -663,6 +669,7 @@ class AI:
             UsageLimitExceeded,
             UserError,
         )
+        from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
 
         key = task.task_key or "(default)"
 
@@ -723,6 +730,29 @@ class AI:
                 cancellation_token=token,
             )
             output = self._parse_task_output(task, schema, run.output)
+            # The run's tool exchange, from its own messages in their order --
+            # as _translated states it for an observer: a result is failed where
+            # the owner refused the call (ToolFailed) or it was sent back for
+            # correction (ModelRetry). An output correction answers no tool call.
+            calls: list[AIToolCall] = []
+            results: list[AIToolResult] = []
+            for message in run.all_messages():
+                for part in getattr(message, "parts", ()):
+                    if isinstance(part, ToolCallPart):
+                        calls.append(AIToolCall(id=part.tool_call_id, name=part.tool_name,
+                                                arguments=part.args_as_dict()))
+                    elif isinstance(part, RetryPromptPart) and part.tool_name:
+                        results.append(AIToolResult(call_id=part.tool_call_id, failed=True,
+                                                    message=str(part.content)))
+                    elif isinstance(part, ToolReturnPart):
+                        failed = getattr(part, "outcome", "") == "failed"
+                        results.append(AIToolResult(
+                            call_id=part.tool_call_id,
+                            value=None if failed else part.content,
+                            failed=failed,
+                            message=str(part.content) if failed else "",
+                        ))
+            exchange = (tuple(calls), tuple(results))
         except RunCancelled as withdrawn:
             raise AICancelled(f"AI task '{key}' was cancelled.", cause=withdrawn) from withdrawn
         except UserError as error:
@@ -746,7 +776,7 @@ class AI:
         return output, AIUsage(
             input_tokens=int(run.usage.input_tokens or 0),
             output_tokens=int(run.usage.output_tokens or 0),
-        )
+        ), exchange
 
     def _run_claude_agent_sdk(
         self,
@@ -757,7 +787,7 @@ class AI:
         token: Any,
         tell: Callable[[AIEvent], None] | None,
         execution_id: str,
-    ) -> tuple[AIOutput, AIUsage]:
+    ) -> tuple[AIOutput, AIUsage, tuple[tuple[AIToolCall, ...], tuple[AIToolResult, ...]]]:
         """Run one execution through Claude tooling: :meth:`execute_task`'s step.
 
         The Claude Agent SDK drives the Claude CLI, which authenticates with
@@ -772,7 +802,9 @@ class AI:
         ``OutputParser``'s rejection is sent back in the same session as the
         next message, at most the validation allowance's number of times.
         ``token`` is watched while the session runs and its cancellation
-        interrupts the CLI.
+        interrupts the CLI. Its tool exchange is every tool block the session
+        received, translated as for an observer and kept whether or not there
+        is one.
 
         Raises:
             AICancelled: when ``token`` was cancelled. A synchronous tool call
@@ -831,14 +863,22 @@ class AI:
             corrections = _MAX_OUTPUT_CORRECTIONS
             used = AIUsage()
             message = prompt
+            calls.clear()
+            results.clear()
             while True:
                 await client.query(message)
                 outcome: Any = None
                 async for item in client.receive_response():
                     if isinstance(item, ResultMessage):
                         outcome = item
-                    elif tell is not None:
-                        for event in self._sdk_translated(execution_id, item):
+                        continue
+                    for event in self._sdk_translated(execution_id, item):
+                        # Kept for the result; told only to an observer.
+                        if event.tool_call is not None:
+                            calls.append(event.tool_call)
+                        if event.tool_result is not None:
+                            results.append(event.tool_result)
+                        if tell is not None:
                             tell(event)
                 if token.cancelled:
                     raise AICancelled(f"AI task '{key}' was cancelled.")
@@ -874,6 +914,9 @@ class AI:
                     corrections -= 1
                     message = str(invalid)
 
+        calls: list[AIToolCall] = []
+        results: list[AIToolResult] = []
+
         async def run() -> tuple[AIOutput, AIUsage]:
             """One session, the token watched for as long as it is open."""
             async with ClaudeSDKClient(options=options) as client:
@@ -889,7 +932,8 @@ class AI:
             "structured" if structured else "text",
         )
         try:
-            return asyncio.run(run())
+            output, used = asyncio.run(run())
+            return output, used, (tuple(calls), tuple(results))
         except CLINotFoundError as error:
             raise AIConfigurationError(
                 f"AI task '{key}' runs through Claude tooling, and the Claude CLI is not "

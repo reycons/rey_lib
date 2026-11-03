@@ -72,7 +72,8 @@ class TestTaskProjection:
 
         assert projection["status"] == AITask.COMPLETED
         assert projection["answer"] == {
-            "text": "# Done", "value": None, "media_type": "text/markdown"}
+            "text": "# Done", "value": None, "media_type": "text/markdown",
+            "tool_calls": [], "tool_results": []}
         assert json.loads(json.dumps(projection)) == projection
 
     def test_a_failed_task_projects_why(self) -> None:
