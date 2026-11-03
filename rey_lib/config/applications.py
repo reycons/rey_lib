@@ -534,6 +534,21 @@ class Application:
             self._maps["flow"] = ObjectMap.for_application(shared_connection(ctx, "tree"), self.name)
         return self._maps["flow"]
 
+    def map_action(self, ctx: Any, action: str = "open", **given: Any) -> Any:
+        """Navigate this Application's retained map; return a source selection if requested."""
+        mapped = self.application_map(ctx)
+        if action == "focus":
+            mapped.focus(**dict(given.get("focus") or {}))
+        elif action == "click":
+            mapped.click(given.get("node"))
+        elif action == "double_click":
+            mapped.double_click(str(given.get("node") or ""))
+        elif action == "context_click":
+            return mapped.context_click(str(given.get("node") or ""))
+        elif action != "open":
+            raise ConfigError(f"Application map answers no action {action!r}.")
+        return None
+
     def for_console(self, ctx: Any) -> "Application":
         """An independent live Application for one Console opening (#1255)."""
         opened = replace(self)

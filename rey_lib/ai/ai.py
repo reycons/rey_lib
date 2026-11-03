@@ -131,6 +131,8 @@ class AI:
         # as last read from governed configuration, and the working copy edits
         # change. Save writes the working copy and re-reads; a new task hydrates
         # from the working copy, so an unsaved edit applies to it.
+        self._workbench_selection: dict[str, str] = {}
+        self._workbench_tasks: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
         self._governed_settings: dict[str, dict[str, dict[str, Any]]] = {}
         self._working_settings: dict[str, dict[str, dict[str, Any]]] = {}
 
@@ -160,6 +162,13 @@ class AI:
             if row.get("is_enabled") is not False
         ]
         return {
+            "workbench": {
+                "scope": self._workbench_selection.get(installation, _DEFAULT_SCOPE),
+                "select": {"role": {"act": "select", "on": "task"},
+                           "command": {"command": "select_task"}, "inputs": {"scope": ["scope"]}},
+                "open": {"role": {"act": "open", "on": "workbench"},
+                         "command": {"command": "open_workbench"}},
+            },
             "settings": self._settings_projection(
                 configuration, engines, instructions, stated,
                 stated != self._governed_settings[installation],
@@ -287,6 +296,37 @@ class AI:
                 "connections": list(self.connections())}
 
     # -- the installation's AI settings (#1191) -----------------------------
+
+    def select_workbench_task(self, control: Any, installation: str, scope: str = "") -> None:
+        """Select the configured task for this AI's Workbench; unset means Default."""
+        scope = scope or _DEFAULT_SCOPE
+        if scope not in self._settings_of(control, installation):
+            raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
+        self._workbench_selection[installation] = scope
+
+    def workbench_task(self, control: Any, installation: str) -> AITask:
+        """The selected live task, with the working settings, never implicitly saved.
+
+        The AI owns selection, default fallback, resolution and task lifetime.
+        Reopening retains the task's identity and prompt. Changed settings edit
+        that task through the existing hydration boundary; unrelated tasks stay as-is.
+        """
+        scope = self._workbench_selection.get(installation, _DEFAULT_SCOPE)
+        effective = _effective(self._settings_of(control, installation), scope)
+        choices = {choice: effective[field] for field, choice in _CHOICE_OF_SETTING.items()}
+        key = (installation, scope)
+        held = self._workbench_tasks.get(key)
+        if held is None:
+            task = self.hydrate_task(control, installation,
+                                     task_key="" if scope == _DEFAULT_SCOPE else scope, **choices)
+        else:
+            task = self.task(held[0])
+            if task is None:
+                raise AISelectionError(f"This session holds no AI task {held[0]!r}.")
+            if held[1] != choices:
+                task = self.rehydrate_task(control, task.id, choices)
+        self._workbench_tasks[key] = (task.id, dict(choices))
+        return task
 
     def set_setting(self, control: Any, installation: str, scope: str, field: str,
                     value: Any) -> None:

@@ -35,6 +35,8 @@ subject's; neither is the map's.
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Any, Callable, Final
 
@@ -410,6 +412,9 @@ class ObjectMap:
                              "focus": declaration_focus})
             if symbol_id is None:
                 self._context_path = base
+                if self._focus.get("detail"):
+                    self._context_path.append({"value": f"detail:{key}:{command_id}:{operation_id}:{request_id}",
+                        "label": "Function detail", "focus": dict(self._focus)})
             else:
                 source = next((r for r in self._read.get("flow_steps", [])
                                if r.get("code_symbol_id") == symbol_id), {})
@@ -722,6 +727,15 @@ class ObjectMap:
     def _legend(self) -> list[dict[str, str]]:
         """The shape/color key carried with this map's projection, per reading."""
         if self.projection_kind == FLOW_PROJECTION:
+            if self._focus.get("flow") and not self._focus.get("detail"):
+                return [
+                    {"label": "Start / return", "shape": "ellipse", "color": "var(--good)"},
+                    {"label": "Activity / subprocess", "shape": "round-rectangle", "color": "#7a8794"},
+                    {"label": "Decision / loop", "shape": "diamond", "color": "#c79a2b"},
+                    {"label": "Static primary route", "shape": "line", "color": "var(--accent)"},
+                    {"label": "Alternative route", "shape": "line", "color": "var(--muted)"},
+                    {"label": "Failure / refusal", "shape": "line", "color": "var(--bad)"},
+                ]
             return [
                 {"label": "Application / entry point", "shape": "ellipse", "color": "#4a6fa5"},
                 {"label": "Entry symbol", "shape": "round-rectangle", "color": "#3f9b5f"},
@@ -1105,8 +1119,12 @@ class ObjectMap:
                 if node_key not in reached:
                     continue
                 identity = f"control:{symbol_id}:{node_key}"
+                returns = [r for r in outgoing.get(node_key, [])
+                           if r["to_key"] in receive_loops and r["to_key"] in continuations(node_key)
+                           and (node_key != guard or r["transition_kind"] == "true")]
                 nodes[identity] = ({**self._flow_node(row),
-                                    **({"operation_root": True} if node_key == guard else {})}, row)
+                                    **({"operation_root": True} if node_key == guard else {})},
+                                   {**row, **({"request_return_evidence": returns} if returns else {})})
                 if row.get("to_key") in reached and row["to_key"] in continuations(node_key) and (node_key != guard or row["transition_kind"] == "true" or root.get("kind") == "entry"):
                     target = f"control:{symbol_id}:{row['to_key']}"
                     edge_id = f"transition:{identity}:{row['transition_kind']}:{target}"
@@ -1140,11 +1158,12 @@ class ObjectMap:
         bindings += [r for r in self._read.get("flow_requests", [])
                      if r["application_request_id"] == self._focus.get("request_id")]
         title = bindings[0].get("description") if bindings and self._focus.get("symbol") is None else None
-        return self._flow_activities(nodes, edges, title=title)
+        return self._flow_activities(nodes, edges, title=title,
+            completion_label="Await next request" if self._focus.get("request_id") is not None else None)
 
     @staticmethod
     def _flow_activities(nodes: list[_Mapped], edges: list[_Mapped], *,
-                         title: str | None = None) -> tuple[list[_Mapped], list[_Mapped]]:
+                         title: str | None = None, completion_label: str | None = None) -> tuple[list[_Mapped], list[_Mapped]]:
         """Object interactions and subprocesses connected by indexed normal paths.
 
         Object construction, decisions and explicit refusals stay visible.
@@ -1171,15 +1190,26 @@ class ObjectMap:
                     "label": "Operation declaration metadata is not published", "role": "boundary",
                     "expand_symbol_id": symbol_id}, {"resolution": "operation_metadata_not_published"}))
                 continue
+            scoped_edges = list(edges)
+            if completion_label:
+                # The request scope deliberately cuts the edge back to receive.
+                # Show that witnessed boundary as an end event, not a function exit.
+                cuts = [(key, witness) for key, (_, row) in scope.items()
+                        for witness in row.get("request_return_evidence", [])]
+                if cuts:
+                    completion = f"request-return:{symbol_id}"
+                    scope[completion] = ({"id": completion, "kind": "exit", "label": completion_label},
+                        {**cuts[0][1], "kind": "request_return", "text": completion_label})
+                    for key, row in cuts:
+                        scoped_edges.append(({"id": f"request-return:{key}", "kind": "transition",
+                                              "label": "next", "source": key, "target": completion}, row))
             adjacency: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
             failure_edges = []
-            for edge, evidence in edges:
+            for edge, evidence in scoped_edges:
                 if edge["source"] not in scope or edge["target"] not in scope:
                     continue
                 if edge["label"] == "exception":
                     failure_edges.append(evidence)
-                    if scope[edge["source"]][0]["kind"] != "raise":
-                        continue
                 adjacency.setdefault(edge["source"], []).append((edge, evidence))
             exits = {key for key, (node, _) in scope.items() if node["kind"] in ("exit", "exception_exit")}
             roots = [key for key, (node, _) in scope.items()
@@ -1214,7 +1244,7 @@ class ObjectMap:
                 elif key in exits:
                     visible[key] = ({**node, "kind": "activity_exit",
                                      "label": "Failure / refusal to caller" if node["kind"] == "exception_exit"
-                                     else "Return to caller"}, row)
+                                     else completion_label if row.get("kind") == "request_return" else "Return to caller"}, row)
                 elif node["kind"] in ("condition", "loop", "raise", "context_enter", "cleanup"):
                     visible[key] = (dict(node), row)
                 elif node["kind"] == "call":
@@ -1269,7 +1299,8 @@ class ObjectMap:
                             identity = f"activity-path:{source}:{branch or 'next'}:{current}"
                             partial = any(row.get("kind") == "boundary" or row.get("transition_kind") == "unknown"
                                           for row in witness)
-                            label = branch if branch in ("true", "false", "iterate", "done") else ""
+                            exceptional = any(row.get("transition_kind") == "exception" for row in witness)
+                            label = branch if branch in ("true", "false", "iterate", "done") else "exception" if exceptional else ""
                             projected_edges.append(({"id": identity, "kind": "transition",
                                 "label": label or ("partial" if partial else ""),
                                 "source": source, "target": current}, {"transition_evidence": witness,
@@ -1313,6 +1344,172 @@ class ObjectMap:
                      "reading": "Operation flow; double-click the entry for detailed function control flow"})
         return projected_nodes, projected_edges
 
+    @staticmethod
+    def _process_reading(elements: list[_Mapped], relations: list[_Mapped]) -> dict[str, Any]:
+        """Choose a source-witnessed backbone, never an observed/dominant variant.
+
+        Condense loops before ranking paths so cycles cannot increase their own
+        score. Prefer distinct domain responsibilities, then fewer steps; repeated
+        accessor calls cannot make a branch more important. Alternatives remain in
+        the projection and can be revealed without changing the layout.
+        """
+        nodes = {n["id"]: (n, row or {}) for n, row in elements if n["kind"] != "participant"}
+        failure = {key for key, (n, row) in nodes.items()
+                   if n["kind"] in ("raise", "exception_exit") or row.get("kind") == "exception_exit"}
+        outgoing = {key: [] for key in nodes}
+        incoming = {key: [] for key in nodes}
+        exceptional = set()
+        all_outgoing = {key: [] for key in nodes}
+        for edge, row in relations:
+            a, b = edge["source"], edge["target"]
+            is_exception = edge.get("label") == "exception" or any(
+                step.get("transition_kind") == "exception" for step in (row or {}).get("transition_evidence", []))
+            if is_exception:
+                exceptional.add(edge["id"])
+            if a in nodes and b in nodes:
+                all_outgoing[a].append(b)
+                if not is_exception:
+                    outgoing[a].append(b)
+                    incoming[b].append(a)
+        normal_reached = {key for key, (node, _) in nodes.items()
+                          if node["kind"] in ("activity_entry", "entry") or node.get("operation_root")}
+        pending = list(normal_reached)
+        while pending:
+            for target in outgoing[pending.pop()]:
+                if target not in normal_reached:
+                    normal_reached.add(target)
+                    pending.append(target)
+        exception_reached = {edge["target"] for edge, _ in relations if edge["id"] in exceptional}
+        pending = list(exception_reached)
+        while pending:
+            for target in all_outgoing.get(pending.pop(), []):
+                if target not in exception_reached:
+                    exception_reached.add(target)
+                    pending.append(target)
+        failure |= exception_reached - normal_reached
+        ends = {key for key, (n, _) in nodes.items()
+                if key not in failure and (n["kind"] in ("activity_exit", "exit") or not outgoing[key])}
+        success = set(ends)
+        pending = list(ends)
+        while pending:
+            for key in incoming[pending.pop()]:
+                if key not in success and key not in failure:
+                    success.add(key)
+                    pending.append(key)
+        # A branch leading exclusively to refusal is a failure route as well.
+        failure_reached = set(failure)
+        pending = list(failure)
+        while pending:
+            for key in incoming[pending.pop()]:
+                if key not in failure_reached:
+                    failure_reached.add(key)
+                    pending.append(key)
+        failure |= failure_reached - success
+        allowed = set(nodes) - failure
+        seen, order = set(), []
+        for root in sorted(allowed):
+            stack = [(root, False)]
+            while stack:
+                key, finish = stack.pop()
+                if finish:
+                    order.append(key)
+                elif key not in seen:
+                    seen.add(key)
+                    stack.append((key, True))
+                    stack.extend((target, False) for target in outgoing[key]
+                                 if target in allowed and target not in seen)
+        components, membership = [], {}
+        for root in reversed(order):
+            if root in membership:
+                continue
+            number = len(components)
+            component, stack = [], [root]
+            membership[root] = number
+            while stack:
+                key = stack.pop()
+                component.append(key)
+                for before in incoming[key]:
+                    if before in allowed and before not in membership:
+                        membership[before] = number
+                        stack.append(before)
+            components.append(component)
+        links = {i: set() for i in range(len(components))}
+        indegree = {i: 0 for i in links}
+        for key in allowed:
+            for target in outgoing[key]:
+                if target in allowed and membership[key] != membership[target]:
+                    links[membership[key]].add(membership[target])
+        for targets in links.values():
+            for target in targets:
+                indegree[target] += 1
+        def responsibilities(component):
+            owners = set()
+            for key in component:
+                node = nodes[key][0]
+                if node.get("receiver"):
+                    owners.add("input:" + node["receiver"])
+                else:
+                    owners.update(node.get("owner_keys") or [])
+                    if not node.get("owner_keys") and node.get("target_symbol_id") is not None:
+                        owners.add("callable:" + str(node["target_symbol_id"]))
+            return frozenset(owners)
+        roots = {membership[key] for key, (node, _) in nodes.items() if key in allowed
+                 and (node["kind"] in ("activity_entry", "entry") or node.get("operation_root"))}
+        if not roots:
+            roots = {i for i in indegree if not indegree[i]}
+        scores = {i: (responsibilities(components[i]), -len(components[i])) for i in roots}
+        previous = {}
+        pending = sorted(i for i in indegree if not indegree[i])
+        while pending:
+            at = pending.pop(0)
+            for target in sorted(links[at]):
+                if at in scores:
+                    proposed = (scores[at][0] | responsibilities(components[target]),
+                                scores[at][1] - len(components[target]))
+                    rank = lambda score: (len(score[0]), score[1])
+                    if target not in scores or rank(proposed) > rank(scores[target]):
+                        scores[target], previous[target] = proposed, at
+                indegree[target] -= 1
+                if not indegree[target]:
+                    pending.append(target)
+        destinations = {membership[key] for key in ends if key in membership} & scores.keys()
+        if not destinations:
+            destinations = set(scores)
+        chosen = []
+        if destinations:
+            at = max(sorted(destinations), key=lambda i: (len(scores[i][0]), scores[i][1]))
+            while True:
+                chosen.append(at)
+                if at not in previous:
+                    break
+                at = previous[at]
+            chosen.reverse()
+        primary = {key for component in chosen for key in components[component]}
+        pairs = set(zip(chosen, chosen[1:]))
+        node_roles = {key: "failure" if key in failure else "primary" if key in primary else "alternative"
+                      for key in nodes}
+        for node, _ in elements:
+            if node["kind"] == "participant":
+                children = [node_roles[n["id"]] for n, _ in elements if n.get("parent") == node["id"]]
+                node_roles[node["id"]] = ("primary" if "primary" in children else
+                                          "failure" if children and all(r == "failure" for r in children) else "alternative")
+        edge_roles = {}
+        for edge, row in relations:
+            a, b = edge["source"], edge["target"]
+            if edge["id"] in exceptional or a in failure or b in failure:
+                role = "failure"
+            elif a in primary and b in primary and (membership[a] == membership[b] or
+                                                      (membership[a], membership[b]) in pairs):
+                role = "primary"
+            else:
+                role = "alternative"
+            edge_roles[edge["id"]] = role
+        return {"basis": "static", "nodes": node_roles, "edges": edge_roles,
+                "order": [key for component in chosen for key in sorted(components[component])],
+                "alternative_count": sum(role == "alternative" for role in edge_roles.values()),
+                "failure_count": sum(role == "failure" for role in edge_roles.values()),
+                "measurements": None}
+
     def _flow_projection(self) -> dict[str, Any]:
         """The flows screen, or the focused flow's chart, with what each draws."""
         elements, relations = self._flow_scope()
@@ -1321,7 +1518,16 @@ class ObjectMap:
                  for relation, row in relations]
         coverage = [row for _, row in elements if row and row.get("coverage_status")]
         partial = [row for row in coverage if row["coverage_status"] == "partial"]
-        return {"nodes": nodes, "edges": edges, "path": self._path(),
+        process = self._process_reading(elements, relations) if self._focus.get("flow") and not self._focus.get("detail") else None
+        path = self._path()
+        scope_key = lambda focus: json.dumps([self.subject, focus], sort_keys=True, separators=(",", ":"))
+        current = scope_key(self._focus)
+        ancestors = [{"key": scope_key(step["focus"]), "value": step["value"], "label": step["label"]}
+                     for step in path if step["focus"].get("flow") and scope_key(step["focus"]) != current]
+        return {"nodes": nodes, "edges": edges, "path": path,
+                "process": process,
+                "view": {"key": current, "label": path[-1]["label"] if path else "Process",
+                         "ancestors": ancestors if self._focus.get("symbol") is not None or self._focus.get("detail") else []},
                 "details": self._details(), "legend": self._legend(),
                 "coverage_status": "partial" if partial else "complete" if coverage else None,
                 "coverage_reason": "; ".join(sorted({str(row["coverage_reason"]) for row in partial

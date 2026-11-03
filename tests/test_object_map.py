@@ -750,7 +750,8 @@ def test_activity_overview_does_not_show_unreachable_code_or_exception_spaghetti
     held.focus(reading="flow",flow="example")
     projection=held.projection()
     assert not any(n["id"].endswith(":dead") or n["kind"]=="exception_exit" for n in projection["nodes"])
-    assert not any(e["label"]=="exception" for e in projection["edges"])
+    assert all(projection["process"]["edges"][e["id"]] == "failure"
+               for e in projection["edges"] if e["label"] == "exception")
     held.click("control:100:entry")
     assert dict(held.projection()["details"]["rows"])["Indexed failure transitions"]==1
 
@@ -868,8 +869,9 @@ def test_request_overview_keeps_activities_that_return_to_the_command_loop():
     held.focus(reading='flow', application='example')
     held.double_click('request:100:execute')
     projection = held.projection()
-    assert {n['id'] for n in projection['nodes']} == {'control:100:test', 'control:100:execute'}
-    assert len(projection['edges']) == 1
+    assert {n['id'] for n in projection['nodes']} == {'control:100:test', 'control:100:execute', 'request-return:100'}
+    assert next(n for n in projection['nodes'] if n['id']=='request-return:100')['label'] == 'Await next request'
+    assert len(projection['edges']) == 2
     held.double_click('control:100:test')
     assert held.projection()['focus']['detail'] is True
     assert {n['id'] for n in held.projection()['nodes']} == {'control:100:test', 'control:100:execute'}
@@ -928,3 +930,60 @@ def test_architecture_factory_holds_only_the_object_reading(monkeypatch):
     assert held.projection()['readings'] == ['object']
     assert len(statements) == 5
     assert not any('object_map_flow' in statement for statement in statements)
+
+
+def test_process_backbone_keeps_alternatives_and_never_claims_run_frequencies():
+    held = _with_flows()
+    held.focus(reading='flow', flow='example')
+    projection = held.projection()
+    process = projection['process']
+    assert process['basis'] == 'static'
+    assert process['measurements'] is None
+    assert process['nodes']['control:100:call'] == 'primary'
+    assert process['alternative_count'] > 0
+    assert set(process['edges']) == {e['id'] for e in projection['edges']}
+    assert all(role in ('primary','alternative','failure') for role in process['edges'].values())
+
+
+def test_failure_paths_are_revealable_without_changing_the_successful_route():
+    held = _with_flows()
+    base = _flow_rows()[0]
+    held._read['flow_steps'] = _flow_rows() + [
+        {**base, 'node_key':'call', 'kind':'call', 'text':'next_task(arg)',
+         'to_key':'failed', 'transition_kind':'exception', 'target_code_symbol_id':200},
+        {**base, 'node_key':'failed', 'kind':'exception_exit', 'to_key':None, 'transition_kind':None}]
+    held.focus(reading='flow', flow='example')
+    projection = held.projection()
+    assert projection['process']['nodes']['control:100:failed'] == 'failure'
+    assert projection['process']['nodes']['control:100:exit'] == 'primary'
+    assert projection['process']['failure_count'] > 0
+    for edge in projection['edges']:
+        if edge['target'] == 'control:100:failed':
+            assert projection['process']['edges'][edge['id']] == 'failure'
+
+
+def test_function_detail_has_an_authoritative_path_back_to_its_parent():
+    held = _with_flows()
+    held.focus(reading='flow', flow='example')
+    parent = held.projection()
+    held.double_click('control:100:entry')
+    child = held.projection()
+    assert child['view']['key'] != parent['view']['key']
+    assert parent['view']['key'] in [step['key'] for step in child['view']['ancestors']]
+    assert child['path'][-1]['focus']['detail'] is True
+    held.focus(**parent['focus'])
+    assert held.projection()['view']['key'] == parent['view']['key']
+
+
+def test_backbone_does_not_prefer_a_branch_for_repeated_accessors_on_the_same_owner():
+    # All routes are source-witnessed. Repeated property reads must not make
+    # a longer optional branch more prominent than the simpler successful one.
+    elements = [({'id':key,'kind':kind, **({'receiver':'source'} if key in ('work','accessor') else {})}, {})
+                for key,kind in [('start','activity_entry'),('work','activity'),('choice','condition'),
+                                 ('accessor','activity'),('end','activity_exit')]]
+    relations = [({'id':f'{a}-{b}','source':a,'target':b,'label':''}, {}) for a,b in
+                 [('start','work'),('work','choice'),('choice','accessor'),('accessor','end'),('choice','end')]]
+    process = ObjectMap._process_reading(elements, relations)
+    assert process['nodes']['work'] == 'primary'
+    assert process['nodes']['accessor'] == 'alternative'
+    assert process['edges']['choice-end'] == 'primary'

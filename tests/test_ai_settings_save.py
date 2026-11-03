@@ -216,3 +216,45 @@ class TestTheLiveAiAndItsTasksAreKept:
         assert ai._tasks == tasks
         assert ai.task(held.id) is held and held.profile_key == "local"
         assert ai.hydrate_task(control, "local", task_key="search_index").profile_key == "other"
+
+
+class TestWorkbenchSelectionBelongsToTheAI:
+    def test_unselected_workbench_uses_default_and_keeps_its_task(self) -> None:
+        ai, control = _ai(), _Control()
+        projected = ai.projection(control, "local")["workbench"]
+        assert projected["scope"] == "default"
+        first = ai.workbench_task(control, "local")
+        assert first.task_key == ""
+        assert first.profile_key == control.defaults["profile_key"]
+        assert ai.workbench_task(control, "local") is first
+        assert control.writes == []
+
+    def test_selected_task_uses_unsaved_settings_without_changing_another_object(self) -> None:
+        ai, control = _ai(), _Control()
+        unrelated = ai.hydrate_task(control, "local", task_key="generate_sql")
+        ai.select_workbench_task(control, "local", "generate_sql")
+        first = ai.workbench_task(control, "local")
+        from rey_lib.ai import AIInput
+        edited = ai.rehydrate_task(control, first.id, {"input": AIInput.prompt("Keep this prompt.")})
+        ai.set_setting(control, "local", "generate_sql", "profile_id", "other")
+        changed = ai.workbench_task(control, "local")
+        assert changed.id == first.id
+        assert changed.input == edited.input
+        assert changed.profile_key == "other"
+        assert unrelated.profile_key == "anthropic"
+        assert control.writes == []
+        ai.save_settings(control, "local")
+        assert ai.workbench_task(control, "local").id == first.id
+        assert ai.hydrate_task(control, "local", task_key="generate_sql").profile_key == "other"
+        assert control.writes == [("generate_sql", "local")]
+
+    def test_selection_and_default_fallback_are_projected_by_the_object(self) -> None:
+        ai, control = _ai(), _Control()
+        ai.select_workbench_task(control, "local", "search_index")
+        selected = ai.workbench_task(control, "local")
+        assert selected.task_key == "search_index"
+        assert ai.projection(control, "local")["workbench"]["scope"] == "search_index"
+        ai.select_workbench_task(control, "local", "")
+        assert ai.workbench_task(control, "local").task_key == ""
+        ai.select_workbench_task(control, "local", "search_index")
+        assert ai.workbench_task(control, "local").id == selected.id
