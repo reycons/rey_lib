@@ -20,19 +20,23 @@ itself, and a client had to carry a path to ask about one. The durable row
 outlives the process, so a poll that arrives after the process is gone is
 answered from the row rather than failing.
 
+The active run and its stdout (#1311)
+-------------------------------------
+AppExecute is the traffic cop for an active run and owns that run's stdout
+(user, 2026-11-03). The application's objects decide what is logged and write
+their output to their own run (:meth:`write`); each run owns its own stdout, a
+child run's included, and a child's output is never copied into its parent's.
+:meth:`projection` is the live run as this object holds it -- identity and
+parent, lifecycle status and timestamps, detail, error and artifacts, and the
+stdout after a cursor with the cursor that follows it.
+
 What this is not
 ----------------
-Not a registry of live runs. While a run executes, its live state is owned by
-the execution service and the active-run record it keeps; this object is the
-durable identity and the reconstruction of a finished run. The two lifetimes
-stay separate: whether a *process* is alive is the execution service's answer,
-and what the *Run* is, is this.
-
-Not a second reader of execution evidence. Status, progress, current step and
-metrics during execution are derived from the run's own records by
-``rey_lib.run.state``, which takes a log path and stays identity-free. Nothing
-here duplicates that, and the terminal read deliberately does not reach for it:
-telling a caller the run has finished needs only the manifest row.
+Not a reader of execution evidence. It does not interpret log records, count
+steps or derive metrics: a workflow's progress, current step and step metrics
+are the Workflow's own projection. Nor does it reconstruct a historical run:
+:meth:`open` answers a finished run from its manifest row alone, and telling a
+caller the run has finished needs only that row.
 
 Layering
 --------
@@ -55,6 +59,7 @@ the same parent reads.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Optional
 
@@ -151,6 +156,12 @@ class AppExecute:
         self.artifacts: list[Any] = []
         #: The STEP_FAILURE record id when the step failed in execution.
         self.failure_record_id: Any = None
+        #: This run's own stdout (#1311): what the application's objects wrote to
+        #: it, in order. A child run's is its own and is never its parent's, so it
+        #: is not shared by ``start(parent=...)``. Guarded, because the objects
+        #: writing and the reader projecting are on different threads.
+        self._stdout: list[str] = []
+        self._stdout_guard = threading.Lock()
 
     def __repr__(self) -> str:
         """Identify the run by id, subject and status."""
@@ -523,6 +534,68 @@ class AppExecute:
             "settings":      dict(self.settings),
             "started_at":    self.started_at,
             "finished_at":   self.finished_at,
+        }
+
+    # -- the active run's stdout (#1311) --------------------------------------
+
+    def write(self, text: str) -> None:
+        """Append ``text`` to this run's own stdout.
+
+        Called by the application's objects for the run they are executing in:
+        a workflow writes to the workflow run, a step to its step's run, an AI
+        task to its task's run. Nothing is copied to a parent run.
+
+        Parameters
+        ----------
+        text : str
+            Output, exactly as the object wrote it; an empty string changes nothing.
+        """
+        if not text:
+            return
+        with self._stdout_guard:
+            self._stdout.append(str(text))
+
+    def projection(self, cursor: Optional[int] = None) -> dict[str, Any]:
+        """Return the run as this object holds it, with its stdout after ``cursor``.
+
+        The durable facts of :meth:`state`, the run's detail, error and artifacts,
+        and its own stdout: ``stdout`` is what was written after ``cursor`` (all of
+        it when ``cursor`` is None) and ``stdout_cursor`` is the end of the output
+        available now, which is the cursor the next read passes. The cursor is an
+        offset into this run's stdout, not a record id. A finished run still held
+        keeps its final stdout; a run answered by :meth:`open` has none.
+
+        Parameters
+        ----------
+        cursor : int | None
+            How much of this run's stdout the reader already has.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{**state(), "detail", "error", "artifacts", "stdout", "stdout_cursor"}``.
+
+        Raises
+        ------
+        AppError
+            When ``cursor`` is negative or past the end of this run's stdout: a
+            position this run never handed out.
+        """
+        with self._stdout_guard:
+            output = "".join(self._stdout)
+        start = 0 if cursor is None else int(cursor)
+        if start < 0 or start > len(output):
+            raise AppError(
+                f"Run {self.run_id}: stdout cursor {start} is outside its output "
+                f"(0..{len(output)})."
+            )
+        return {
+            **self.state(),
+            "detail":        self.detail,
+            "error":         self.error,
+            "artifacts":     list(self.artifacts),
+            "stdout":        output[start:],
+            "stdout_cursor": len(output),
         }
 
 
