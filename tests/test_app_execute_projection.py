@@ -123,6 +123,72 @@ def test_a_run_answered_by_open_has_its_manifest_facts_and_no_stdout() -> None:
     assert projection["stdout_cursor"] == 0
 
 
+def test_a_parent_projects_the_child_runs_it_owns_each_with_its_own_output() -> None:
+    control = RecordingControl()
+    workflow = _started(control)
+    first = _started(control, parent=workflow)
+    second = _started(control, parent=workflow)
+    first.write("one\n")
+    second.write("two\n")
+
+    children = workflow.projection()["children"]
+
+    assert [child["run_id"] for child in children] == [first.run_id, second.run_id]
+    assert [child["stdout"] for child in children] == ["one\n", "two\n"]
+    assert workflow.projection()["stdout"] == ""
+
+
+def test_observers_are_told_of_writes_to_the_run_and_to_the_runs_it_owns() -> None:
+    control = RecordingControl()
+    workflow = _started(control)
+    step = _started(control, parent=workflow)
+    told: list[int] = []
+    workflow.observe(lambda written: told.append(written.run_id))
+
+    workflow.write("narration\n")
+    step.write("step output\n")
+
+    assert told == [workflow.run_id, step.run_id]
+
+
+def test_an_observer_that_raises_is_detached_and_writing_goes_on() -> None:
+    run = _started()
+    told: list[str] = []
+
+    def broken(_written: AppExecute) -> None:
+        raise RuntimeError("observer broke")
+
+    run.observe(broken)
+    run.observe(lambda _written: told.append("told"))
+    run.write("first\n")
+    run.write("second\n")
+
+    assert run.projection()["stdout"] == "first\nsecond\n"
+    assert told == ["told", "told"]
+
+
+def test_the_process_stdout_and_stderr_are_the_owning_runs_and_still_reach_their_streams(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    import os
+
+    run = _started()
+
+    with run.capture_process_output():
+        os.write(1, b"Scanning 14 repositories\n")
+        os.write(2, "WARNING été\n".encode("utf-8"))
+
+    captured = capfd.readouterr()
+    assert captured.out == "Scanning 14 repositories\n"
+    assert captured.err == "WARNING été\n"
+    stdout = run.projection()["stdout"]
+    assert "Scanning 14 repositories\n" in stdout
+    assert "WARNING été\n" in stdout
+    # Restored: written after the block, it is no longer the run's.
+    os.write(1, b"after\n")
+    assert "after" not in run.projection()["stdout"]
+
+
 def test_concurrent_writers_lose_no_output() -> None:
     run = _started()
 

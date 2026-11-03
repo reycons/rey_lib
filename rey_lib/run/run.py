@@ -26,6 +26,10 @@ AppExecute is the traffic cop for an active run and owns that run's stdout
 (user, 2026-11-03). The application's objects decide what is logged and write
 their output to their own run (:meth:`write`); each run owns its own stdout, a
 child run's included, and a child's output is never copied into its parent's.
+The run that owns a process -- a workflow's parent run, whose steps run in that
+process -- owns the process's stdout and stderr (:meth:`capture_process_output`),
+and it owns its child runs: its projection carries each of them, with its own
+identity and output, and its observers are told when any of them is written to.
 :meth:`projection` is the live run as this object holds it -- identity and
 parent, lifecycle status and timestamps, detail, error and artifacts, and the
 stdout after a cursor with the cursor that follows it.
@@ -59,9 +63,13 @@ the same parent reads.
 
 from __future__ import annotations
 
+import codecs
+import contextlib
+import os
+import sys
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from rey_lib.errors.error_utils import AppError, build_safe_error_payload
 from rey_lib.logs import (
@@ -162,6 +170,13 @@ class AppExecute:
         #: writing and the reader projecting are on different threads.
         self._stdout: list[str] = []
         self._stdout_guard = threading.Lock()
+        #: The child runs this run owns, in the order they started, and the parent
+        #: that owns this one (``start(parent=...)``): a parent projects its
+        #: children, each with its own identity and output.
+        self._children: list["AppExecute"] = []
+        self._parent: Optional["AppExecute"] = None
+        #: Told after every write to this run or to any run it owns (``observe``).
+        self._observers: list[Callable[["AppExecute"], None]] = []
 
     def __repr__(self) -> str:
         """Identify the run by id, subject and status."""
@@ -254,6 +269,10 @@ class AppExecute:
             run.data = parent.data
             run.metadata = parent.metadata
             run.log = parent.log
+            # The parent owns its child runs: it holds and projects them.
+            run._parent = parent
+            with parent._stdout_guard:
+                parent._children.append(run)
         return run
 
     # -- reconstruction -----------------------------------------------------
@@ -539,21 +558,98 @@ class AppExecute:
     # -- the active run's stdout (#1311) --------------------------------------
 
     def write(self, text: str) -> None:
-        """Append ``text`` to this run's own stdout.
+        """Append ``text`` to this run's own stdout, and tell its observers.
 
-        Called by the application's objects for the run they are executing in:
-        a workflow writes to the workflow run, a step to its step's run, an AI
-        task to its task's run. Nothing is copied to a parent run.
+        Called by the application's objects for the run they are executing in
+        -- a workflow writes to the workflow run, a step to its step's run -- and
+        by :meth:`capture_process_output` for the process's stdout/stderr. Nothing
+        is copied to a parent run; the parent is told, because it owns this one.
 
         Parameters
         ----------
         text : str
-            Output, exactly as the object wrote it; an empty string changes nothing.
+            Output, exactly as it was written; an empty string changes nothing.
         """
         if not text:
             return
         with self._stdout_guard:
             self._stdout.append(str(text))
+        self._tell(self)
+
+    def observe(self, observer: Callable[["AppExecute"], None]) -> None:
+        """Be told after every write to this run or to any child run it owns.
+
+        ``observer`` receives the run that was written to. It is told on the
+        writer's thread and must not write output itself. One that raises is
+        detached, then reported once.
+        """
+        with self._stdout_guard:
+            self._observers.append(observer)
+
+    def _tell(self, written: "AppExecute") -> None:
+        """Tell this run's observers, then its parent's, that ``written`` changed."""
+        with self._stdout_guard:
+            observers = list(self._observers)
+        for observer in observers:
+            try:
+                observer(written)
+            except Exception as exc:  # noqa: BLE001 -- an observer is external behaviour
+                with self._stdout_guard:
+                    if observer in self._observers:
+                        self._observers.remove(observer)
+                error = AppError(f"Run {self.run_id}: an output observer failed.")
+                error.__cause__ = exc
+                error.report(f"run {self.run_id} output observer", source=__name__)
+        if self._parent is not None:
+            self._parent._tell(written)
+
+    @contextlib.contextmanager
+    def capture_process_output(self) -> Iterator["AppExecute"]:
+        """Own this process's stdout and stderr for as long as the block runs.
+
+        For the run that owns the process -- a workflow's parent run, whose
+        steps run in-process. Each of file descriptors 1 and 2 is pointed at a
+        pipe this run reads; every byte is written on, unchanged, to the
+        descriptor it was meant for, so the terminal, the launcher's capture and
+        AppLogger's console handler see exactly what they did, and its text is
+        this run's output (:meth:`write`). stdout and stderr are one output, in
+        the order each was read. Restored when the block ends.
+        """
+        held: list[tuple[int, int, threading.Thread]] = []
+        try:
+            for descriptor, stream in ((1, sys.stdout), (2, sys.stderr)):
+                stream.flush()
+                original = os.dup(descriptor)
+                read_end, write_end = os.pipe()
+                os.dup2(write_end, descriptor)
+                os.close(write_end)
+                relay = threading.Thread(
+                    target=self._relay_descriptor, args=(read_end, original),
+                    name=f"run-{self.run_id}-fd{descriptor}", daemon=True)
+                relay.start()
+                held.append((descriptor, original, relay))
+            yield self
+        finally:
+            for descriptor, original, _relay in held:
+                (sys.stdout if descriptor == 1 else sys.stderr).flush()
+                # Pointing the descriptor back closes the pipe's last write end,
+                # so its relay reads to the end and stops.
+                os.dup2(original, descriptor)
+            for _descriptor, original, relay in held:
+                relay.join(timeout=5)
+                if not relay.is_alive():
+                    os.close(original)
+
+    def _relay_descriptor(self, read_end: int, original: int) -> None:
+        """Copy one captured descriptor on to where it was going, and into this run."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        with os.fdopen(read_end, "rb", buffering=0) as source:
+            while chunk := source.read(65536):
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(original, view):]
+                self.write(decoder.decode(chunk))
+        self.write(decoder.decode(b"", final=True))
 
     def projection(self, cursor: Optional[int] = None) -> dict[str, Any]:
         """Return the run as this object holds it, with its stdout after ``cursor``.
@@ -573,7 +669,9 @@ class AppExecute:
         Returns
         -------
         dict[str, Any]
-            ``{**state(), "detail", "error", "artifacts", "stdout", "stdout_cursor"}``.
+            ``{**state(), "detail", "error", "artifacts", "stdout", "stdout_cursor",
+            "children"}`` -- ``children`` is each child run this run owns, as that
+            run projects itself (all of its output), in the order they started.
 
         Raises
         ------
@@ -583,6 +681,7 @@ class AppExecute:
         """
         with self._stdout_guard:
             output = "".join(self._stdout)
+            children = list(self._children)
         start = 0 if cursor is None else int(cursor)
         if start < 0 or start > len(output):
             raise AppError(
@@ -596,6 +695,7 @@ class AppExecute:
             "artifacts":     list(self.artifacts),
             "stdout":        output[start:],
             "stdout_cursor": len(output),
+            "children":      [child.projection() for child in children],
         }
 
 
