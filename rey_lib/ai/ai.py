@@ -577,6 +577,11 @@ class AI:
             task.failed(str(error))
             tell(AIEvent.failed(execution_id, str(error)))
             raise
+        except Exception as cause:
+            error = AIExecutionError(f"AI task '{key}' execution failed.", cause=cause)
+            task.failed(str(error))
+            tell(AIEvent.failed(execution_id, str(error)))
+            raise error from cause
         else:
             result = AIResult(
                 output=output,
