@@ -1087,6 +1087,7 @@ class ObjectMap:
                 continue
             scope = [r for r in rows if r.get("code_symbol_id") == symbol_id]
             guard = binding["node_key"]
+            entry_branch = binding.get("request_branch", "true") if request else "true"
             outgoing: dict[str, list[dict[str, Any]]] = {}
             for row in scope:
                 if row.get("to_key"):
@@ -1099,14 +1100,16 @@ class ObjectMap:
                              and r.get("end_line", 0) >= root.get("end_line", -1)}
             def continuations(node_key):
                 candidates = outgoing.get(node_key, [])
-                selected = "request:" + bindings[0]["request_name"] if request else None
+                selected = binding["request_name"] if request else None
                 values = next((r.get("commands") for r in candidates if r.get("commands")), [])
-                if request and any(v.startswith("request:") for v in values):
-                    branch = "true" if selected in values else "false"
+                if request and any(v.startswith(("request:", "request-false:")) for v in values):
+                    negative = any(v.startswith("request-false:") for v in values)
+                    matched = ("request-false:" if negative else "request:") + selected in values
+                    branch = "false" if matched == negative else "true"
                     return [r["to_key"] for r in candidates if r["transition_kind"] == branch]
                 return [r["to_key"] for r in candidates]
             pending = [r["to_key"] for r in outgoing.get(guard, [])
-                       if r["transition_kind"] == "true" or root.get("kind") == "entry"]
+                       if r["transition_kind"] == entry_branch or root.get("kind") == "entry"]
             reached = {guard}
             while pending:
                 current = pending.pop()
@@ -1121,11 +1124,11 @@ class ObjectMap:
                 identity = f"control:{symbol_id}:{node_key}"
                 returns = [r for r in outgoing.get(node_key, [])
                            if r["to_key"] in receive_loops and r["to_key"] in continuations(node_key)
-                           and (node_key != guard or r["transition_kind"] == "true")]
+                           and (node_key != guard or r["transition_kind"] == entry_branch)]
                 nodes[identity] = ({**self._flow_node(row),
                                     **({"operation_root": True} if node_key == guard else {})},
                                    {**row, **({"request_return_evidence": returns} if returns else {})})
-                if row.get("to_key") in reached and row["to_key"] in continuations(node_key) and (node_key != guard or row["transition_kind"] == "true" or root.get("kind") == "entry"):
+                if row.get("to_key") in reached and row["to_key"] in continuations(node_key) and (node_key != guard or row["transition_kind"] == entry_branch or root.get("kind") == "entry"):
                     target = f"control:{symbol_id}:{row['to_key']}"
                     edge_id = f"transition:{identity}:{row['transition_kind']}:{target}"
                     edges[edge_id] = ({"id": edge_id, "kind": "transition", "label": row["transition_kind"],

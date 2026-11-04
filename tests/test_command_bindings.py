@@ -162,3 +162,93 @@ def test_reassigned_request_selector_is_not_a_binding(tmp_path):
         if name == 'run':
             run()
 ''') == []
+
+
+_HOSTED = '''from rey_lib.run.hosted_objects import HostedObjects
+class Root:
+    def answer(self, command):
+        name = str(command.get('command') or '')
+        if name == 'select':
+            select()
+        if name != 'task':
+            raise ValueError(name)
+        task()
+class Task:
+    def answer(self, command):
+        if command.get('command') == 'run':
+            execute()
+class Unregistered:
+    def answer(self, command):
+        if command.get('command') == 'invented':
+            arbitrary()
+def hosted_objects():
+    def construct(subject, identity, emit):
+        return Root()
+    def hold_task():
+        return hosted.hold(lambda emit: Task())
+    hosted = HostedObjects(construct)
+    return hosted
+'''
+
+
+def test_registered_hosted_factories_prove_only_their_objects_request_guards(tmp_path):
+    rows = commands(tmp_path, _HOSTED)
+    assert {(r['owner_qualified_name'], tuple(r['commands'])) for r in rows} == {
+        ('Root.answer', ('request:select',)), ('Root.answer', ('request-false:task',)),
+        ('Task.answer', ('request:run',))}
+
+
+def test_arbitrary_owner_with_same_spelling_does_not_prove_a_hosted_handler(tmp_path):
+    assert commands(tmp_path, _HOSTED.replace(
+        'from rey_lib.run.hosted_objects import HostedObjects', 'from unrelated import HostedObjects')) == []
+
+
+def test_shadowed_host_constructor_and_mutated_message_establish_no_request(tmp_path):
+    assert commands(tmp_path, _HOSTED.replace('def hosted_objects():', 'def hosted_objects(HostedObjects):')) == []
+    source = _HOSTED.replace("        if command.get('command') == 'run':",
+                            "        command['command'] = arbitrary()\n        if command.get('command') == 'run':")
+    assert all(r['owner_qualified_name'] != 'Task.answer' for r in commands(tmp_path, source))
+
+
+def test_request_provenance_follows_local_protocol_dispatch(tmp_path):
+    rows = commands(tmp_path, '''class Host:
+    def serve(self, channel):
+        for command in channel.commands():
+            name = str(command.get('command') or '')
+            if name == 'close':
+                break
+            self._answer(name, command)
+    def _answer(self, name, command):
+        if name == 'open':
+            open_object()
+        elif command.get('command') in ('projection', 'release'):
+            read_or_release()
+    def unrelated(self, command):
+        if command.get('command') == 'unknown':
+            unknown()
+''')
+    assert {(r['owner_qualified_name'], tuple(r['commands'])) for r in rows} == {
+        ('Host.serve', ('request:close',)), ('Host._answer', ('request:open',)),
+        ('Host._answer', ('request:projection', 'request:release'))}
+
+
+def test_imported_str_does_not_prove_a_command_selector(tmp_path):
+    source = _HOSTED.replace('class Root:', 'from unknown import str\nclass Root:')
+    assert all(r['owner_qualified_name'] != 'Root.answer' for r in commands(tmp_path, source))
+
+
+def test_alias_and_module_imports_preserve_the_canonical_host_identity(tmp_path):
+    for source in [
+        _HOSTED.replace('import HostedObjects', 'import HostedObjects as Objects').replace('= HostedObjects(', '= Objects('),
+        _HOSTED.replace('from rey_lib.run.hosted_objects import HostedObjects', 'import rey_lib.run.hosted_objects').replace('= HostedObjects(', '= rey_lib.run.hosted_objects.HostedObjects('),
+    ]:
+        assert {r['owner_qualified_name'] for r in commands(tmp_path, source)} == {'Root.answer', 'Task.answer'}
+
+
+def test_a_loop_selector_does_not_turn_post_loop_work_into_a_request_handler(tmp_path):
+    assert commands(tmp_path, '''def serve(channel):
+    for message in channel.commands():
+        name = message.get('command')
+    if name == 'run':
+        after_channel_closed()
+''') == []

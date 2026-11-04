@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from rey_lib.errors.error_utils import AppError, ConfigError
+from rey_lib.run import AppExecute
 from rey_lib.files.rollback import (
     COMPLETE,
     CONFIRMATION,
@@ -45,6 +46,16 @@ class _Manifest:
             "manifests_deleted": [],
             "boundary": None,
         }
+
+
+def _run(manifest: _Manifest, run_id: int = 4) -> AppExecute:
+    class Control:
+        def get_run_manifest(self, run_id: int) -> dict[str, Any]:
+            return {"run_manifest_id": run_id, "status": "SUCCEEDED"}
+
+        def request_file_rollback(self, *, run_id: int) -> list[dict[str, Any]]:
+            return [{"file_mutation_id": one} for one in manifest.mutations]
+    return AppExecute(run_id=run_id, control=Control(), status="SUCCEEDED")
 
 
 class _Observer:
@@ -83,7 +94,9 @@ def test_an_identity_that_is_not_a_whole_number_is_refused() -> None:
 def test_the_identity_decides_the_scopes_and_the_first_is_the_default(
     identity: dict[str, Any], scopes: tuple[str, ...],
 ) -> None:
-    rollback = Rollback(_Manifest([]), **identity)
+    manifest = _Manifest([])
+    run = _run(manifest, int(identity["run_id"])) if "run_id" in identity else None
+    rollback = Rollback(manifest, run=run, **identity)
     projected = rollback.projection()
     assert projected["scopes"] == list(scopes)
     assert projected["scope"] == scopes[0]
@@ -107,7 +120,7 @@ def test_a_preview_is_the_manifests_dry_run_and_asks_for_confirmation() -> None:
 
 def test_execute_is_refused_before_a_preview() -> None:
     manifest = _Manifest([9])
-    rollback = Rollback(manifest, run_id=4)
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     with pytest.raises(ConfigError):
         rollback.execute()
     assert manifest.calls == []
@@ -141,7 +154,7 @@ def test_what_changed_since_the_preview_is_not_executed() -> None:
 
 def test_a_reversal_the_manifest_could_not_do_is_held_with_the_result() -> None:
     manifest = _Manifest([9], failed={"file_mutation_id": 9, "reason": "file is gone"})
-    rollback = Rollback(manifest, run_id=4)
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     rollback.preview()
     rollback.execute()
     projected = rollback.projection()
@@ -165,7 +178,7 @@ def test_a_refused_preview_is_held_and_the_rollback_stays_requesting(
 
 def test_a_refused_execution_returns_to_requesting() -> None:
     manifest = _Manifest([9])
-    rollback = Rollback(manifest, run_id=4)
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     rollback.preview()
     manifest.refusal = AppError("control is down")
     rollback.execute()
@@ -193,7 +206,8 @@ def test_a_scope_the_identity_does_not_offer_is_refused() -> None:
 
 
 def test_a_run_offers_no_scope_choice() -> None:
-    assert _ids(Rollback(_Manifest([]), run_id=4).actions()) == ["rollback_preview"]
+    manifest = _Manifest([9])
+    assert _ids(Rollback(manifest, run_id=4, run=_run(manifest)).actions()) == ["rollback_preview"]
 
 
 # -- declared actions ----------------------------------------------------------
@@ -222,7 +236,8 @@ def test_while_executing_nothing_is_offered_and_a_second_operation_is_refused() 
                 release.wait(5)
             return super().rollback(**criteria)
 
-    rollback = Rollback(_Slow([9]), run_id=4)
+    manifest = _Slow([9])
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     rollback.preview()
     running = threading.Thread(target=rollback.execute)
     running.start()
@@ -238,7 +253,8 @@ def test_while_executing_nothing_is_offered_and_a_second_operation_is_refused() 
 
 def test_observers_are_told_each_change() -> None:
     observer = _Observer()
-    rollback = Rollback(_Manifest([9]), run_id=4)
+    manifest = _Manifest([9])
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     rollback.observe(observer)
     rollback.preview()
     rollback.execute()
@@ -256,7 +272,8 @@ def test_a_failing_observer_does_not_stop_the_rollback_or_the_next_observer(
             raise OSError("channel closed")
 
     after = _Observer()
-    rollback = Rollback(_Manifest([9]), run_id=4)
+    manifest = _Manifest([9])
+    rollback = Rollback(manifest, run_id=4, run=_run(manifest))
     rollback.observe(_Broken())
     rollback.observe(after)
     rollback.preview()

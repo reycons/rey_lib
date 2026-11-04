@@ -458,7 +458,11 @@ class ProcedureMap:
         unsupplied values from and ``output.load_to_ctx`` writes results onto.
         It is not required to be the application context.
         """
+        # TEMPORARY timing (user, 2026-11-04): step the 30 s before a routine runs.
+        t_bind = time.monotonic()
         named_params = _bind_inputs(self.inputs, values, run_ctx, self.map_name, self.action)
+        _logger.debug("procedure_map timing: %s bind inputs %.3fs",
+                     self.action, time.monotonic() - t_bind)
         routine_name = f"{self.routine.identity.schema}.{self.routine.identity.name}"
         routine_type = "procedure" if isinstance(self.routine, DatabaseProcedure) else "function"
         result_mode = self.result_mode
@@ -473,6 +477,8 @@ class ProcedureMap:
         rows: Optional[list[dict[str, Any]]] = None
         try:
             returned = self.routine.call(conn, named_params, _db)
+            _logger.debug("procedure_map timing: %s routine %.3fs",
+                         self.action, time.monotonic() - t0)
             # What the answer means is map semantics, and stays here.
             if routine_type == "procedure":
                 # A procedure returns through OUT parameters, so what it gives

@@ -987,3 +987,27 @@ def test_backbone_does_not_prefer_a_branch_for_repeated_accessors_on_the_same_ow
     assert process['nodes']['work'] == 'primary'
     assert process['nodes']['accessor'] == 'alternative'
     assert process['edges']['choice-end'] == 'primary'
+
+
+def test_negative_request_guard_follows_its_false_branch_and_preserves_request_context():
+    held = _with_flows()
+    base = _flow_rows()[0]
+    held._read['flow_steps'] = [
+        {**base, 'node_key':'guard', 'kind':'condition', 'text':"name != 'task'",
+         'commands':['request-false:task'], 'to_key':'reject', 'transition_kind':'true'},
+        {**base, 'node_key':'guard', 'kind':'condition', 'text':"name != 'task'",
+         'commands':['request-false:task'], 'to_key':'create', 'transition_kind':'false'},
+        {**base, 'node_key':'reject', 'kind':'raise', 'text':'Unknown request',
+         'to_key':'error', 'transition_kind':'exception'},
+        {**base, 'node_key':'create', 'kind':'call', 'text':'hydrate_task()',
+         'to_key':'exit', 'transition_kind':'next'},
+        {**base, 'node_key':'error', 'kind':'exception_exit', 'to_key':None, 'transition_kind':None},
+        {**base, 'node_key':'exit', 'kind':'exit', 'to_key':None, 'transition_kind':None},
+    ]
+    held._read['flow_requests'] = [{'application_name':'example', 'application_request_id':'100:task',
+        'request_name':'task', 'request_branch':'false', 'code_symbol_id':100, 'node_key':'guard'}]
+    held.focus(reading='flow', flow='example', request_id='100:task', detail=True)
+    projection = held.projection()
+    assert {n['id'] for n in projection['nodes']} == {'control:100:guard','control:100:create','control:100:exit'}
+    assert next(e for e in projection['edges'] if e['source']=='control:100:guard')['label'] == 'false'
+    assert projection['path'][-1]['focus']['request_id'] == '100:task'

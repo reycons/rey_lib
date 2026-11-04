@@ -15,7 +15,7 @@ WITH governed AS (
            'indexed:' || n.repository_key || ':' || command,
            command, NULL::text, 0
     FROM bindings n CROSS JOIN LATERAL unnest(n.commands) AS command
-    WHERE command NOT LIKE 'request:%'
+    WHERE command NOT LIKE 'request:%' AND command NOT LIKE 'request-false:%'
       AND NOT EXISTS (SELECT 1 FROM governed d
                       WHERE d.application_name=n.repository_key AND d.command_name=command)
 )

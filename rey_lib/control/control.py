@@ -33,6 +33,7 @@ exactly as it did before.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Optional, Sequence
 
 from rey_lib.db.connection import shared_connection
@@ -544,14 +545,24 @@ class Control:
         if not required and not self._is_available():
             return None
 
+        # TEMPORARY timing (user, 2026-11-04): step the 30 s before a routine runs.
+        t_call = time.monotonic()
         conn = self._handle(required=required)
+        _logger.debug("control timing: %s handle %.3fs", action_name, time.monotonic() - t_call)
         if conn is None:
             return None
 
         try:
-            result = self._procedure(action_name, conn).call(
+            t_step = time.monotonic()
+            procedure = self._procedure(action_name, conn)
+            _logger.debug("control timing: %s procedure map %.3fs",
+                         action_name, time.monotonic() - t_step)
+            t_step = time.monotonic()
+            result = procedure.call(
                 conn, variables, self.run_log, run_ctx=self,
             )
+            _logger.debug("control timing: %s call %.3fs (total %.3fs)", action_name,
+                         time.monotonic() - t_step, time.monotonic() - t_call)
             outputs = result.get("outputs") or {}
             return next(iter(outputs.values()), None)
         except (ConfigError, DatabaseError) as exc:

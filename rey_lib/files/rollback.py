@@ -22,10 +22,14 @@ from __future__ import annotations
 
 import threading
 
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.manifest import FileManifest
+
+if TYPE_CHECKING:
+    from rey_lib.run import AppExecute
+
 
 __all__ = ["COMPLETE", "CONFIRMATION", "EXECUTING", "FILE_SCOPES", "MUTATION_SCOPES",
            "REQUEST", "Rollback"]
@@ -61,6 +65,7 @@ class Rollback:
         file_manifest_id: Any = None,
         file_mutation_id: Any = None,
         run_id: Any = None,
+        run: AppExecute | None = None,
     ) -> None:
         """Open the rollback of exactly one identity, requesting, with its default scope.
 
@@ -69,6 +74,8 @@ class Rollback:
             file_manifest_id: The selected File Manifest file, when no mutation was selected.
             file_mutation_id: The selected mutation: the rollback boundary.
             run_id: The Run History run.
+            run: Its canonical Run, required for a run opening. It alone owns
+                whether the run currently offers rollback.
 
         Raises:
             ConfigError: Unless exactly one identity is given, as a whole number.
@@ -87,6 +94,11 @@ class Rollback:
             identity = int(str(value).strip())
         except ValueError as exc:
             raise ConfigError(f"A rollback's {name} is a whole number, not {value!r}.") from exc
+        if name == "run_id" and (run is None or run.run_id != identity):
+            raise ConfigError("A run rollback needs its canonical Run with the same identity.")
+        if name != "run_id" and run is not None:
+            raise ConfigError("Only a run rollback carries a Run.")
+        self._run = run
         self._manifest = manifest
         self._identity: dict[str, int] = {name: identity}
         self._scopes = {"run_id": _RUN_SCOPES, "file_manifest_id": FILE_SCOPES,
@@ -104,7 +116,17 @@ class Rollback:
     @classmethod
     def for_control(cls, control: Any, **identity: Any) -> "Rollback":
         """The rollback of one identity, performed through this installation's FileManifest."""
-        return cls(FileManifest(control), **identity)
+        from rey_lib.run import AppExecute
+
+        run_id = identity.get("run_id")
+        run = None
+        if run_id is not None and str(run_id).strip():
+            try:
+                run_id = int(str(run_id).strip())
+            except ValueError as exc:
+                raise ConfigError(f"A rollback's run_id is a whole number, not {run_id!r}.") from exc
+            run = AppExecute.open(control, run_id)
+        return cls(FileManifest(control), run=run, **identity)
 
     # -- its observers -------------------------------------------------------
 
@@ -147,7 +169,11 @@ class Rollback:
 
     def actions(self) -> list[dict[str, Any]]:
         """The complete commands this rollback accepts now; ``inputs`` names a value to supply."""
-        if self._phase == EXECUTING:
+        return self.projection()["actions"]
+
+    def _actions(self, available: bool) -> list[dict[str, Any]]:
+        """The rollback protocol's actions, using its Run's eligibility answer."""
+        if self._phase == EXECUTING or not available:
             return []
         offered: list[dict[str, Any]] = []
         if len(self._scopes) > 1:
@@ -160,16 +186,29 @@ class Rollback:
 
     def projection(self) -> dict[str, Any]:
         """What this rollback holds, and the commands it accepts."""
-        return {
-            "identity": self.identity,
-            "scope": self._scope,
-            "scopes": list(self._scopes),
-            "phase": self._phase,
-            "preview": self._preview,
-            "result": self._result,
-            "failure": self._failure,
-            "actions": self.actions(),
-        }
+        # A command may be reading/reversing file history on the worker. A
+        # projection must not query the same Control concurrently or wait for it.
+        checking = self._busy.acquire(blocking=False)
+        try:
+            run = (self._run.projection(include_rollback=checking)
+                   if self._run is not None else None)
+            available = checking and (run is None or run["rollback_available"])
+            return {
+                "identity": self.identity,
+                "scope": self._scope,
+                "scopes": list(self._scopes),
+                "phase": self._phase,
+                "preview": self._preview,
+                "result": self._result,
+                "failure": self._failure or (
+                    "This Run has no rollback available."
+                    if checking and not available and self._phase != COMPLETE else None),
+                "actions": self._actions(available),
+                **({"run": run} if run is not None else {}),
+            }
+        finally:
+            if checking:
+                self._busy.release()
 
     # -- its behaviour -------------------------------------------------------
 
@@ -201,6 +240,7 @@ class Rollback:
         with _Operation(self, "preview"):
             self._result, self._failure = None, None
             try:
+                self._require_available()
                 self._preview = self._rollback(dry_run=True)
             except (ValueError, AppError) as refused:
                 self._preview, self._phase = None, REQUEST
@@ -223,6 +263,7 @@ class Rollback:
         with _Operation(self, "execute"):
             if self._phase != CONFIRMATION or self._preview is None:
                 raise ConfigError("Preview the rollback before executing it.")
+            self._require_available()
             previewed = _mutation_ids(self._preview)
             self._phase = EXECUTING
             self._changed()
@@ -240,6 +281,11 @@ class Rollback:
             except (ValueError, AppError) as refused:
                 self._phase, self._preview, self._failure = REQUEST, None, str(refused)
         self._changed()
+
+    def _require_available(self) -> None:
+        """Recheck the semantic owner even if a caller sends an unoffered command."""
+        if self._run is not None and not self._run.rollback_available():
+            raise ConfigError("This Run has no rollback available.")
 
     def _rollback(self, *, dry_run: bool) -> dict[str, Any]:
         """FileManifest.rollback for this identity and scope."""

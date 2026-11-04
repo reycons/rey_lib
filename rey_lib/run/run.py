@@ -64,6 +64,7 @@ the same parent reads.
 from __future__ import annotations
 
 import codecs
+import logging as _logging
 import contextlib
 import os
 import sys
@@ -243,6 +244,9 @@ class AppExecute:
         """
         if parent is not None:
             parent_run_id = parent.run_id
+        # TEMPORARY timing (user, 2026-11-04): step the 30 s before the manifest.
+        _t_start = time.monotonic()
+        _logging.getLogger(__name__).debug("run timing: AppExecute.start entered")
         run_id = control.create_run_manifest(
             subject_type=subject_type,
             subject_id=subject_id,
@@ -252,6 +256,8 @@ class AppExecute:
             settings=settings,
             required=True,
         )
+        _logging.getLogger(__name__).debug(
+            "run timing: create_run_manifest %.3fs", time.monotonic() - _t_start)
         run = cls(
             run_id=int(run_id),
             control=control,
@@ -555,6 +561,20 @@ class AppExecute:
             "finished_at":   self.finished_at,
         }
 
+    def rollback_available(self) -> bool:
+        """Whether this Run currently offers rollback of its governed file changes.
+
+        The Run owns lifecycle eligibility; Control's existing file-history read
+        answers whether mutations remain. Preview and reversal still belong to
+        FileManifest/Rollback, never to a Tree row or this execution object.
+        """
+        # A rollback may outlive the manifest snapshot used to open this Run.
+        # Re-read the durable lifecycle before offering or accepting an action.
+        row = self._control.get_run_manifest(self.run_id)
+        if not row or row.get("status") not in (SUCCEEDED, FAILED, "ABORTED"):
+            return False
+        return bool(self._control.request_file_rollback(run_id=self.run_id))
+
     # -- the active run's stdout (#1311) --------------------------------------
 
     def write(self, text: str) -> None:
@@ -651,7 +671,9 @@ class AppExecute:
                 self.write(decoder.decode(chunk))
         self.write(decoder.decode(b"", final=True))
 
-    def projection(self, cursor: Optional[int] = None) -> dict[str, Any]:
+    def projection(
+        self, cursor: Optional[int] = None, *, include_rollback: bool = False,
+    ) -> dict[str, Any]:
         """Return the run as this object holds it, with its stdout after ``cursor``.
 
         The durable facts of :meth:`state`, the run's detail, error and artifacts,
@@ -665,6 +687,9 @@ class AppExecute:
         ----------
         cursor : int | None
             How much of this run's stdout the reader already has.
+        include_rollback : bool
+            Include Run-owned rollback availability. The rollback presentation
+            requests this file-history read; ordinary stdout projections do not.
 
         Returns
         -------
@@ -696,6 +721,7 @@ class AppExecute:
             "stdout":        output[start:],
             "stdout_cursor": len(output),
             "children":      [child.projection() for child in children],
+            **({"rollback_available": self.rollback_available()} if include_rollback else {}),
         }
 
 
