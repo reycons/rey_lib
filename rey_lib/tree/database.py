@@ -500,6 +500,7 @@ class DatabaseDataObject:
             return []
         present = {
             "columns": bool(entry.get("columns")),
+            "parameters": bool(entry.get("parameters")),
             "indexes": bool(entry.get("indexes")),
             "constraints": any(self._constraint_groups(entry).values()),
         }
@@ -514,12 +515,23 @@ class DatabaseDataObject:
     ) -> list[dict[str, Any]]:
         """One structural level beneath an object.
 
-        Columns keep their ordinal position, which is the order the table
-        declares. Everything else listed by name is listed ignoring case, with
+        Columns and parameters keep their declared ordinal position.
+        Everything else listed by name is listed ignoring case, with
         the raw name settling a tie.
         """
         entry = self._structured(configured, state) or {}
         groups = self._constraint_groups(entry)
+        if structure == "parameters":
+            parameters = sorted(
+                entry.get("parameters") or [], key=lambda one: int(one.get("ordinal") or 0),
+            )
+            return [
+                self._leaf(
+                    "  ".join(str(one.get(key) or "") for key in ("name", "type", "mode")).strip(),
+                    _STRUCTURE_ICON["parameters"], "parameter",
+                )
+                for one in parameters
+            ]
         if structure == "columns":
             columns = sorted(
                 entry.get("columns") or [], key=lambda one: int(one.get("ordinal") or 0),
@@ -985,6 +997,7 @@ _STRUCTURE_TYPE = "structure_group"
 #: label, icon). Each appears only where the object has some.
 _STRUCTURES = (
     ("columns", "Columns", "table-column"),
+    ("parameters", "Parameters", "list-details"),
     ("indexes", "Indexes", "list-details"),
     ("constraints", "Constraints", "validation"),
 )

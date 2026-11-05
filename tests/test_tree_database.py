@@ -184,14 +184,15 @@ def test_an_object_given_no_action_is_given_none_here() -> None:
     assert "statement" not in made[1]
 
 
-def test_a_routine_reads_as_its_own_signature() -> None:
+def test_a_routine_uses_its_canonical_name_and_keeps_its_signature() -> None:
     made = DatabaseDataObject().children(
         object(),
         scoped(catalog="rey_apps", schema="tree", collection="procedures"),
         SCHEMA_OBJECTS,
     )
 
-    assert made[0]["label"] == "create_run_manifest(a, b)"
+    assert made[0]["label"] == "create_run_manifest"
+    assert made[0]["tree_configuration"]["signature"] == "a, b"
 
 
 def test_records_leave_without_identity() -> None:
@@ -714,3 +715,47 @@ def test_an_object_row_and_a_schema_row_carry_their_subject_keys() -> None:
 
     assert table["subject_key"] == "database.table"
     assert schema["subject_key"] == "schema.map"
+
+
+@pytest.mark.parametrize('kind', ['procedure', 'function'])
+def test_routine_parameters_expand_from_canonical_metadata(kind, monkeypatch):
+    from rey_lib.db.database_objects import (
+        DatabaseFunction, DatabaseParameter, DatabaseProcedure,
+        DatabaseRoutineIdentity, DatabaseSchema,
+    )
+    from rey_lib.tree.database import schema_projection
+
+    monkeypatch.setattr(DatabaseDataObject, '_relationships', lambda *_: [])
+    identity = DatabaseRoutineIdentity('rey_apps', 'rey_apps', 'tree', 'sample', 'integer')
+    owner = DatabaseProcedure if kind == 'procedure' else DatabaseFunction
+    routine = owner(identity=identity, parameters=(
+        DatabaseParameter('result', 2, 'text', 'OUT', False),
+        DatabaseParameter('input', 1, 'integer', 'IN', True, '42'),
+    ))
+    # The other overload must never supply this routine's parameters.
+    other = owner(
+        identity=DatabaseRoutineIdentity('rey_apps', 'rey_apps', 'tree', 'sample', 'text'),
+        parameters=(DatabaseParameter('wrong_overload', 1, 'text', 'IN', False),),
+    )
+    schema = DatabaseSchema('rey_apps', 'rey_apps', 'tree', **{kind + 's': (routine, other)})
+    state = schema_projection(schema)
+    feeder = DatabaseDataObject()
+    record = scoped(catalog='rey_apps', schema='tree', collection=kind + 's')
+    objects = feeder.children(object(), record, state)
+    routine_record = next(r for r in objects if r['tree_configuration']['signature'] == 'integer')
+    headings = feeder.children(object(), routine_record, state)
+    assert [r['label'] for r in headings] == ['Parameters']
+    assert headings[0]['has_children'] is True
+    assert headings[0]['tree_configuration']['signature'] == 'integer'
+    parameters = feeder.children(object(), headings[0], state)
+    assert [r['label'] for r in parameters] == ['input  integer  IN', 'result  text  OUT']
+    assert all(r['has_children'] is False and r['selectable'] is False for r in parameters)
+    assert all(r['tree_object_key'] is None for r in parameters)
+
+
+@pytest.mark.parametrize('parameters', [None, []])
+def test_routine_without_reported_parameters_has_no_empty_heading(parameters, monkeypatch):
+    monkeypatch.setattr(DatabaseDataObject, '_relationships', lambda *_: [])
+    state = {'functions': [{'identity': {'name': 'f', 'signature': ''}, 'parameters': parameters}]}
+    record = scoped(catalog='rey_apps', schema='tree', object='f', object_type='function', signature='')
+    assert DatabaseDataObject().children(object(), record, state) == []
