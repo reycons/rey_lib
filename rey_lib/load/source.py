@@ -365,6 +365,33 @@ class Source:
                 self._values["file"] = chosen.get("path") or ""
                 self._values["statement"] = chosen.get("resolved_query_sql") or ""
 
+    def apply_selection(self, ctx: Any, identity: Mapping[str, Any]) -> None:
+        """Become the file the reader selected in this Source's tree (#1323).
+
+        The identity is the selected node's location as tree_app holds it: its
+        root and relative path, authorized as every configured file is. The Source
+        selects its file kind and takes that path, with its type where its suffix
+        names one -- left blank, Auto detect, where it does not.
+
+        Args:
+            ctx: The runtime context, whose permitted roots authorize the file.
+            identity: The selected node's ``root`` and ``relative_path``.
+
+        Raises:
+            ConfigError: When the location is not a file, or is outside the
+                installation's permitted roots.
+        """
+        path = ctx.paths.authorize_configured_file(
+            str(identity.get("root") or ""), str(identity.get("relative_path") or ""))
+        try:
+            file_type = DataFile.for_path(path).file_type
+        except ConfigError:
+            # An unrecognised suffix is ordinary: the blank field is Auto detect.
+            file_type = ""
+        self.select("file")
+        self.update("file", str(path))
+        self.update("file-type", file_type)
+
     def _mutation_choice(self, file_mutation_id: Any) -> Optional[dict[str, Any]]:
         """The governed mutation choice with this id, or None."""
         for choice in (self._governed or {}).get("mutation_choices") or []:

@@ -1373,17 +1373,18 @@ def _load_one_file(
             return inserted
 
         try:
-            # ALWAYS VALIDATED, but against different things.
+            # THE SOURCE IS VALIDATED AGAINST ITSELF ONLY (#1323). What reaches
+            # the destination is the Transform's output, not the source's
+            # columns, so a source compared with the table was refused whenever
+            # the Transform added or renamed one (a `context` file_mutation_id,
+            # say). Compatibility with the destination is checked below, on the
+            # Transform's output, before anything is written.
             #
-            #   a destination  -> does this file match the table?
-            #   None (absent)  -> is this file coherent with ITSELF?
-            #
-            # The second is what the create path never had. An absent
-            # destination used to mean no check at all, so an inconsistent
-            # file had its table created from the first record and then
-            # failed inside the insert -- a database error for what is a
-            # file defect, raised after DDL.
-            rows = source.read_validated(expected_columns)
+            # An absent destination used to mean no check at all, so an
+            # inconsistent file had its table created from the first record and
+            # then failed inside the insert -- a database error for what is a
+            # file defect, raised after DDL. Coherence with itself still stops it.
+            rows = source.read_validated(None)
         except DataStructureError as structure_exc:
             return _reject_structure(
                 ctx, run_log, structure_exc, source, destination,
@@ -1402,6 +1403,25 @@ def _load_one_file(
         rows        = transform.transform(rows)
         logical_columns = transform.logical_schema(rows)
         columns         = [name for name, _logical in logical_columns]
+
+        # THE TRANSFORM'S OUTPUT AGAINST THE TARGET (#1323) -- the same
+        # compatibility the Transform editor shows as `output_missing`: every
+        # column the Transform produces must be one the destination has, since
+        # the insert names its columns. Names only; types, order and destination
+        # columns the output does not produce are not this check. Not asked of a
+        # destination this load recreates: it is rebuilt from these columns.
+        if expected_columns is not None and not loader.recreate_destination:
+            missing = [name for name in columns if name not in expected_columns]
+            if missing:
+                return _reject_structure(
+                    ctx, run_log,
+                    DataStructureError(
+                        f"The transform produces columns the destination "
+                        f"{schema}.{table} does not have: {', '.join(missing)}.",
+                        validation_name="load_structure",
+                    ),
+                    source, destination, movements, paths,
+                )
 
         # THE WRITE, and the only place the two target families differ.
         #

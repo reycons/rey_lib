@@ -245,17 +245,37 @@ def _is_decimal(value: str) -> bool:
 
 
 def is_date(value: str) -> bool:
-    """Return True if value looks like a date string (no time component)."""
+    """Return True if value is a date (no time component) in one of the known forms.
+
+    THE SHAPE AND THE CALENDAR BOTH (#1323). A value with a date's shape that
+    names no real date -- ``00/00/0001``, as a masked file holds -- is not a
+    date: typing its column as one creates a destination its own values cannot
+    be written to. Each shape is read by the format it stands for, and a value
+    that does not parse is not a date.
+    """
     import re
-    patterns = [
-        r"^\d{4}-\d{2}-\d{2}$",            # yyyy-MM-dd
-        r"^\d{2}/\d{2}/\d{4}$",            # MM/dd/yyyy
-        r"^\d{2}/\d{2}/\d{2}$",            # MM/dd/yy
-        r"^\d{8}$",                          # yyyyMMdd
-        r"^\d{1,2}-[A-Za-z]{3}-\d{4}$",    # d-MMM-yyyy
-        r"^\d{1,2} [A-Za-z]{3} \d{4}$",    # d MMM yyyy
-    ]
-    return any(re.match(p, value.strip()) for p in patterns)
+    from datetime import datetime
+
+    text = value.strip()
+    for pattern, form in _DATE_FORMS:
+        if re.match(pattern, text):
+            try:
+                datetime.strptime(text, form)
+            except ValueError:
+                return False
+            return True
+    return False
+
+
+#: Each date shape ``is_date`` recognises, and the format that reads it.
+_DATE_FORMS = (
+    (r"^\d{4}-\d{2}-\d{2}$", "%Y-%m-%d"),            # yyyy-MM-dd
+    (r"^\d{2}/\d{2}/\d{4}$", "%m/%d/%Y"),            # MM/dd/yyyy
+    (r"^\d{2}/\d{2}/\d{2}$", "%m/%d/%y"),            # MM/dd/yy
+    (r"^\d{8}$", "%Y%m%d"),                            # yyyyMMdd
+    (r"^\d{1,2}-[A-Za-z]{3}-\d{4}$", "%d-%b-%Y"),    # d-MMM-yyyy
+    (r"^\d{1,2} [A-Za-z]{3} \d{4}$", "%d %b %Y"),    # d MMM yyyy
+)
 
 
 def is_datetime(value: str) -> bool:

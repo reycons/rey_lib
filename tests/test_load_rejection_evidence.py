@@ -110,8 +110,9 @@ class TestTheEvidenceSurvivedTheMove:
 
         recorded = _recorded(tmp_path, monkeypatch, run_log, source, "CSV")
 
-        assert recorded["validation_name"] == "load_header"
-        assert recorded["message"].startswith("Header mismatch for 'wrong.csv'")
+        # #1323: compared as the Transform's output against the destination.
+        assert recorded["validation_name"] == "load_structure"
+        assert "does not have: WRONG" in recorded["message"]
         assert recorded["status"] == "failed"
 
     def test_a_key_mismatch_is_still_called_load_record_keys(
@@ -127,10 +128,8 @@ class TestTheEvidenceSurvivedTheMove:
 
         recorded = _recorded(tmp_path, monkeypatch, run_log, source, "JSONL")
 
-        assert recorded["validation_name"] == "load_record_keys"
-        assert recorded["message"].startswith(
-            "Record keys do not match the destination columns"
-        )
+        # #1323: the source is checked against itself; its records disagree.
+        assert recorded["validation_name"] == "load_record_consistency"
 
     def test_the_diagnosis_travels_on_the_error(
         self, tmp_path: Path, monkeypatch, run_log

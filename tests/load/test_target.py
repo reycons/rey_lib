@@ -11,6 +11,7 @@ nothing else.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -364,3 +365,54 @@ class TestItsSnapshot:
 
         assert shown["modes_kind"] == "database"
         assert set(shown["modes"]) <= set(shown["fields"][shown["modes_kind"]])
+
+
+class TestASelectionFromItsTree:
+    """#1323: the node the reader selected in the Target's tree, located by tree_app."""
+
+    @staticmethod
+    def _ctx(base: Path) -> SimpleNamespace:
+        """A runtime whose permitted roots resolve a location beneath ``base``."""
+        def authorize_beneath(root: str, relative_path: str) -> Path:
+            if relative_path.startswith(".."):
+                raise ConfigError("outside allowed roots")
+            return base / relative_path
+
+        return SimpleNamespace(paths=SimpleNamespace(authorize_beneath=authorize_beneath))
+
+    def test_a_selected_file_becomes_the_out_file(self, tmp_path: Path) -> None:
+        target = Target.from_declaration({"selected": "file", "values": {
+            "connection": "warehouse", "table": "landing.orders"}})
+
+        target.apply_selection(self._ctx(tmp_path),
+                               {"root": "/data", "relative_path": "out/rows.csv"})
+
+        assert target.declaration()["values"] == {
+            "connection": "warehouse", "table": "landing.orders",
+            "out-file": str(tmp_path / "out/rows.csv")}
+
+    def test_a_selected_folder_names_filename_csv_in_it(self, tmp_path: Path) -> None:
+        (tmp_path / "testing").mkdir()
+        target = Target.from_declaration({"selected": "file", "values": {"out-file": "o.csv"}})
+
+        target.apply_selection(self._ctx(tmp_path), {"root": "/data", "relative_path": "testing"})
+
+        assert target.value("out-file") == str(tmp_path / "testing" / "filename.csv")
+
+    def test_a_location_outside_the_permitted_roots_is_refused(self, tmp_path: Path) -> None:
+        target = Target.from_declaration({"selected": "file"})
+
+        with pytest.raises(ConfigError, match="outside allowed roots"):
+            target.apply_selection(self._ctx(tmp_path), {"root": "/data", "relative_path": "../x"})
+
+        assert target.value("out-file") is None
+
+    def test_a_selected_table_becomes_the_database_destination(self) -> None:
+        target = Target.from_declaration({"selected": "file", "values": {"out-file": "o.csv"}})
+
+        target.apply_selection(SimpleNamespace(), {
+            "connection": "warehouse", "schema_name": "landing", "name": "orders"})
+
+        assert target.selected_kind() == "database"
+        assert target.declaration()["values"] == {
+            "out-file": "o.csv", "connection": "warehouse", "table": "landing.orders"}

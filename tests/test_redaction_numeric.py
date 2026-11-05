@@ -82,3 +82,12 @@ def test_infer_logical_type_empty_values_return_none() -> None:
     """Empty or blank-only values return None."""
     assert infer_logical_type([]) is None
     assert infer_logical_type(["", "  "]) is None
+
+
+def test_infer_logical_type_masked_dates_are_text_not_date() -> None:
+    """#1323: a date's shape that names no real date is not a date."""
+    assert infer_logical_type(["00/00/0001", "00/00/0002", "00/00/0006"]) is None
+
+
+def test_infer_logical_type_real_slash_dates_are_still_dates() -> None:
+    assert infer_logical_type(["01/31/2019", "12/01/2020", "02/29/2024"]) == LogicalType("date")

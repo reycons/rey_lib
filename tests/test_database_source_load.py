@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.data.errors import DataStructureError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.query_source import QuerySource
@@ -89,7 +90,8 @@ def engine():
         yield conn
 
 
-def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
+def _load(monkeypatch, run_log, source: Any, destination: _Destination,
+          transform: Any = None) -> int:
     """Run one load through the shared boundary and return the rows loaded."""
     stand_beneath_the_table(monkeypatch, destination)
     monkeypatch.setattr(
@@ -112,7 +114,7 @@ def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
         source,
         # None, so the boundary builds the IdentityTransform itself -- the
         # same construction a direct file load goes through.
-        None,
+        transform,
         _TARGET,
         ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=None,
@@ -159,11 +161,29 @@ class TestADatabaseSourceCrossesTheBoundary:
 
         assert destination.insert_columns == ["a", "b"]
 
-    def test_a_statement_selecting_fewer_columns_is_refused(
+    def test_a_column_the_transform_adds_is_compared_not_the_querys(
         self, engine, monkeypatch, run_log
     ) -> None:
-        """The destination check runs for a database source exactly as it does
-        for a file: nothing is inserted, and the refusal is the source's."""
+        """#1323: a Transform stamping a column the query does not select loads
+        into a table that has it -- the comparison is the Transform's output."""
+
+        class _Stamping(IdentityTransform):
+            def transform(self, records):
+                return [{"file_mutation_id": 7, **record} for record in records]
+
+        destination = _Destination(["file_mutation_id", "a", "b"])
+
+        loaded = _load(monkeypatch, run_log, _source(engine), destination, _Stamping())
+
+        assert loaded == 3
+        assert destination.insert_columns == ["file_mutation_id", "a", "b"]
+
+    def test_a_statement_selecting_fewer_columns_is_loaded(
+        self, engine, monkeypatch, run_log
+    ) -> None:
+        """#1323: what is checked is the Transform's output against the
+        destination -- every produced column is one the table has. Destination
+        columns the output does not produce are not this check."""
         destination = _Destination(["a", "b"])
 
         loaded = _load(
@@ -171,8 +191,8 @@ class TestADatabaseSourceCrossesTheBoundary:
             _source(engine, "SELECT a FROM orders"), destination,
         )
 
-        assert loaded == 0
-        assert destination.inserted == []
+        assert loaded == 3
+        assert destination.insert_columns == ["a"]
 
     def test_an_empty_result_is_refused_as_an_empty_file_is(
         self, engine, monkeypatch, run_log
@@ -316,10 +336,11 @@ class TestTheConstructionSite:
 
         assert loaded == 3
 
-    def test_a_destination_that_does_not_match_is_refused(
+    def test_a_destination_lacking_a_produced_column_is_refused(
         self, engine, monkeypatch, run_log
     ) -> None:
-        destination = _Destination(["a", "b", "c"])
+        """#1323: the Transform's output is compared with the destination."""
+        destination = _Destination(["a"])
 
         loaded, _asked = self._call(monkeypatch, engine, run_log, destination)
 

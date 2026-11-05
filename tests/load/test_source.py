@@ -338,3 +338,53 @@ class TestItsSnapshot:
 
         assert shown["governed"] is None
         assert "file-mutation-id" not in shown["choices"]
+
+
+class _ConfiguredPaths:
+    """The runtime's permitted roots: a configured file resolves beneath its root."""
+
+    def __init__(self, base: Path) -> None:
+        self.base = base
+        self.asked: list[tuple[str, str]] = []
+
+    def authorize_configured_file(self, root: str, relative_path: str) -> Path:
+        self.asked.append((root, relative_path))
+        if relative_path.startswith(".."):
+            raise ConfigError("outside allowed roots")
+        return self.base / relative_path
+
+
+class TestASelectionFromItsTree:
+    """#1323: the node the reader selected in the Source's tree, located by tree_app."""
+
+    def test_a_selected_file_becomes_the_file_source_with_its_type(self, tmp_path: Path) -> None:
+        paths = _ConfiguredPaths(tmp_path)
+        source = Source.from_declaration({"selected": "database", "values": {
+            "statement": "select 1", "source-connection": "warehouse"}})
+
+        source.apply_selection(SimpleNamespace(paths=paths),
+                               {"root": "/data", "relative_path": "in/rows.csv"})
+
+        assert paths.asked == [("/data", "in/rows.csv")]
+        assert source.selected_kind() == "file"
+        assert source.value("file") == str(tmp_path / "in/rows.csv")
+        assert source.value("file-type") == "CSV"
+        # Selecting is not destroying: the database kind's values stay.
+        assert source.value("statement") == "select 1"
+
+    def test_an_unrecognised_suffix_leaves_the_type_to_auto_detect(self, tmp_path: Path) -> None:
+        source = Source.from_declaration({"values": {"file-type": "CSV"}})
+
+        source.apply_selection(SimpleNamespace(paths=_ConfiguredPaths(tmp_path)),
+                               {"root": "/data", "relative_path": "notes.unknownext"})
+
+        assert source.value("file-type") == ""
+
+    def test_a_file_outside_the_permitted_roots_is_refused(self, tmp_path: Path) -> None:
+        source = Source.from_declaration({})
+
+        with pytest.raises(ConfigError, match="outside allowed roots"):
+            source.apply_selection(SimpleNamespace(paths=_ConfiguredPaths(tmp_path)),
+                                   {"root": "/data", "relative_path": "../x.csv"})
+
+        assert source.value("file") is None

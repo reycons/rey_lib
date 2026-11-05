@@ -312,6 +312,36 @@ class Target:
             )
         self._values[name] = value
 
+    def apply_selection(self, ctx: Any, identity: Mapping[str, Any]) -> None:
+        """Become what the reader selected in this Target's tree (#1323).
+
+        The identity is the selected node's location as tree_app holds it. A
+        database relation -- its ``connection``, ``schema_name`` and ``name`` --
+        becomes the database destination: that connection and the qualified table.
+        A file location -- its ``root`` and ``relative_path``, authorized beneath
+        that root as a folder is -- becomes the out-file; a folder is a place to
+        write into, so the out-file is ``filename.csv`` in it. Nothing else this
+        Target holds changes.
+
+        Args:
+            ctx: The runtime context, whose permitted roots authorize a file location.
+            identity: The selected node's location.
+
+        Raises:
+            ConfigError: When the location is outside the installation's
+                permitted roots.
+        """
+        if identity.get("name") is not None and identity.get("schema_name") is not None:
+            self.select("database")
+            self.update("connection", str(identity.get("connection") or ""))
+            self.update("table", f"{identity['schema_name']}.{identity['name']}")
+            return
+        location = ctx.paths.authorize_beneath(
+            str(identity.get("root") or ""), str(identity.get("relative_path") or ""))
+        if location.is_dir():
+            location = location / "filename.csv"
+        self.update("out-file", str(location))
+
     def set_write_policy(self, policy: str) -> None:
         """Say what the load may do: one mode on, the other three off.
 
