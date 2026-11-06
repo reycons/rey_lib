@@ -59,9 +59,11 @@ class TestTaskProjection:
         assert "ANTHROPIC_API_KEY" not in shown
         assert "Secret contract text." not in shown
 
-    def test_an_answered_task_projects_its_answer_unrendered(
+    def test_an_answered_task_projects_its_answer_and_its_content(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The answer as AI stated it, and beside it the canonical Content (#1323):
+        a Markdown answer carries the HTML the shared renderer prepares."""
         ai = AI()
         model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("# Done")]))
         monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
@@ -71,9 +73,14 @@ class TestTaskProjection:
         projection = task.projection()
 
         assert projection["status"] == AITask.COMPLETED
-        assert projection["answer"] == {
+        answer = dict(projection["answer"])
+        content = answer.pop("content")
+        assert answer == {
             "text": "# Done", "value": None, "media_type": "text/markdown",
             "tool_calls": [], "tool_results": []}
+        assert (content["text"], content["language"], content["html_trusted"]) == (
+            "# Done", "markdown", True)
+        assert "<h1>Done</h1>" in content["html"]
         assert json.loads(json.dumps(projection)) == projection
 
     def test_a_failed_task_projects_why(self) -> None:
@@ -168,3 +175,26 @@ class TestTaskDefinition:
 
         assert task.projection()["composed_first"] is True
         assert "installation" not in task.projection()
+
+
+def test_a_markdown_answer_is_projected_as_content_with_its_html() -> None:
+    """#1323: a declared Markdown answer reaches the viewer as the canonical Content."""
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(label="Loader Review", task_key="review_load")
+    answer = SimpleNamespace(text="# Findings\n\nNothing wrong.", media_type="text/markdown")
+
+    content = AITask._answer_content(task, answer)
+
+    assert content["language"] == "markdown"
+    assert content["html_trusted"] is True
+    assert "<h1>Findings</h1>" in content["html"]
+
+
+def test_a_plain_text_answer_is_content_without_html() -> None:
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(label="", task_key="generate_sql")
+    content = AITask._answer_content(task, SimpleNamespace(text="# not a heading", media_type=""))
+
+    assert (content["language"], content["html"], content["html_trusted"]) == ("text", "", False)

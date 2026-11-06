@@ -34,7 +34,10 @@ from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputSpec
 from rey_lib.ai.tools import AITool
+from rey_lib.content import Content
+from rey_lib.formatting import markdown_to_html
 from rey_lib.logs.app_logger import AppLogger
+from rey_lib.viewers.language import classify_text_language
 
 logger = AppLogger(__name__)
 
@@ -294,8 +297,13 @@ class AITask:
         )
         timeout = engine.get("timeout_seconds")
         kind = AIInstructionKind(str(instruction.get("kind") or "none"))
+        # WHAT THE TASK PRODUCES, as ai.ai_task declares it (#1323) -- the task's own
+        # fact, not its execution's. Undeclared, the instruction kind decides, as it
+        # always has.
+        declared = str((row or {}).get("output_media_type") or "").strip()
         required = output if output is not None else (
-            AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
+            AIOutputSpec.text(declared) if declared
+            else AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
             else AIOutputSpec.markdown()
         )
         identity = {"id": str(task_id)} if str(task_id or "").strip() else {}
@@ -430,9 +438,12 @@ class AITask:
 
         Its identity, which governed task it is, the caller's choices and what
         was asked, its lifecycle, and its answer as AI stated it -- text or
-        value with the media type, never rendered, and beside it the run's tool
-        calls and their results. Engine credentials and the
-        contract body stay out: they are execution facts, not display.
+        value with the media type -- and, for a text answer, that text as the
+        canonical ``Content`` (#1323): in the language its declared media type
+        names, with the HTML the shared renderer prepares for Markdown, as Rey's
+        own (the #1220 path). Beside it the run's tool calls and their results.
+        Engine credentials and the contract body stay out: they are execution
+        facts, not display.
 
         With them, what each of its choices may be (``offers``). How it is
         presented is not the task's: Projection.for_subject resolves that (#1215).
@@ -470,6 +481,8 @@ class AITask:
             "run_id": self.run_id,
             "answer": None if answer is None else {
                 "text": answer.text, "value": answer.value, "media_type": answer.media_type,
+                **({"content": self._answer_content(answer)}
+                   if isinstance(answer.text, str) else {}),
                 # The run's tool exchange beside the payload (AIResult), as plain data:
                 # each call as the model made it, each result as it came back.
                 "tool_calls": [
@@ -483,6 +496,17 @@ class AITask:
                 ],
             },
         }
+
+    def _answer_content(self, answer: Any) -> dict[str, Any]:
+        """A text answer as the canonical Content (#1220, #1323).
+
+        Its language is the one its declared media type names, never inferred from
+        the text; Markdown carries the HTML the shared renderer prepares, as Rey's own.
+        """
+        language = classify_text_language(mime_type=str(answer.media_type or "text/plain"))
+        html = markdown_to_html(answer.text) if language == "markdown" else ""
+        return Content(name=self.label or self.task_key or "answer", text=answer.text,
+                       language=language, html=html, html_trusted=bool(html)).projection()["content"]
 
     def definition(self) -> dict[str, Any]:
         """What this unit of work is and where it stands (#1199 S6).
