@@ -199,14 +199,14 @@ class TestIsolation:
         sessions = _Sessions([_result("Hello")])
         ai = _ai(sessions, monkeypatch)
 
-        ai.execute_task(_task())
+        ai.execute_task(_task(max_turns=23))
 
         options = sessions.options[0]
         assert options.model == "claude-sonnet-4-6"
         assert options.system_prompt == "Explain it."
         assert (options.tools, options.setting_sources) == ([], [])
         assert (options.mcp_servers, options.allowed_tools) == ({}, [])
-        assert options.max_turns == ai_module._MAX_TURNS
+        assert options.max_turns == 23
         assert options.output_format is None
         assert options.include_partial_messages is False
         assert options.env == {}

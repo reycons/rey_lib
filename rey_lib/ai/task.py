@@ -68,6 +68,9 @@ class AITask:
         contract_key, contract_version, contract_body: The contract that
             instruction binds, and its text.
         output_schema: The shape the contract requires, when it states one.
+        max_turns: Maximum model requests/turns for this execution, tool turns
+            included. Hydrated from persisted settings; None leaves the engine
+            uncapped for a directly constructed task that states no budget.
         temperature, representation, connection: The settings that apply,
             already resolved from the group default and the task's override.
         input: What is sent.
@@ -103,7 +106,7 @@ class AITask:
     #: ``output`` is one (backlog 1047, D4): stated, it is kept across edits;
     #: unstated, hydration derives it again at every rehydration.
     CHOICES: ClassVar[tuple[str, ...]] = (
-        "profile_key", "instruction_key", "temperature", "representation", "connection",
+        "profile_key", "instruction_key", "temperature", "representation", "connection", "max_turns",
         "output",
     )
 
@@ -131,6 +134,7 @@ class AITask:
     output_schema: dict[str, Any] | None = None
 
     temperature: float | None = None
+    max_turns: int | None = None
     representation: str = ""
     connection: str = ""
 
@@ -161,6 +165,17 @@ class AITask:
                 f"AI task '{self.task_key or '(default)'}' names no engine."
             )
 
+        object.__setattr__(self, "max_turns", self.turn_limit(self.max_turns))
+
+    @staticmethod
+    def turn_limit(value: Any) -> int | None:
+        """A positive integer execution budget; blank is an inherited setting."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, bool) or not str(value).strip().isdecimal() or int(value) < 1:
+            raise AIConfigurationError("Maximum AI turns must be a positive integer.")
+        return int(value)
+
     # -- hydration (backlog 1022) -------------------------------------------
 
     @classmethod
@@ -173,6 +188,7 @@ class AITask:
         profile_key: str = "",
         instruction_key: str = "",
         temperature: float | None = None,
+        max_turns: int | None = None,
         representation: str = "",
         connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
@@ -200,7 +216,7 @@ class AITask:
             control.ai_instructions(),
             installation=installation, task_key=task_key,
             profile_key=profile_key, instruction_key=instruction_key,
-            temperature=temperature, representation=representation,
+            temperature=temperature, max_turns=max_turns, representation=representation,
             connection=connection, input=input, output=output,
             subject=subject, subject_reference=subject_reference,
             origin_id=origin_id, task_id=task_id,
@@ -218,6 +234,7 @@ class AITask:
         profile_key: str = "",
         instruction_key: str = "",
         temperature: float | None = None,
+        max_turns: int | None = None,
         representation: str = "",
         connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
@@ -267,6 +284,7 @@ class AITask:
             "profile_key": first.get("default_profile_key"),
             "instruction_key": first.get("default_instruction_key"),
             "temperature": first.get("default_temperature"),
+            "max_turns": first.get("default_max_turns"),
             "representation": first.get("default_representation"),
             "connection_name": first.get("default_connection_name"),
             "composed_first": first.get("default_composed_first"),
@@ -312,7 +330,7 @@ class AITask:
         given = {
             "profile_key": profile_key, "instruction_key": instruction_key,
             "temperature": temperature, "representation": representation,
-            "connection": connection, "output": output,
+            "connection": connection, "output": output, "max_turns": max_turns,
         }
         return cls(
             **identity,
@@ -338,6 +356,8 @@ class AITask:
             contract_version=str(instruction.get("contract_version") or ""),
             contract_body=str(instruction.get("body") or ""),
             temperature=None if stated is None else float(stated),
+            max_turns=next((value for value in (max_turns, (row or {}).get("max_turns"),
+                                               group.get("max_turns")) if value is not None), None),
             representation=chosen(representation, "representation"),
             connection=chosen(connection, "connection_name"),
             input=input if input is not None else AIInput(),
@@ -457,6 +477,7 @@ class AITask:
             "profile_key": self.profile_key,
             "instruction_key": self.instruction_key,
             "temperature": self.temperature,
+            "max_turns": self.max_turns,
             "representation": self.representation,
             "connection": self.connection,
             # A chosen output is shown by what it means -- its media type --
@@ -529,6 +550,7 @@ class AITask:
             "profile_key": self.profile_key,
             "instruction_key": self.instruction_key,
             "temperature": self.temperature,
+            "max_turns": self.max_turns,
             "representation": self.representation,
             "connection": self.connection,
             # A chosen output is stated by what it means -- its media type.

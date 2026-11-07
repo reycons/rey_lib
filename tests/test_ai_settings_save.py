@@ -19,7 +19,7 @@ from rey_lib.ai.ai import AI
 from rey_lib.ai.errors import AIRequestError, AISelectionError
 
 _FIELDS = ("profile_key", "instruction_key", "temperature", "representation",
-           "connection_name")
+           "connection_name", "max_turns")
 
 
 class _Control:
@@ -28,11 +28,11 @@ class _Control:
     def __init__(self) -> None:
         self.defaults: dict[str, Any] = {
             "profile_key": "anthropic", "instruction_key": None, "temperature": 0.2,
-            "representation": "redacted", "connection_name": None}
+            "representation": "redacted", "connection_name": None, "max_turns": 8}
         self.tasks: dict[str, dict[str, Any]] = {
             "search_index": {"profile_key": "local", "instruction_key": None,
                              "temperature": None, "representation": None,
-                             "connection_name": "llm_reader"},
+                             "connection_name": "llm_reader", "max_turns": None},
             "generate_sql": {field: None for field in _FIELDS},
         }
         self.writes: list[tuple[str, ...]] = []
@@ -106,7 +106,7 @@ class TestAnEditIsSessionState:
         actions = _scope(ai, control, "default")["actions"]
 
         assert [one["role"]["field"] for one in actions] == [
-            "profile_id", "instruction_id", "temperature", "representation", "connection"]
+            "profile_id", "instruction_id", "temperature", "representation", "connection", "max_turns"]
         assert actions[0]["command"] == {"command": "set_setting", "scope": "default",
                                          "field": "profile_id"}
         assert actions[0]["inputs"] == {"value": ["value"]}
@@ -258,3 +258,23 @@ class TestWorkbenchSelectionBelongsToTheAI:
         assert ai.workbench_task(control, "local").task_key == ""
         ai.select_workbench_task(control, "local", "search_index")
         assert ai.workbench_task(control, "local").id == selected.id
+
+
+def test_turn_limit_save_inheritance_and_execution_hydration() -> None:
+    ai, control = _ai(), _Control()
+    ai.set_setting(control, "local", "default", "max_turns", "21")
+    ai.set_setting(control, "local", "search_index", "max_turns", "13")
+    ai.select_workbench_task(control, "local", "search_index")
+    assert ai.workbench_task(control, "local").max_turns == 13
+    ai.select_workbench_task(control, "local", "generate_sql")
+    assert ai.workbench_task(control, "local").max_turns == 21
+    ai.save_settings(control, "local")
+    assert control.defaults["max_turns"] == 21
+    assert control.tasks["search_index"]["max_turns"] == 13
+    ai.set_setting(control, "local", "search_index", "max_turns", "")
+    ai.save_settings(control, "local")
+    assert control.tasks["search_index"]["max_turns"] is None
+    ai.select_workbench_task(control, "local", "search_index")
+    assert ai.workbench_task(control, "local").max_turns == 21
+    with pytest.raises(AIRequestError, match="positive integer"):
+        ai.set_setting(control, "local", "default", "max_turns", "")

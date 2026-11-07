@@ -144,7 +144,7 @@ class TestTaskDefinition:
         assert json.loads(json.dumps(definition)) == definition
         assert definition == {
             "id": task.id, "task_key": "explain", "label": "Explain", "installation": "admin",
-            "profile_key": "anthropic", "instruction_key": "", "temperature": None,
+            "profile_key": "anthropic", "instruction_key": "", "temperature": None, "max_turns": None,
             "representation": "", "connection": "",
             "choices": {"profile_key": "anthropic", "output": "text/markdown"},
             "prompt": "What is this?", "media_type": "text/markdown",

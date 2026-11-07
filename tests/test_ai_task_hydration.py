@@ -259,3 +259,22 @@ class TestOffers:
         assert not hasattr(AITask, "PANEL_TYPE")
         assert set(projection["offers"]) == {"profile_key", "instruction_key", "representation"}
         assert "offers" not in _hydrate(task_key="search_index").definition()
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2.5", "unlimited", "-2"])
+def test_invalid_turn_limits_are_refused(value: object) -> None:
+    with pytest.raises(AIConfigurationError, match="positive integer"):
+        _hydrate(max_turns=value)
+
+
+def test_turn_limit_is_governed_then_overridden_and_projected() -> None:
+    rows = [dict(CONFIGURATION[0], default_max_turns=19, max_turns=12)]
+    default = AITask.hydrate(rows, ENGINES, INSTRUCTIONS, installation="local")
+    task = AITask.hydrate(rows, ENGINES, INSTRUCTIONS, installation="local", task_key="search_index")
+    chosen = AITask.hydrate(rows, ENGINES, INSTRUCTIONS, installation="local", max_turns=31)
+    assert default.max_turns == 19
+    assert task.max_turns == 12
+    assert chosen.max_turns == 31
+    assert chosen.choices["max_turns"] == 31
+    assert "max_turns" not in task.choices
+    assert chosen.projection()["max_turns"] == 31

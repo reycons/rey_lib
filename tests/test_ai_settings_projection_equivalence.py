@@ -99,7 +99,10 @@ def test_the_projection_equals_the_one_captured_before_the_cutover() -> None:
     assert settings.pop("actions") == []
     for scope in settings["scopes"]:
         assert [one["role"]["field"] for one in scope.pop("actions")] == [
-            "profile_id", "instruction_id", "temperature", "representation", "connection"]
+            "profile_id", "instruction_id", "temperature", "representation", "connection", "max_turns"]
+        # #1063 adds a governed turn budget; this older fixture states none.
+        assert scope["settings"].pop("max_turns") is None
+        assert scope["effective"].pop("max_turns") is None
     golden = json.loads(_GOLDEN.read_text())
     assert golden["settings"].pop("read_only") is True
 

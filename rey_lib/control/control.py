@@ -1396,10 +1396,11 @@ class Control:
                                         profile_key: Optional[str],
                                         instruction_key: Optional[str],
                                         temperature: Optional[float],
+                                    max_turns: Optional[int],
                                         representation: Optional[str],
                                         connection_name: Optional[str],
                                         required: bool = True) -> None:
-        """Replace one installation's five default AI settings; a None clears a default (#1191, #1296).
+        """Replace one installation's default AI settings; maximum turns must be positive (#1191, #1296).
 
         The values are handed over exactly as given; the routine owns how they
         become the installation's row.
@@ -1409,6 +1410,7 @@ class Control:
             "profile_key": profile_key,
             "instruction_key": instruction_key,
             "temperature": temperature,
+            "max_turns": max_turns,
             "representation": representation,
             "connection_name": connection_name,
         }, required=required)
@@ -1417,10 +1419,11 @@ class Control:
                                     profile_key: Optional[str],
                                     instruction_key: Optional[str],
                                     temperature: Optional[float],
+                                    max_turns: Optional[int],
                                     representation: Optional[str],
                                     connection_name: Optional[str],
                                     required: bool = True) -> None:
-        """Replace one installation task's five settings; a None is inheritance (#1191, #1296).
+        """Replace one installation task's settings; a None is inheritance (#1191, #1296).
 
         The values are handed over exactly as given; the routine owns how they
         become the installation task's row.
@@ -1431,6 +1434,7 @@ class Control:
             "profile_key": profile_key,
             "instruction_key": instruction_key,
             "temperature": temperature,
+            "max_turns": max_turns,
             "representation": representation,
             "connection_name": connection_name,
         }, required=required)

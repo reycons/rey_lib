@@ -216,3 +216,16 @@ class TestStdout:
 
         assert capfd.readouterr().out == ""
         assert pydantic_ai.BANNER_ENABLED is False
+
+
+@pytest.mark.parametrize("limit", [1, 17])
+def test_pydantic_execution_receives_the_task_budget(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
+    from pydantic_ai import Agent
+    original = Agent.run_sync
+    observed = []
+    def run(agent, *args, **kwargs):
+        observed.append(kwargs["usage_limits"].request_limit)
+        return original(agent, *args, **kwargs)
+    monkeypatch.setattr(Agent, "run_sync", run)
+    _ai(_Engine("ready"), monkeypatch).execute_task(_task(max_turns=limit))
+    assert observed == [limit]

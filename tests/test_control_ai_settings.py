@@ -49,11 +49,11 @@ def test_installation_defaults_are_written_exactly_as_given() -> None:
     with patch.object(Control, "_call") as called:
         _control().update_ai_installation_defaults(
             "local", profile_key="anthropic", instruction_key=None,
-            temperature=0.2, representation=None, connection_name="llm_reader")
+            temperature=0.2, max_turns=17, representation=None, connection_name="llm_reader")
 
     called.assert_called_once_with("update_ai_installation_defaults", {
         "installation": "local",
-        "profile_key": "anthropic", "instruction_key": None, "temperature": 0.2,
+        "profile_key": "anthropic", "instruction_key": None, "temperature": 0.2, "max_turns": 17,
         "representation": None, "connection_name": "llm_reader",
     }, required=True)
 
@@ -62,11 +62,11 @@ def test_a_task_is_written_with_its_inherited_values_as_none() -> None:
     with patch.object(Control, "_call") as called:
         _control().update_ai_installation_task(
             "local", "search_index", profile_key=None,
-            instruction_key=None, temperature=0.7, representation=None,
+            instruction_key=None, temperature=0.7, max_turns=None, representation=None,
             connection_name=None)
 
     called.assert_called_once_with("update_ai_installation_task", {
         "installation": "local",
         "task_key": "search_index", "profile_key": None, "instruction_key": None,
-        "temperature": 0.7, "representation": None, "connection_name": None,
+        "temperature": 0.7, "max_turns": None, "representation": None, "connection_name": None,
     }, required=True)

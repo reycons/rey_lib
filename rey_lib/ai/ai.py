@@ -53,9 +53,6 @@ logger = AppLogger(__name__)
 #: tools are named ``mcp__rey__<tool>`` to the CLI (backlog 1136).
 _CLAUDE_TOOL_SERVER = "rey"
 
-#: How many model requests one execution may make, tool turns included. The
-#: value the live path has always run with; governing it is #1063's.
-_MAX_TURNS = 8
 #: How many times a tool call the model got wrong is handed back to it.
 _MAX_TOOL_CORRECTIONS = 2
 #: How many times an answer that fails its contract is handed back to the model.
@@ -68,11 +65,11 @@ _ACCESS_MODES = frozenset({"redacted", "unredacted"})
 _DEFAULT_SCOPE = "default"
 #: The settings a scope may change (#1191). Compose before run is not one of them.
 _EDITABLE_SETTINGS = ("profile_id", "instruction_id", "temperature", "representation",
-                      "connection")
+                      "connection", "max_turns")
 #: Each editable setting, as the AITask choice a new task takes it as.
 _CHOICE_OF_SETTING = {"profile_id": "profile_key", "instruction_id": "instruction_key",
                       "temperature": "temperature", "representation": "representation",
-                      "connection": "connection"}
+                      "connection": "connection", "max_turns": "max_turns"}
 #: Save, declared while an edit is unsaved: the command that persists the settings.
 _SAVE_SETTINGS_ACTION = {"role": {"act": "save", "on": "settings"},
                          "command": {"command": "save_settings"}}
@@ -242,6 +239,7 @@ class AI:
             temperature = held.get("temperature")
             return {"profile_id": profile_id, "instruction_id": instruction_id,
                     "temperature": None if temperature is None else float(temperature),
+                    "max_turns": AITask.turn_limit(held.get("max_turns")),
                     "representation": str(held.get("representation") or "").strip(),
                     "connection": connection,
                     "composed_first": bool(row.get("composed_first") or False)}
@@ -263,6 +261,8 @@ class AI:
                 effective["temperature"] = (default["temperature"]
                                             if scope_stated["temperature"] is None
                                             else scope_stated["temperature"])
+                effective["max_turns"] = (default["max_turns"] if scope_stated["max_turns"] is None
+                                          else scope_stated["max_turns"])
             engine = profiles.get(str(effective["profile_id"])) if effective["profile_id"] else None
             policy = (_access_policy(engine) if engine is not None
                       else {"allowed": [], "default": ""})
@@ -349,6 +349,8 @@ class AI:
         scopes = self._settings_of(control, installation)
         if scope not in scopes:
             raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
+        if field == "max_turns" and scope == _DEFAULT_SCOPE and AITask.turn_limit(value) is None:
+            raise AIRequestError("The default maximum AI turns must be a positive integer.")
         scopes[scope][field] = self._offered_setting(control, installation, field, value)
 
     def save_settings(self, control: Any, installation: str) -> None:
@@ -374,6 +376,7 @@ class AI:
                 "profile_key": scopes[scope]["profile_id"] or None,
                 "instruction_key": scopes[scope]["instruction_id"] or None,
                 "temperature": scopes[scope]["temperature"],
+                "max_turns": scopes[scope]["max_turns"],
                 "representation": scopes[scope]["representation"] or None,
                 "connection_name": scopes[scope]["connection"] or None,
             }
@@ -407,6 +410,8 @@ class AI:
     def _offered_setting(self, control: Any, installation: str, field: str,
                          value: Any) -> Any:
         """One setting's value as the installation's configuration offers it, or a refusal."""
+        if field == "max_turns":
+            return AITask.turn_limit(value)
         if field == "temperature":
             if value is None or str(value).strip() == "":
                 return None
@@ -772,7 +777,7 @@ class AI:
             )
             run = agent.run_sync(
                 prompt, model_settings=settings or None,
-                usage_limits=UsageLimits(request_limit=_MAX_TURNS),
+                usage_limits=UsageLimits(request_limit=task.max_turns),
                 event_stream_handler=relay if tell is not None else None,
                 cancellation_token=token,
             )
@@ -894,7 +899,7 @@ class AI:
                 if tools else {}
             ),
             allowed_tools=[f"mcp__{_CLAUDE_TOOL_SERVER}__{tool.name}" for tool in tools],
-            max_turns=_MAX_TURNS,
+            max_turns=task.max_turns,
             output_format={"type": "json_schema", "schema": schema} if structured else None,
             include_partial_messages=tell is not None,
         )
@@ -1370,6 +1375,7 @@ def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any
         return {"profile_id": str(row.get(f"{prefix}profile_key") or ""),
                 "instruction_id": str(row.get(f"{prefix}instruction_key") or ""),
                 "temperature": None if temperature is None else float(temperature),
+                "max_turns": AITask.turn_limit(row.get(f"{prefix}max_turns")),
                 "representation": str(row.get(f"{prefix}representation") or ""),
                 "connection": str(row.get(f"{prefix}connection_name") or "")}
 
