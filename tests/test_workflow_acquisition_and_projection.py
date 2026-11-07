@@ -111,11 +111,23 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
     projection = _workflow().projection(object())
     projection.pop("relationships")
     actions = projection.pop("actions")
+    # Each object's editor (facts, fields, form) is asserted on its own below.
+    forms = [projection.pop("form"), *(one.pop("form") for one in projection["processes"]),
+             *(step.pop("form") for one in projection["processes"] for step in one["steps"])]
+    for owner in [projection, *projection["processes"],
+                  *(step for one in projection["processes"] for step in one["steps"])]:
+        owner.pop("fields")
+    assert [section["label"] for section in forms[0]] == ["Workflow"]
+    assert [section["label"] for section in forms[1]] == ["Workflow", "app settings"]
+    assert [section["label"] for section in forms[2]] == ["Workflow", "app · load"]
     assert set(actions) == {"workflow", "process:1", "step:1", "step:2"}
     # No presentation (#1215): the Workflow's governed subject's, never its own.
     assert projection == {
         "name": "code_index",
         "enabled": True,
+        # Its live configuration, as configured and as resolved (#1325).
+        "config": {"configured": {}, "resolved": {}},
+        "facts": [{"label": "Workflow", "value": "code_index"}],
         "state": "IDLE",
         "released": None,
         "focus": None,
@@ -125,11 +137,21 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
                 "name": "p",
                 "application": "app",
                 "application_icon": "app.app",
+                "config": {"configured": {}, "resolved": {}},
+                "facts": [{"label": "Process", "value": "p"}, {"label": "Application", "value": "app"}],
                 "steps": [
                     {"ordinal": 1, "id": "s1", "operation": "load",
+                     "settings": {"configured": {}, "resolved": {}},
+                     "facts": [{"label": "Step", "value": "1  s1"},
+                               {"label": "Operation", "value": "load"},
+                               {"label": "Process", "value": "p"}],
                      "apply_only": True, "always_run": False,
                      "state": "PENDING", "run_id": None},
                     {"ordinal": 2, "id": "s2", "operation": "check",
+                     "settings": {"configured": {}, "resolved": {}},
+                     "facts": [{"label": "Step", "value": "2  s2"},
+                               {"label": "Operation", "value": "check"},
+                               {"label": "Process", "value": "p"}],
                      "apply_only": False, "always_run": False,
                      "state": "PENDING", "run_id": None},
                 ],

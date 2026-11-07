@@ -62,7 +62,9 @@ from rey_lib.logs import (
 )
 from rey_lib.run.run import FAILED, NOT_RUN, SKIPPED, SUCCEEDED
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import RUNNING, WorkflowStep
+from rey_lib.workflow.workflow_step import (
+    RUNNING, WorkflowStep, definition_section, fixed_field, form_fields, setting_form,
+)
 
 __all__ = ["Workflow"]
 
@@ -119,6 +121,7 @@ class Workflow:
         runtime: Any = None,
         log: Any = None,
         run_id: Optional[int] = None,
+        configured_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Hold the workflow's governed state and take ownership of its processes.
 
@@ -130,7 +133,11 @@ class Workflow:
         name, enabled
             The workflow's governed name and switch.
         config : Mapping[str, Any] | None
-            The workflow's governed configuration. Copied.
+            The workflow's governed configuration, resolved. Copied.
+        configured_config : Mapping[str, Any] | None
+            The same configuration as governed, its {} expressions intact (#1325);
+            None when it was not given apart, when it is the resolved one. Copied.
+            Resolution never writes to it.
         processes : Sequence[WorkflowProcess]
             The workflow's processes, each already hydrated with its steps.
         control : Any
@@ -165,6 +172,10 @@ class Workflow:
         self.enabled = enabled
         self.config: Optional[dict[str, Any]] = (
             None if config is None else deepcopy(dict(config))
+        )
+        stated = config if configured_config is None else configured_config
+        self.configured_config: Optional[dict[str, Any]] = (
+            None if stated is None else deepcopy(dict(stated))
         )
         self.control = control
         self.runtime = runtime
@@ -207,6 +218,8 @@ class Workflow:
         self._observers: list[Any] = []
         for one in self.steps.values():
             one.observe(self)
+            # A step's edited settings resolve through this Workflow's paths (#1325).
+            one.bind_resolution(self._resolved_settings)
         # One direction at a time: held for the whole of ``direct``.
         self._running = threading.Lock()
         # One act at a time: an operation, and the snapshot answering it (the
@@ -256,6 +269,14 @@ class Workflow:
         if not first.get("workflow_enabled"):
             raise AppError(f"workflow '{name}' is disabled.")
         config = first.get("workflow_config")
+        # THE CONFIGURED VALUES, taken before resolution substitutes in place: each
+        # object holds them live beside the resolved ones the run uses (#1325).
+        configured = deepcopy(config)
+        configured_rows = [
+            {"configured_process_config": deepcopy(row.get("process_config")),
+             "configured_step_settings": deepcopy(row.get("step_settings"))}
+            for row in rows
+        ]
         tree = Namespace({
             "config": config,
             "rows": [
@@ -267,7 +288,8 @@ class Workflow:
         resolve_config_paths(tree, (config or {}).get("paths") or [])
         resolved = to_plain_data(tree)
         rows = [
-            {**row, **resolved_row} for row, resolved_row in zip(rows, resolved["rows"])
+            {**row, **resolved_row, **configured_row}
+            for row, resolved_row, configured_row in zip(rows, resolved["rows"], configured_rows)
         ]
 
         grouped: dict[Any, list[Mapping[str, Any]]] = {}
@@ -288,11 +310,21 @@ class Workflow:
                 process_rows, application=application,
                 approved=approved.get(application_name) or {},
             ))
+        # How each step reads its operation's setting references (#1330), through
+        # Control where it offers them: nothing is read until a field is selected.
+        read = getattr(control, "references", None)
+        if callable(read):
+            for process in processes:
+                for step in process.steps:
+                    step.bind_references(
+                        lambda application=process.application.name,
+                        operation=step.operation.name: read(application, operation))
         return cls(
             workflow_id=first.get("workflow_id"),
             name=name,
             enabled=bool(first.get("workflow_enabled")),
             config=resolved["config"],
+            configured_config=configured,
             processes=sorted(processes, key=lambda process: process.ordinal),
             control=control,
             runtime=runtime,
@@ -416,6 +448,35 @@ class Workflow:
             self.focused_process, self.focused_step = process, None
 
     # -- its snapshot --------------------------------------------------------
+
+    def facts(self) -> list[dict[str, str]]:
+        """What this Workflow is, as its editor states it (#1325): label and value."""
+        return [{"label": "Workflow", "value": self.name}]
+
+    def fields(self) -> list[dict[str, Any]]:
+        """Its configuration, configured beside resolved (#1325); shown, not edited --
+        nothing publishes what a Workflow's configuration may hold."""
+        return form_fields(self.form())
+
+    def form(self) -> list[dict[str, Any]]:
+        """Its settings as its editor presents them (#1325): all of it the workflow's
+        own definition -- name, switch and configuration -- shown, not edited."""
+        return [definition_section("Workflow", [
+            fixed_field("workflow.name", "name", self.name, "The workflow's name."),
+            fixed_field("workflow.enabled", "enabled", self.enabled, "Whether it may run."),
+            *setting_form(self.configured_config, self.config),
+        ])]
+
+    @property
+    def directing(self) -> bool:
+        """Whether a direction is running: its definition is not edited meanwhile (#1325)."""
+        return self._running.locked()
+
+    def _resolved_settings(self, configured: Mapping[str, Any]) -> dict[str, Any]:
+        """Settings resolved as hydration resolves them, through this Workflow's paths."""
+        tree = Namespace({"settings": deepcopy(dict(configured))})
+        resolve_config_paths(tree, (self.configured_config or {}).get("paths") or [])
+        return dict(to_plain_data(tree)["settings"])
 
     def act(self) -> Any:
         """The lock one act is taken under: an operation, and the snapshot answering it."""
@@ -552,6 +613,13 @@ class Workflow:
             return {
                 "name": self.name,
                 "enabled": self.enabled,
+                # Its live settings, as configured ({} intact) and as resolved (#1325),
+                # read from the object as every other field here is.
+                "config": _configured_and_resolved(self.configured_config, self.config),
+                # What its editor draws, stated whole by the object (#1325).
+                "facts": self.facts(),
+                "fields": self.fields(),
+                "form": self.form(),
                 "actions": self.actions(),
                 "relationships": self.relationships(),
                 "state": self.state,
@@ -572,11 +640,24 @@ class Workflow:
                         "name": process.name,
                         "application": process.application.name,
                         "application_icon": process.application.icon,
+                        "config": _configured_and_resolved(process.configured_config,
+                                                           process.config),
+                        "facts": process.facts(),
+                        "fields": process.fields(),
+                        "form": process.form(),
                         "steps": [
                             {
                                 "ordinal": step.ordinal,
                                 "id": step.id,
                                 "operation": step.operation.name,
+                                "settings": _configured_and_resolved(
+                                    step.configured_settings, step.settings),
+                                # What its editor draws, stated whole by the step:
+                                # who it is, and every setting its operation offers.
+                                "facts": step.facts(),
+                                "fields": step.fields(),
+                                # The same settings as sections, as the editor presents them.
+                                "form": step.form(),
                                 "apply_only": step.apply_only,
                                 "always_run": step.always_run,
                                 "state": step.state,
@@ -948,3 +1029,18 @@ def _governed_id(value: Any) -> int | None:
     if isinstance(value, str) and value and all(char in "0123456789" for char in value):
         return int(value)
     return None
+
+
+def _configured_and_resolved(
+    configured: Optional[Mapping[str, Any]], resolved: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """One live object's settings, as configured and as resolved (#1325).
+
+    ``configured`` keeps the {} expressions the configuration states; ``resolved``
+    is what the run uses. Read from the object; detached like the rest of the
+    snapshot, so the channel never holds a path into its state.
+    """
+    return {
+        "configured": deepcopy(dict(configured or {})),
+        "resolved": deepcopy(dict(resolved or {})),
+    }

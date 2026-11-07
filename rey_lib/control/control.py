@@ -1342,6 +1342,24 @@ class Control:
             }, required=required) or [])
         ]
 
+    def references(self, application: str, operation: str,
+                   required: bool = True) -> list[dict[str, Any]]:
+        """One operation's setting references (#1330): code.reference_vw rows.
+
+        The detailed instructions for each setting the operation exposes to a
+        workflow -- ``setting_path`` (list positions removed), ``title``,
+        ``instructions`` (Markdown) and ``example``. Required by default, as the
+        Workflow's own read (``workflow``) is: an optional read answers nothing
+        whenever ``control.enabled`` is off, which would hide every reference
+        without a word.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_reference", {
+                "application": str(application),
+                "operation": str(operation),
+            }, required=required) or [])
+        ]
+
     def http_operation(self, installation: str, adapter_key: Optional[str] = None,
                        required: bool = True) -> list[dict[str, Any]]:
         """One installation's HTTP operations, execution-ready (backlog 813).

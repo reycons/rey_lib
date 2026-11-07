@@ -30,7 +30,9 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 from rey_lib.config.applications import Application
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.errors.error_utils import AppError
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import (
+    WorkflowStep, definition_section, fixed_field, form_fields, setting_form,
+)
 
 if TYPE_CHECKING:
     from rey_lib.workflow.workflow import Workflow
@@ -71,6 +73,7 @@ class WorkflowProcess:
         config: Optional[Mapping[str, Any]],
         steps: Sequence[WorkflowStep],
         governed_id: Any = None,
+        configured_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Hold the Application instance, its configuration and its steps.
 
@@ -83,8 +86,11 @@ class WorkflowProcess:
         application : Application
             The Application this process instantiates.
         config : Mapping[str, Any] | None
-            The process's application configuration as governed. Copied, so
-            no other process or caller shares it.
+            The process's application configuration as governed, resolved. Copied,
+            so no other process or caller shares it.
+        configured_config : Mapping[str, Any] | None
+            The same configuration as governed, its {} expressions intact (#1325);
+            None when it was not given apart. Copied; resolution never writes to it.
         steps : Sequence[WorkflowStep]
             The process's steps, each already bound by hydration. Each is made
             this process's own.
@@ -103,6 +109,10 @@ class WorkflowProcess:
         self.application = application
         self.config: Optional[dict[str, Any]] = (
             None if config is None else deepcopy(dict(config))
+        )
+        stated = config if configured_config is None else configured_config
+        self.configured_config: Optional[dict[str, Any]] = (
+            None if stated is None else deepcopy(dict(stated))
         )
         # By identity: a step is bound to the operation object its Application
         # published, so an equal operation another Application publishes is not it.
@@ -176,6 +186,37 @@ class WorkflowProcess:
                 return Namespace(dict(entry))
         raise AppError(f"process '{self.name}' declares no {kind} '{name}'.")
 
+    def facts(self) -> list[dict[str, str]]:
+        """What this process is, as its editor states it (#1325): label and value."""
+        return [
+            {"label": "Process", "value": self.name},
+            {"label": "Application", "value": self.application.name},
+        ]
+
+    def fields(self) -> list[dict[str, Any]]:
+        """Its application configuration, configured beside resolved (#1325).
+
+        Shown, not edited: no application publishes what a process's configuration
+        may hold (backlog application.configuration_layer), so no field declares a
+        command.
+        """
+        return form_fields(self.form())
+
+    def form(self) -> list[dict[str, Any]]:
+        """Its settings as its editor presents them (#1325): what the workflow defines
+        for this process, then its application's configuration -- shown, not edited."""
+        return [
+            definition_section("Workflow", [
+                fixed_field("process.name", "name", self.name, "The process's name in the workflow."),
+                fixed_field("process.ordinal", "ordinal", self.ordinal,
+                            "Its position in the workflow."),
+                fixed_field("process.application", "application", self.application.name,
+                            "The application this process instantiates; not changed here."),
+            ]),
+            definition_section(f"{self.application.name} settings",
+                               setting_form(self.configured_config, self.config)),
+        ]
+
     @classmethod
     def hydrate(
         cls,
@@ -202,6 +243,7 @@ class WorkflowProcess:
             governed_id=first.get("workflow_process_id"),
             application=application,
             config=first.get("process_config"),
+            configured_config=first.get("configured_process_config"),
             steps=[
                 WorkflowStep.hydrate(row, application=application, approved=approved)
                 for row in rows if row.get("workflow_step_id") is not None

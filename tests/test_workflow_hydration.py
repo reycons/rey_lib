@@ -33,7 +33,7 @@ from rey_lib.errors.error_utils import AppError
 from rey_lib.workflow import workflow as workflow_module
 from rey_lib.workflow.workflow import Workflow
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import WorkflowStep, form_fields
 
 _PATHS = [
     {"name": "root", "path": "/installations/rey"},
@@ -303,6 +303,31 @@ class TestTheCanonicalObjectsHydrateThemselves:
         assert (workflow.config["execution"]["full"], workflow.config["execution"]["dry_run"]) == (
             True, True)
 
+    def test_the_live_objects_hold_their_configured_values_beside_the_resolved(self) -> None:
+        """#1325: each object holds its settings as configured -- the {} expressions
+        intact -- beside the resolved ones the run reads, and resolution does not
+        overwrite them."""
+        workflow = _hydrate(_rows())[0]
+        export, commit = workflow.steps.values()
+
+        assert export.configured_settings["output_root"] == "{root}/db_backups/ddl"
+        assert export.settings["output_root"] == "/installations/rey/db_backups/ddl"
+        assert commit.configured_settings == {"repo_root": "{root}/db_backups/ddl"}
+        assert workflow.processes[0].configured_config != workflow.processes[0].config
+        assert "{" in str(workflow.processes[0].configured_config)
+        assert workflow.configured_config is not None
+
+    def test_the_projection_carries_each_objects_live_configured_and_resolved_values(self) -> None:
+        workflow = _hydrate(_rows())[0]
+        projection = workflow.projection(object())
+        step = projection["processes"][0]["steps"][0]
+
+        assert step["settings"]["configured"]["output_root"] == "{root}/db_backups/ddl"
+        assert step["settings"]["resolved"]["output_root"] == "/installations/rey/db_backups/ddl"
+        assert projection["processes"][0]["config"]["configured"] == \
+            workflow.processes[0].configured_config
+        assert projection["config"]["resolved"] == workflow.config
+
     def test_engine_controls_come_from_workflow_execution(self) -> None:
         export, commit = _hydrate(_rows())[0].steps.values()
 
@@ -483,3 +508,362 @@ class TestHydrationKeepsTheGovernedRowIds:
         (process,) = workflow.processes
         assert process.governed_id == 10
         assert [step.governed_id for step in process.steps] == [101, 102]
+
+
+_CONTRACT = {
+    "$schema": _SCHEMA, "type": "object",
+    "properties": {
+        "output_root": {"type": "string", "description": "Where the export lands."},
+        "recurse": {"type": "boolean"},
+        "limit": {"type": "integer"},
+        "mode": {"enum": ["full", "delta"]},
+    },
+    "required": ["output_root"],
+}
+
+
+def _contracted() -> Workflow:
+    """Workflow ``wf`` whose ``load`` publishes a contract with four settings."""
+    application = Application(name="fixture_app", workflow_operations=(
+        ApplicationOperation(name="load", contract_definition=_CONTRACT),
+        ApplicationOperation(name="commit", contract_definition={"$schema": _SCHEMA,
+                                                                 "type": "object"}),
+    ))
+    return Workflow.hydrate(_rows(), applications=[application], approved=_APPROVED,
+                            control=RecordingControl())
+
+
+class TestALiveStepIsEditedThroughItsContract:
+    """#1325: a step offers every setting its operation's contract names, and edits its
+    configured settings live -- {} intact, the resolved ones following -- writing nothing."""
+
+    def test_its_fields_are_every_contract_setting_then_its_own(self) -> None:
+        export = next(iter(_contracted().steps.values()))
+        fields = form_fields(export.form()[1]["items"])
+
+        assert [one["name"] for one in fields][:4] == ["output_root", "recurse", "limit", "mode"]
+        by_name = {one["name"]: one for one in fields}
+        assert by_name["output_root"]["value"] == "{root}/db_backups/ddl"
+        assert by_name["output_root"]["required"] is True
+        assert by_name["output_root"]["hint"].startswith("Where the export lands.\nExpects text.")
+        assert (by_name["recurse"]["control"], by_name["recurse"]["value"]) == ("checkbox", "")
+        assert (by_name["mode"]["control"], by_name["mode"]["choices"]) == ("select", ["full", "delta"])
+        # A setting the contract does not describe is walked from its own values,
+        # one field per value, shown and not edited.
+        assert by_name["sources[0].source.path"]["value"] == "{data}/*/source/inbox"
+        assert "command" not in by_name["sources[0].source.path"]
+        assert by_name["output_root"]["label"] == "output_root *"
+        assert by_name["output_root"]["resolved"] == "/installations/rey/db_backups/ddl"
+        assert by_name["limit"]["command"] == {
+            "command": "operate", "object": "step:1", "operation": "update",
+            "arguments": {"name": "limit"}}
+        assert by_name["limit"]["value_input"] == "arguments.value"
+
+    def test_an_edit_keeps_the_expression_and_the_resolved_value_follows(self) -> None:
+        workflow = _contracted()
+        export = next(iter(workflow.steps.values()))
+
+        export.update("output_root", "{data}/exports")
+
+        assert export.configured_settings["output_root"] == "{data}/exports"
+        assert export.settings["output_root"] == "/installations/rey/data/exports"
+        step = workflow.projection(object())["processes"][0]["steps"][0]
+        assert step["settings"]["configured"]["output_root"] == "{data}/exports"
+
+    def test_typed_settings_are_read_as_the_contract_types_them(self) -> None:
+        export = next(iter(_contracted().steps.values()))
+
+        export.update("recurse", "true")
+        export.update("limit", "25")
+
+        assert (export.configured_settings["recurse"], export.configured_settings["limit"]) == (True, 25)
+        with pytest.raises(AppError, match="not a integer value for 'limit'"):
+            export.update("limit", "many")
+
+    def test_blank_clears_but_a_required_setting_cannot_be_cleared(self) -> None:
+        export = next(iter(_contracted().steps.values()))
+
+        export.update("limit", "25")
+        export.update("limit", "")
+        assert "limit" not in export.configured_settings
+        with pytest.raises(AppError, match="output_root"):
+            export.update("output_root", "")
+        assert export.configured_settings["output_root"] == "{root}/db_backups/ddl"
+
+    def test_an_unknown_setting_or_a_running_workflow_is_refused(self) -> None:
+        workflow = _contracted()
+        export = next(iter(workflow.steps.values()))
+
+        with pytest.raises(AppError, match="has no setting 'colour'"):
+            export.update("colour", "red")
+        workflow._running.acquire()
+        try:
+            with pytest.raises(AppError, match="while its workflow runs"):
+                export.update("limit", "1")
+        finally:
+            workflow._running.release()
+
+
+_SOURCES_CONTRACT = {
+    "$schema": _SCHEMA, "type": "object",
+    "properties": {
+        "sources": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "source": {"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "file_patterns": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "recursive": {"type": "boolean"},
+                }, "required": ["path", "file_patterns"]},
+            },
+            "required": ["name", "source"],
+        }},
+        "scope": {"type": "string"},
+    },
+    "required": ["sources"],
+}
+
+
+def _sourced() -> Workflow:
+    """Workflow ``wf`` whose ``load`` publishes a nested contract: a list of source sets."""
+    application = Application(name="fixture_app", workflow_operations=(
+        ApplicationOperation(name="load", contract_definition=_SOURCES_CONTRACT),
+        ApplicationOperation(name="commit", contract_definition={"$schema": _SCHEMA,
+                                                                 "type": "object"}),
+    ))
+    rows = [
+        _row(1, "wf", "export", 1, "load", {"sources": [{
+            "name": "feed_inbox", "enabled": True,
+            "source": {"path": "{data}/*/source/inbox", "file_patterns": ["*.csv", "*.xlsx"],
+                       "recursive": False}}]}),
+        _row(1, "wf", "commit", 2, "commit", {}),
+    ]
+    return Workflow.hydrate(rows, applications=[application], approved=_APPROVED,
+                            control=RecordingControl())
+
+
+class TestNestedSettingsAreIndividualSettings:
+    """#1325 (user): the settings an application exposes are drawn one value at a time,
+    as its contract describes them -- never as one JSON value."""
+
+    def test_every_single_value_is_its_own_field(self) -> None:
+        export = next(iter(_sourced().steps.values()))
+        fields = {one["name"]: one for one in form_fields(export.form()[1]["items"])}
+
+        assert list(fields) == [
+            "sources[0].name", "sources[0].enabled", "sources[0].source.path",
+            "sources[0].source.file_patterns", "sources[0].source.recursive", "scope",
+        ]
+        path = fields["sources[0].source.path"]
+        assert path["label"] == "sources › feed_inbox › source › path *"
+        assert path["hint"].endswith("Required.\nSetting: sources[0].source.path")
+        # A list of single values is one setting, comma-separated, with its rule in the help.
+        patterns = fields["sources[0].source.file_patterns"]
+        assert patterns["value"] == "*.csv,*.xlsx"
+        assert "A list of text, comma-separated." in patterns["hint"]
+        assert "At least 1." in patterns["hint"]
+        assert (path["value"], path["resolved"]) == (
+            "{data}/*/source/inbox", "/installations/rey/data/*/source/inbox")
+        assert fields["sources[0].enabled"]["control"] == "checkbox"
+        assert fields["scope"]["value"] == ""
+        assert all("command" in one for one in fields.values())
+
+    def test_a_nested_value_is_edited_by_its_path(self) -> None:
+        export = next(iter(_sourced().steps.values()))
+
+        export.update("sources[0].source.path", "{data}/inbox")
+        export.update("sources[0].source.recursive", "true")
+        export.update("sources[0].source.file_patterns", "*.csv, *.xls")
+
+        source = export.configured_settings["sources"][0]["source"]
+        assert source == {"path": "{data}/inbox", "file_patterns": ["*.csv", "*.xls"],
+                          "recursive": True}
+        assert export.settings["sources"][0]["source"]["path"] == "/installations/rey/data/inbox"
+
+    def test_a_value_list_is_edited_as_one_line_and_keeps_what_the_contract_needs(self) -> None:
+        export = next(iter(_sourced().steps.values()))
+
+        export.update("sources[0].source.file_patterns", "*.csv")
+        assert export.configured_settings["sources"][0]["source"]["file_patterns"] == ["*.csv"]
+        with pytest.raises(AppError, match="file_patterns"):
+            export.update("sources[0].source.file_patterns", "")
+        assert export.configured_settings["sources"][0]["source"]["file_patterns"] == ["*.csv"]
+
+    def test_a_path_that_names_nothing_is_refused(self) -> None:
+        export = next(iter(_sourced().steps.values()))
+
+        with pytest.raises(AppError, match="has no setting"):
+            export.update("sources[0].colour", "red")
+        with pytest.raises(AppError, match="names no list item"):
+            export.update("sources[3].name", "x")
+        with pytest.raises(AppError, match="not a setting path"):
+            export.update("sources..name", "x")
+
+
+class TestTheSettingsHierarchyIsDeclaredByTheObject:
+    """#1325 (Option A): the live object states its sections -- label, help, the summary
+    shown while collapsed, and their items; the editor draws them and derives nothing."""
+
+    def test_the_contract_hierarchy_is_its_sections(self) -> None:
+        export = next(iter(_sourced().steps.values()))
+        workflow_defined, application = export.form()
+        # What the workflow defines, apart from what the application exposes (user).
+        assert workflow_defined["label"] == "Workflow"
+        assert [one["name"] for one in workflow_defined["items"]] == [
+            "step.name", "step.label", "step.ordinal", "step.apply_only", "step.always_run"]
+        assert all("command" not in one for one in workflow_defined["items"])
+        assert application["label"] == "fixture_app · load"
+        form = application["items"]
+
+        sources = form[0]
+        assert (sources["name"], sources["label"]) == ("sources", "sources")
+        feed = sources["items"][0]
+        assert (feed["name"], feed["label"]) == ("sources[0]", "feed_inbox")
+        assert feed["summary"] == "name=feed_inbox · enabled=true · source"
+        source = feed["items"][2]
+        assert source["label"] == "source"
+        assert [one["label"] for one in source["items"]] == ["path *", "file_patterns *", "recursive"]
+        path = source["items"][0]
+        assert (path["value"], path["resolved"]) == (
+            "{data}/*/source/inbox", "/installations/rey/data/*/source/inbox")
+        assert form[-1]["name"] == "scope" and "items" not in form[-1]
+
+    def test_every_field_at_every_level_carries_the_command_that_edits_it(self) -> None:
+        workflow = _sourced()
+        export = next(iter(workflow.steps.values()))
+
+        def fields(items: list) -> list:
+            return [leaf for one in items
+                    for leaf in (fields(one["items"]) if "items" in one else [one])]
+
+        for field in fields(export.form()[1]["items"]):
+            assert field["command"]["arguments"] == {"name": field["name"]}
+        export.update("sources[0].source.recursive", "true")
+        export.update("scope", "file")
+        projected = workflow.projection(object())["processes"][0]["steps"][0]["form"][1]["items"]
+        assert fields(projected)[4]["value"] == "true"
+        assert fields(projected)[-1]["value"] == "file"
+
+    def test_a_process_states_its_configuration_as_sections_it_does_not_edit(self) -> None:
+        process = _sourced().processes[0]
+        workflow_defined, application = process.form()
+        assert workflow_defined["label"] == "Workflow"
+        assert [one["value"] for one in workflow_defined["items"]] == ["fixture_app", "1", "fixture_app"]
+        assert application["label"] == "fixture_app settings"
+        form = application["items"]
+
+        assert form[0]["label"] == "app" and form[0]["summary"].startswith("records_path=")
+        assert form[0]["items"][0]["value"] == "{data}/records"
+        assert "command" not in form[0]["items"][0]
+
+
+class _ReferencingControl(RecordingControl):
+    """A Control answering setting references for one operation, and recording each read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read: list[tuple[str, str]] = []
+
+    def references(self, application: str, operation: str) -> list[dict[str, Any]]:
+        self.read.append((application, operation))
+        if operation != "load":
+            return []
+        return [{"setting_path": "sources.source.path", "title": "Source path",
+                 "instructions": "Where the files are found: a glob over the data root.",
+                 "example": "{data}/*/source/inbox"}]
+
+
+class TestEachSettingCarriesItsGovernedReference:
+    """#1330: a field's detailed instructions are the governed reference (code.reference),
+    read by the live step only when one of its fields is first selected, and projected
+    only on the selected field."""
+
+    def _hydrated(self, control: Any) -> Workflow:
+        application = Application(name="fixture_app", workflow_operations=(
+            ApplicationOperation(name="load", contract_definition=_SOURCES_CONTRACT),
+            ApplicationOperation(name="commit", contract_definition={"$schema": _SCHEMA,
+                                                                     "type": "object"}),
+        ))
+        rows = [
+            _row(1, "wf", "export", 1, "load", {"sources": [
+                {"name": "a", "source": {"path": "{data}/a", "file_patterns": ["*.csv"]}},
+                {"name": "b", "source": {"path": "{data}/b", "file_patterns": ["*.csv"]}}]}),
+            _row(1, "wf", "commit", 2, "commit", {}),
+        ]
+        return Workflow.hydrate(rows, applications=[application], approved=_APPROVED,
+                                control=control)
+
+    @staticmethod
+    def _fields(step: Any) -> dict[str, dict[str, Any]]:
+        return {one["name"]: one for one in step.fields()}
+
+    def test_nothing_is_read_or_projected_until_a_field_is_selected(self) -> None:
+        control = _ReferencingControl()
+        export = next(iter(self._hydrated(control).steps.values()))
+
+        assert control.read == []
+        assert all("instructions" not in one for one in export.fields())
+
+    def test_every_field_declares_the_command_that_selects_it(self) -> None:
+        export = next(iter(self._hydrated(_ReferencingControl()).steps.values()))
+        fields = export.fields()
+
+        assert {"step.name", "step.apply_only", "sources[0].source.path", "scope"} <= {
+            one["name"] for one in fields}
+        for field in fields:
+            assert field["selection_command"] == {
+                "command": "operate", "object": "step:1", "operation": "apply_selection",
+                "arguments": {"name": field["name"]}}
+
+    def test_a_selected_field_projects_its_reference_read_once(self) -> None:
+        control = _ReferencingControl()
+        export = next(iter(self._hydrated(control).steps.values()))
+
+        export.apply_selection("sources[1].source.path")
+        export.apply_selection("sources[0].source.path")
+        fields = self._fields(export)
+
+        assert control.read == [("fixture_app", "load")]
+        assert [name for name, one in fields.items() if "instructions" in one] == [
+            "sources[0].source.path"]
+        content = fields["sources[0].source.path"]["instructions"]
+        assert (content["language"], content["html_trusted"]) == ("markdown", True)
+        assert content["text"].startswith("## Source path")
+        assert "Where the files are found" in content["text"]
+        assert "{data}/*/source/inbox" in content["text"]
+        assert "- Configured: `{data}/a`" in content["text"]
+        assert "/installations/rey/data/a" in content["text"]
+        assert "<h2>Source path</h2>" in content["html"]
+
+    def test_a_read_only_workflow_field_is_selectable(self) -> None:
+        export = next(iter(self._hydrated(_ReferencingControl()).steps.values()))
+
+        export.apply_selection("step.apply_only")
+
+        assert "No reference is written for this setting yet." in (
+            self._fields(export)["step.apply_only"]["instructions"]["text"])
+
+    def test_a_setting_without_a_reference_says_so(self) -> None:
+        export = next(iter(self._hydrated(_ReferencingControl()).steps.values()))
+
+        export.apply_selection("scope")
+
+        assert "No reference is written for this setting yet." in (
+            self._fields(export)["scope"]["instructions"]["text"])
+
+    def test_a_field_the_step_does_not_have_is_refused(self) -> None:
+        control = _ReferencingControl()
+        export = next(iter(self._hydrated(control).steps.values()))
+
+        with pytest.raises(AppError, match="has no field 'nowhere'"):
+            export.apply_selection("nowhere")
+        assert control.read == []
+
+    def test_an_installation_without_references_still_selects(self) -> None:
+        export = next(iter(self._hydrated(RecordingControl()).steps.values()))
+
+        export.apply_selection("scope")
+
+        assert "No reference is written" in self._fields(export)["scope"]["instructions"]["text"]
