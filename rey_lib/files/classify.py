@@ -1201,6 +1201,16 @@ _FORMAT_MATCHERS = {
     "mmmyy": f"(?:{'|'.join(_MONTHS)})[0-9]{{2}}",
 }
 
+
+def supported_variable_formats() -> list[str]:
+    """Every variable format the classifier accepts, sorted.
+
+    The same table a source's variables are checked against when classification
+    reads them: a format outside it is refused. Read, never restated -- the
+    application publishes this list as the choices for ``variables[].format``.
+    """
+    return sorted(_FORMAT_MATCHERS)
+
 _REJECT_FILENAME_MISMATCH = "filename_pattern_mismatch"
 _REJECT_VALUE_NOT_ALLOWED = "value_not_allowed"
 _REJECT_FORMAT_INVALID = "format_invalid"
