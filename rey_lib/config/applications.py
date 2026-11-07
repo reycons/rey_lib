@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Mapping
 
@@ -43,6 +44,7 @@ __all__ = [
     "INVOCATION_HOSTED",
     "INVOCATION_RUN",
     "JSON_VALUE_TYPE",
+    "allowed_values",
     "build_applications",
     "configured_application",
     "hosted_command",
@@ -1661,6 +1663,35 @@ def _member_names(members: Any) -> tuple[str, ...]:
         if isinstance(member, dict) and member.get("name")
     ]
     return tuple(sorted(named))
+
+
+def allowed_values(definition: Any) -> list[Any]:
+    """The accepted values of one bounded Python definition, in a deterministic order.
+
+    The definition stays its owner's: this only reads it, so a declaration
+    (``possible_values``, a contract ``enum``, ``choices=``) offers exactly what
+    the owner's own code accepts, never a second list. Values keep their types.
+
+    - a mapping: its keys, in declaration order;
+    - an ``Enum`` class: its members' values, in declaration order;
+    - a list or tuple: its members, in order;
+    - a set or frozenset: its members, ordered by their text so the order is stable.
+
+    Raises:
+        ConfigError: When the definition is a string or any other type.
+    """
+    if isinstance(definition, type) and issubclass(definition, Enum):
+        return [member.value for member in definition]
+    if isinstance(definition, Mapping):
+        return list(definition)
+    if isinstance(definition, (list, tuple)):
+        return list(definition)
+    if isinstance(definition, (set, frozenset)):
+        return sorted(definition, key=str)
+    raise ConfigError(
+        f"allowed_values reads a mapping, an Enum, or a list, tuple or set; "
+        f"not {type(definition).__name__}."
+    )
 
 
 def _plain(value: Any) -> Any:

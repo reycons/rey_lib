@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from rey_lib.config.applications import (
-    Application, build_applications, configured_application, hosted_command,
+    Application, allowed_values, build_applications, configured_application, hosted_command,
 )
 from rey_lib.errors.error_utils import ConfigError
 
@@ -768,3 +768,32 @@ class TestEveryChoiceCollectionIsPresent:
 
         assert (ctx.data_sources, ctx.connections) == ([], [])
         assert not hasattr(ctx, "workflows")
+
+
+class TestAllowedValues:
+    """allowed_values reads one bounded definition; its owner keeps it."""
+
+    def test_a_mapping_offers_its_keys_in_declaration_order(self) -> None:
+        assert allowed_values({"clear": 1, "redacted": 2}) == ["clear", "redacted"]
+
+    def test_an_enum_offers_its_member_values_with_their_types(self) -> None:
+        from enum import Enum
+
+        class Level(Enum):
+            LOW = 1
+            HIGH = 2
+
+        assert allowed_values(Level) == [1, 2]
+
+    def test_a_list_or_tuple_keeps_its_order(self) -> None:
+        assert allowed_values(["b", "a"]) == ["b", "a"]
+        assert allowed_values(("y", "x")) == ["y", "x"]
+
+    def test_a_set_is_ordered_by_its_text(self) -> None:
+        assert allowed_values(frozenset({"b", "c", "a"})) == ["a", "b", "c"]
+        assert allowed_values({10, 9}) == [10, 9]
+
+    @pytest.mark.parametrize("definition", ["abc", 3, None])
+    def test_anything_else_is_refused(self, definition: Any) -> None:
+        with pytest.raises(ConfigError, match="allowed_values reads"):
+            allowed_values(definition)

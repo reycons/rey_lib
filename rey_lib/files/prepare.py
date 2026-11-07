@@ -48,6 +48,7 @@ from rey_lib.files.csv import (
     render_delimited_line,
 )
 from rey_lib.files.primitive_file_io import render_jsonl_line
+from rey_lib.config.applications import allowed_values
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import (
     AppLogger,
@@ -77,6 +78,7 @@ __all__ = [
     "PreparationError",
     "PrepareTransform",
     "run_create_prepared_files",
+    "supported_outputs",
 ]
 
 #: What a prepared file is written as: the clear text, or its redacted
@@ -85,6 +87,11 @@ _OUTPUTS: dict[str, str] = {
     "clear": "prepared_file",
     "redacted": "redacted_prepared_file",
 }
+
+
+def supported_outputs() -> list[str]:
+    """Every prepared output this step accepts: the outputs it checks ``output`` against."""
+    return allowed_values(_OUTPUTS)
 
 
 class PreparationError(AppError):

@@ -12,6 +12,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from rey_lib.config.applications import allowed_values
 from rey_lib.encryption import sha256_bytes, sha256_file
 from rey_lib.files.file_routing import GovernedFileReference
 from rey_lib.files.log_run_rollback import (
@@ -35,6 +36,7 @@ __all__ = [
     "FileSanitizationResult",
     "compose_sanitization_policy",
     "sanitize_file",
+    "supported_regex_flags",
 ]
 
 _CHUNK_BYTES = 64 * 1024
@@ -55,6 +57,11 @@ _POLICY_FIELDS = frozenset(
 _TABLES = ("remove", "preserve", "preserve_if_quoted", "replace")
 _REGEX_FLAGS = {"ASCII": re.ASCII, "IGNORECASE": re.IGNORECASE}
 _QUOTE_CONTRACT = "double_quote_lexical_v1"
+
+
+def supported_regex_flags() -> list[str]:
+    """Every flag a line-repair rule accepts: the flags its rules are checked against."""
+    return allowed_values(_REGEX_FLAGS)
 
 
 class FileSanitizationCollisionPolicy(str, Enum):
