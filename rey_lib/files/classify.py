@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from rey_lib.config.applications import allowed_values
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files import FileRoutingError
 from rey_lib.files.data_file import DataFile
@@ -868,6 +869,17 @@ def _classify_candidate(
             reason="Classification candidate has no source value.",
         )
 
+    # The configured classification type names the method that classifies; it
+    # was refused when the source was read if no such method exists.
+    return _CLASSIFICATION_TYPES[config.classification_type](candidate, config, value)
+
+
+def _classify_by_file_name_regex(
+    candidate: SourceClassificationCandidate,
+    config: FileClassificationSourceConfig,
+    value: str,
+) -> SourceClassificationOutcome:
+    """Classify by the file path or name: the source's path_regex and its named captures."""
     match = config.path_regex.fullmatch(value)
     if match is None:
         return SourceClassificationOutcome(
@@ -900,6 +912,20 @@ def _classify_candidate(
         status="classified",
         values=ordered,
     )
+
+
+#: Every classification method, by the classification_type that names it (#1332).
+#: The one definition: a source's classification_type is refused unless it is
+#: here, the method run is the one it names, and the published choices are read
+#: from it. A new method registers here once it exists.
+_CLASSIFICATION_TYPES = {
+    "file_name_regex": _classify_by_file_name_regex,
+}
+
+
+def supported_classification_types() -> list[str]:
+    """Every classification_type the classifier runs: the methods it has."""
+    return allowed_values(_CLASSIFICATION_TYPES)
 
 
 def _candidate(
@@ -1034,6 +1060,12 @@ def _classification_source_config(
 ) -> FileClassificationSourceConfig:
     """Validate and project one enabled classification source."""
     classification_type = _required_string(entry, "classification_type", name)
+    if classification_type not in _CLASSIFICATION_TYPES:
+        raise ClassificationError(
+            f"Source classification '{name}' classification_type "
+            f"{classification_type!r} is not a classification method; one of "
+            f"{', '.join(supported_classification_types())}."
+        )
     retry_rejects = _get(entry, "retry_rejects", False)
     if not isinstance(retry_rejects, bool):
         raise ClassificationError(

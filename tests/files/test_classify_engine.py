@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rey_lib.files.classify import (
     FileClassificationSourceConfig,
     SourceClassificationCandidate,
@@ -42,7 +44,7 @@ def _config(
     entry = {
         "name": "generic",
         "enabled": True,
-        "classification_type": "configured_test_mechanism",
+        "classification_type": "file_name_regex",
         # Which routine names this source's work, and which field of the row
         # it returns holds the file.
         "file_selection": {
@@ -231,3 +233,20 @@ def test_generic_engine_contains_no_installation_field_names() -> None:
     ).read_text(encoding="utf-8")
     for field_name in ("client_alias", "file_type", "data_date"):
         assert field_name not in source
+
+
+def test_the_classification_type_names_a_method_the_classifier_has() -> None:
+    """#1332: classification_type selects the method; one without a method is refused."""
+    from rey_lib.files.classify import ClassificationError, supported_classification_types
+
+    assert supported_classification_types() == ["file_name_regex"]
+    entry = {
+        "name": "generic",
+        "enabled": True,
+        "classification_type": "junk",
+        "file_selection": {"operation": "file_classification", "source_field": "path"},
+        "variables": [{"name": "x", "source": "classification", "required": True}],
+        "classification": {"path_regex": r"(?P<x>.+)"},
+    }
+    with pytest.raises(ClassificationError, match="'junk' is not a classification method"):
+        resolve_classification_source_configs({"sources": [entry]})

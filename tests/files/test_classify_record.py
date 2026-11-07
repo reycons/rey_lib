@@ -59,7 +59,7 @@ def _candidate(
 
 
 def test_classified_record_copies_generic_configured_classification_type() -> None:
-    candidate = _candidate(classification_type="another_classification_mechanism")
+    candidate = _candidate(classification_type="file_name_regex")
     outcome = classify_source_candidates((candidate,)).outcomes[0]
 
     record = serialize_source_file_classification_record(
@@ -87,7 +87,7 @@ def test_classified_record_copies_generic_configured_classification_type() -> No
         },
         "lineage": {"source_record_id": 7},
         "classification": {
-            "type": "another_classification_mechanism",
+            "type": "file_name_regex",
             "source_field": "file.file_name",
             "values": {"captured_name": "Example"},
         },
@@ -266,7 +266,7 @@ def test_business_record_type_remains_separate_from_lifecycle_record_type() -> N
 
 
 def test_rejected_record_also_copies_configured_classification_type() -> None:
-    candidate = _candidate(classification_type="generic_mechanism")
+    candidate = _candidate(classification_type="file_name_regex")
     outcome = SourceClassificationOutcome(
         candidate=candidate,
         status="rejected",
@@ -281,7 +281,7 @@ def test_rejected_record_also_copies_configured_classification_type() -> None:
         recorded_at="2026-07-30T07:15:00.000Z",
     )
 
-    assert record["classification"]["type"] == "generic_mechanism"
+    assert record["classification"]["type"] == "file_name_regex"
     # status is execution state; the outcome is the result, as text. A
     # rejection produced nothing, so it carries no result and writes no
     # mutation -- its reason_code and prose live on the evidence record, which

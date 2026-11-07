@@ -43,7 +43,7 @@ from tests.support.selecting_control import SelectingControl
 _RECORD_TYPE = "source_file_inventory"
 
 
-def _entry(classification_type: str = "configured_mechanism", **overrides) -> dict:
+def _entry(classification_type: str = "file_name_regex", **overrides) -> dict:
     """A classification source declaration matching ``<captured_name>.csv``."""
     entry = {
         "name": "generic",
@@ -396,7 +396,7 @@ def test_the_evidence_is_the_legacy_evidence_including_the_record_type(
         None,
         "SOURCE_FILE_CLASSIFICATION",
         message="Source file classification classified for inventory record 7.",
-        classification_type="configured_mechanism",
+        classification_type="file_name_regex",
         file_id=7,
         file_extension="csv",
         source_record_type="source_file_inventory",
