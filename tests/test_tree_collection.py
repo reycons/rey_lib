@@ -27,6 +27,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tools import ToolRegistry
 from rey_lib.tree import collection
 from rey_lib.tree.collection import CollectionDataObject
+from rey_lib.tree.declarations import offered_actions
 
 #: What ``configured_applications`` answers with: an id, a label, its own mark
 #: and the identity it is addressed by. No action -- the node type names it.
@@ -104,10 +105,15 @@ def test_a_member_opens_into_nothing() -> None:
         assert record["tree_configuration"] == {}
 
 
-def test_an_application_draws_its_own_mark_or_its_collection_s() -> None:
+def test_an_application_draws_its_own_mark_or_its_node_type_s() -> None:
+    """#1326: the collection carries only an application's published mark; without
+    one, the record's icon is its node type's alias, applied with its declarations."""
     made = CollectionDataObject().children(object(), APPLICATION_ROOT, APPLICATIONS)
 
-    assert [record["icon"] for record in made] == ["application", "app.rey_console"]
+    assert [record["icon"] for record in made] == [None, "app.rey_console"]
+    declarations = {"application": {"selectable": True, "icon": "application"}}
+    drawn = [{**record, **offered_actions(declarations, record)} for record in made]
+    assert [record["icon"] for record in drawn] == ["application", "app.rey_console"]
 
 
 def test_a_feeder_carries_the_identity_and_names_no_action() -> None:

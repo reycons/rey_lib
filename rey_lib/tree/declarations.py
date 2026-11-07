@@ -66,6 +66,7 @@ FIELD_REFERENCE = "$field"
 _SELECT = """
 SELECT node_type_key,
        selectable,
+       node_type_icon_alias,
        placement,
        sort_order,
        requires_state,
@@ -101,7 +102,9 @@ class NodeTypeActionDataObject(DatabaseView):
         Returns:
             One entry per node type, keyed by its own key: ``selectable``
             (whether the node takes the selection -- a local behaviour, not an
-            action), ``text_click`` (the one declaration a click on the row
+            action), ``icon`` (the node type's icon alias, which the Console's
+            resolveIcon resolves; None where the type declares none -- #1326),
+            ``text_click`` (the one declaration a click on the row
             means, or None), ``buttons`` and ``panel_controls`` (in declared
             order, each with its ``sort_order``). Each declaration is
             :func:`declaration`'s. A disabled placement or action is absent
@@ -115,6 +118,7 @@ class NodeTypeActionDataObject(DatabaseView):
             key = str(row.get("node_type_key") or "")
             entry = declared.setdefault(key, {
                 "selectable": bool(row.get("selectable")),
+                "icon": row.get("node_type_icon_alias") or None,
                 "text_click": None,
                 "buttons": [],
                 "panel_controls": [],
@@ -168,8 +172,9 @@ def offered_actions(
     """Everything one record's type offers it, in the record's state (#1218).
 
     The selection semantics a Tree node carries: whether it takes the selection,
-    the declaration a click on its text names, and the buttons and panel controls
-    it offers, each in declared order. A declaration whose required state the
+    its icon -- the icon alias its node type declares, the ONE place a node's icon
+    is declared (#1326); no producer names one -- the declaration a click on its
+    text names, and the buttons and panel controls it offers, each in declared order. A declaration whose required state the
     record is not in (``actionable_in``) is absent. Each is the unsigned
     declaration as :func:`declaration` states it; nothing here signs or opens.
 
@@ -178,8 +183,13 @@ def offered_actions(
             (:meth:`NodeTypeActionDataObject.declarations`).
         record: The record, which names its ``node_type``.
 
+    The one record that may carry an icon of its own is an application's: its mark
+    is published once, by its own registration (code.application.icon), and is
+    kept. Every other record carries none, so its icon is its type's alias.
+
     Returns:
-        ``selectable``, ``text_click`` (one declaration or None), ``buttons`` and
+        ``selectable``, ``icon`` (the type's alias, where the record carries no
+        published mark), ``text_click`` (one declaration or None), ``buttons`` and
         ``panel_controls``.
     """
     declared = declarations.get(str(record.get("node_type") or "")) or {}
@@ -187,6 +197,7 @@ def offered_actions(
     clicked = declared.get("text_click")
     return {
         "selectable": bool(declared.get("selectable")),
+        **({} if record.get("icon") else {"icon": declared.get("icon")}),
         "text_click": clicked if offered(clicked, state) else None,
         "buttons": [button for button in declared.get("buttons") or []
                     if offered(button, state)],

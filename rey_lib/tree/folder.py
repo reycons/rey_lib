@@ -30,11 +30,6 @@ from rey_lib.tree.sources import FOLDER_SOURCE
 
 __all__ = ["FileDataObject", "folder_children"]
 
-#: What a directory and a file read as. Named, never drawn: the icon system
-#: decides what either looks like.
-_FOLDER_ICON = "folder"
-_FILE_ICON = "file"
-
 #: What each kind of entry *is*. The word the behaviour registry is keyed by:
 #: what a folder or a file can do is the database's answer, looked up by this.
 _FOLDER_TYPE = "folder"
@@ -153,9 +148,9 @@ class FileDataObject:
         directory = str(entry.get("kind") or "") == FOLDER_SOURCE
         return {
             "row_type": "node",
+            # Its icon is its node type's alias (#1326).
             "node_type": _FOLDER_TYPE if directory else _FILE_TYPE,
             "label": entry.get("label"),
-            "icon": _FOLDER_ICON if directory else _FILE_ICON,
             "has_children": directory,
             "is_enabled": True,
             # A folder offers to be read again at its configured root only: a

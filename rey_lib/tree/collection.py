@@ -146,12 +146,6 @@ _COLLECTIONS: dict[str, Callable[[Any], list[dict[str, Any]]]] = {
     TOOL_SOURCE: configured_tools,
 }
 
-#: What each level reads as. Named, never drawn.
-_MEMBER_ICON = {
-    APPLICATION_SOURCE: "application",
-    TOOL_SOURCE: "tool",
-}
-
 #: What one member of each collection *is*. The word the behaviour registry is
 #: keyed by.
 _MEMBER_TYPE = {
@@ -236,11 +230,10 @@ class CollectionDataObject:
             # a published node type is the member's own (backlog 1098).
             "node_type": node_type,
             "label": str(entry.get("label") or entry.get("id") or ""),
-            # What the member published, or the mark its collection is known
-            # by. The fallback is the SEMANTIC icon rather than nothing: an
-            # empty name resolves to no icon at all, and an app.* name nothing
-            # defines resolves to a briefcase.
-            "icon": str(entry.get("icon") or "") or _MEMBER_ICON[collection],
+            # Only what the member itself published: an application's mark, from
+            # its own registration (code.application.icon). Nothing is chosen
+            # here: without one, the node's icon is its node type's alias (#1326).
+            "icon": str(entry.get("icon") or "") or None,
             "has_children": False,
             "is_enabled": True,
             "refreshable": False,

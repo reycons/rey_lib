@@ -32,7 +32,8 @@ def _row(node_type: str, placement: str | None, action_key: str = "", **values: 
             "action_label": action_key.title(), "action_icon": "file",
             "action_placement": "menu", "action_target": None,
             "requires_state": values.pop("requires_state", None),
-            "target": values.pop("target", None)}
+            "target": values.pop("target", None),
+            "node_type_icon_alias": values.pop("node_type_icon_alias", None)}
 
 
 def _reader(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> NodeTypeActionDataObject:
@@ -52,7 +53,7 @@ def test_declarations_are_grouped_by_node_type_and_placement(monkeypatch) -> Non
         _row("run", "text_click", "open_database_object", target={"kind": "database_object"}),
         _row("run", "button", "open_rollback", sort_order=1, requires_state="rollbackable"),
         _row("run", "panel", "refresh", sort_order=2),
-        _row("folder", None),
+        _row("folder", None, node_type_icon_alias="folder"),
     ])
 
     found = reader.declarations(object())
@@ -62,8 +63,9 @@ def test_declarations_are_grouped_by_node_type_and_placement(monkeypatch) -> Non
     assert [b["action_key"] for b in found["run"]["buttons"]] == ["open_rollback"]
     assert found["run"]["buttons"][0]["sort_order"] == 1
     assert [c["action_key"] for c in found["run"]["panel_controls"]] == ["refresh"]
-    assert found["folder"] == {"selectable": True, "text_click": None,
+    assert found["folder"] == {"selectable": True, "icon": "folder", "text_click": None,
                                "buttons": [], "panel_controls": []}
+    assert found["run"]["icon"] is None  # a type declaring no alias has no icon (#1326)
 
 
 def test_a_declaration_is_the_view_row_s_own_settings() -> None:
@@ -149,6 +151,7 @@ def test_the_fact_is_plain_and_unsigned() -> None:
 _DECLARED = {
     "run": {
         "selectable": True,
+        "icon": "run",
         "text_click": {"action_key": "open_database_object", "requires_state": None},
         "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
         "panel_controls": [{"action_key": "refresh", "requires_state": None}],
@@ -193,6 +196,7 @@ def test_a_record_offers_what_its_type_declares_in_its_state() -> None:
 
     assert offers == {
         "selectable": True,
+        "icon": "run",
         "text_click": {"action_key": "open_database_object", "requires_state": None},
         "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
         "panel_controls": [{"action_key": "refresh", "requires_state": None}],
@@ -208,4 +212,13 @@ def test_a_declaration_needing_another_state_is_absent() -> None:
 
 def test_an_undeclared_type_offers_nothing() -> None:
     assert offered_actions(_DECLARED, {"node_type": "area"}) == {
-        "selectable": False, "text_click": None, "buttons": [], "panel_controls": []}
+        "selectable": False, "icon": None, "text_click": None, "buttons": [],
+        "panel_controls": []}
+
+
+def test_a_records_icon_is_its_types_alias_unless_it_carries_a_published_mark() -> None:
+    """#1326: the node type's alias is the icon; only an application's own mark,
+    published by its registration, is kept in its place."""
+    assert offered_actions(_DECLARED, {"node_type": "run"})["icon"] == "run"
+    assert "icon" not in offered_actions(_DECLARED, {"node_type": "run",
+                                                     "icon": "app.workflow_app"})

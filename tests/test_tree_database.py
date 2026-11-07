@@ -524,7 +524,9 @@ class TestAnObjectOpensIntoWhatItIsMadeOf:
 
         assert [one["label"] for one in made[:3]] == ["Columns", "Indexes", "Constraints"]
         assert made[3:] == feeder._relationships(object(), record["tree_configuration"])
-        assert all(one["node_type"] == "structure_group" for one in made[:3])
+        # Each heading is its own node type, carrying its own icon alias (#1326).
+        assert [one["node_type"] for one in made[:3]] == [
+            "column_group", "index_group", "constraint_group"]
 
     def test_a_view_lists_only_its_columns(self) -> None:
         assert self._labels(self._at("view", "tree_vw"))[:1] == ["Columns"]

@@ -84,14 +84,14 @@ _INDEX_CONNECTION = TREE_CONNECTION
 #: uses. The open_file action reads source_root and relative_path off the row.
 _SOURCE_ROOT = "{apps}"
 
-#: What each collection reads as: one per canonical object type (backlog 720).
-#: The order is the order the old Console listed them; whether a kind appears is
-#: whether the schema read holds one.
+#: Each collection heading: one per canonical object type (backlog 720). Its key is
+#: its node type, whose icon alias is its icon (#1326). The order is the order the
+#: old Console listed them; whether a kind appears is whether the schema read holds one.
 _COLLECTIONS = (
-    ("tables", "Tables", "table"),
-    ("views", "Views", "view"),
-    ("procedures", "Procedures", "procedure"),
-    ("functions", "Functions", "function"),
+    ("tables", "Tables"),
+    ("views", "Views"),
+    ("procedures", "Procedures"),
+    ("functions", "Functions"),
 )
 
 
@@ -132,7 +132,7 @@ def _allowed_collections(configured: dict[str, Any]) -> set[str] | None:
     if declared is None:
         return None
     named = {str(one) for one in declared}
-    known = {kind for kind, _label, _icon in _COLLECTIONS}
+    known = {kind for kind, _label in _COLLECTIONS}
     unknown = sorted(named - known)
     if unknown:
         raise ConfigError(
@@ -305,7 +305,6 @@ class DatabaseDataObject:
         return [
             self._branch(
                 str(entry.get("name") or ""),
-                "database",
                 {**configured, "catalog": entry.get("name")},
                 _CATALOG_TYPE,
             )
@@ -343,7 +342,6 @@ class DatabaseDataObject:
             {
                 **self._branch(
                     str(entry.get("name") or ""),
-                    "schema",
                     {
                         **configured,
                         "catalog": entry.get("catalog"),
@@ -406,7 +404,7 @@ class DatabaseDataObject:
         """
         allowed = _allowed_collections(configured)
         made: list[dict[str, Any]] = []
-        for kind, label, icon in _COLLECTIONS:
+        for kind, label in _COLLECTIONS:
             if allowed is not None and kind not in allowed:
                 continue
             # The schema's snapshot is what this heading's children are read
@@ -415,7 +413,7 @@ class DatabaseDataObject:
             if not (state or {}).get(kind):
                 continue
             made.append(self._branch(
-                label, icon, {**configured, "collection": kind}, kind,
+                label, {**configured, "collection": kind}, kind,
             ))
         return made
 
@@ -455,7 +453,6 @@ class DatabaseDataObject:
             "row_type": "node",
             "node_type": _MEMBER_TYPE.get(collection, collection),
             "label": self._object_label(entry) + suffix,
-            "icon": _COLLECTION_ICON.get(collection, "table"),
             # No longer terminal: an object offers what it depends on and what
             # uses it, both answered from the index.
             "has_children": True,
@@ -505,8 +502,8 @@ class DatabaseDataObject:
             "constraints": any(self._constraint_groups(entry).values()),
         }
         return [
-            self._branch(label, icon, {**configured, "structure": key}, _STRUCTURE_TYPE)
-            for key, label, icon in _STRUCTURES
+            self._branch(label, {**configured, "structure": key}, node_type)
+            for key, label, node_type in _STRUCTURES
             if present.get(key)
         ]
 
@@ -528,7 +525,7 @@ class DatabaseDataObject:
             return [
                 self._leaf(
                     "  ".join(str(one.get(key) or "") for key in ("name", "type", "mode")).strip(),
-                    _STRUCTURE_ICON["parameters"], "parameter",
+                    "parameter",
                 )
                 for one in parameters
             ]
@@ -539,7 +536,7 @@ class DatabaseDataObject:
             return [
                 self._leaf(
                     f"{one.get('name') or ''}  {one.get('type') or ''}".rstrip(),
-                    _STRUCTURE_ICON["columns"], "column",
+                    "column",
                 )
                 for one in columns
             ]
@@ -547,21 +544,21 @@ class DatabaseDataObject:
             return [
                 self._leaf(
                     f"{self._named_columns(one)}{' unique' if one.get('unique') else ''}",
-                    _STRUCTURE_ICON["indexes"], "index",
+                    "index",
                 )
                 for one in _by_name(entry.get("indexes") or [])
             ]
         if structure == "constraints":
             return [
-                self._branch(label, icon, {**configured, "structure": key}, _STRUCTURE_TYPE)
-                for key, label, icon in _CONSTRAINT_GROUPS
+                self._branch(label, {**configured, "structure": key}, node_type)
+                for key, label, node_type in _CONSTRAINT_GROUPS
                 if groups.get(key)
             ]
         if structure in groups:
             return [
                 self._leaf(
                     self._constraint_label(structure, one),
-                    _STRUCTURE_ICON[structure], _CONSTRAINT_TYPE[structure],
+                    _CONSTRAINT_TYPE[structure],
                 )
                 for one in _by_name(groups[structure])
             ]
@@ -594,17 +591,17 @@ class DatabaseDataObject:
         """A name and the columns it covers, as `name (a, b)`."""
         return f"{one.get('name') or ''} ({', '.join(one.get('columns') or [])})"
 
-    def _leaf(self, label: str, icon: str, node_type: str) -> dict[str, Any]:
+    def _leaf(self, label: str, node_type: str) -> dict[str, Any]:
         """One structural entry: shown, and nothing more.
 
         It opens into nothing, cannot be selected and offers no action -- an
-        entry describes part of an object rather than being one.
+        entry describes part of an object rather than being one. Its icon is its
+        node type's (#1326).
         """
         return {
             "row_type": "node",
             "node_type": node_type,
             "label": label,
-            "icon": icon,
             "has_children": False,
             "is_enabled": True,
             "selectable": False,
@@ -634,7 +631,7 @@ class DatabaseDataObject:
             if not self._related_rows(ctx, configured, reverse):
                 continue
             made.append(self._branch(
-                label, "link",
+                label,
                 {**configured, "relationship": key},
                 _RELATIONSHIP_TYPE,
             ))
@@ -652,7 +649,6 @@ class DatabaseDataObject:
             "row_type": "node",
             "node_type": _INDEX_STATUS_TYPE,
             "label": label,
-            "icon": "info",
             "has_children": False,
             "is_enabled": True,
             "selectable": False,
@@ -684,18 +680,18 @@ class DatabaseDataObject:
         made: list[dict[str, Any]] = []
         if self._related_rows(ctx, configured, self._reverse(relationship)):
             made.append(self._branch(
-                "Database Objects", "database",
+                "Database Objects",
                 {**configured, "results": "database"},
-                _RESULT_GROUP_TYPE,
+                _DATABASE_RESULT_TYPE,
             ))
         # Code appears under the INCOMING reading only. Code reaches a database
         # object; a database object does not reach code, so offering it under
         # Depends On would be a heading that can never have anything in it.
         if relationship == "used" and self._bridge_rows(ctx, configured):
             made.append(self._branch(
-                "Code", "code",
+                "Code",
                 {**configured, "results": "code"},
-                _RESULT_GROUP_TYPE,
+                _CODE_RESULT_TYPE,
             ))
         return made
 
@@ -781,9 +777,9 @@ class DatabaseDataObject:
         if str(configured.get("bridge") or "") == "mappings" and not installation:
             return [
                 self._branch(
-                    name, "installation",
+                    name,
                     {**configured, "bridge_installation": name},
-                    _RESULT_GROUP_TYPE,
+                    _BRIDGE_INSTALLATION_TYPE,
                 )
                 for name in sorted({reach.installation for reach in rows})
             ]
@@ -794,16 +790,16 @@ class DatabaseDataObject:
             # database object. The slot is the structure's, not a branch to
             # build before something fills it.
             return [self._branch(
-                "Mappings", "link", {**configured, "bridge": "mappings"},
-                _RESULT_GROUP_TYPE,
+                "Mappings", {**configured, "bridge": "mappings"},
+                _RELATIONSHIP_TYPE,
             )] if rows else []
 
         if not map_name:
             return [
                 self._branch(
-                    name, "installation",
+                    name,
                     {**configured, "bridge_map": name},
-                    _RESULT_GROUP_TYPE,
+                    _BRIDGE_INSTALLATION_TYPE,
                 )
                 for name in sorted({reach.map_name for reach in rows
                                     if reach.installation == installation})
@@ -835,7 +831,6 @@ class DatabaseDataObject:
             "row_type": "node",
             "node_type": "module",
             "label": f"{qualified}  ({binding})",
-            "icon": "file",
             "has_children": False,
             "is_enabled": True,
             "refreshable": False,
@@ -899,7 +894,6 @@ class DatabaseDataObject:
     def _branch(
         self,
         label: str,
-        icon: str,
         configuration: dict[str, Any],
         node_type: str,
     ) -> dict[str, Any]:
@@ -909,13 +903,13 @@ class DatabaseDataObject:
         contract is stated where selection is decided: Applications, Workflows,
         Pipelines, Run History, Tools, the File Manifest and the database
         collections all declare it. Opening one is expanding it, and selecting
-        it would say nothing for anything to respond to.
+        it would say nothing for anything to respond to. Its icon is its node
+        type's (#1326): no producer names one.
         """
         return {
             "row_type": "node",
             "node_type": node_type,
             "label": label,
-            "icon": icon,
             "has_children": True,
             "is_enabled": True,
             "refreshable": False,
@@ -951,11 +945,14 @@ class DatabaseDataObject:
         }
 
 
-#: The heading a dependency reading reads as, and the heading its result kinds
-#: read as. Both are headings that expand and refuse selection, like every
-#: other heading in the tree.
-_RELATIONSHIP_TYPE = "reference_group"
-_RESULT_GROUP_TYPE = "reference_group"
+#: The headings beneath a database object: a dependency reading (and the code
+#: bridge's Mappings), its database and code result kinds, and the bridge's
+#: installation and map levels. Each is its own node type, so each carries its own
+#: icon alias (#1326). All expand and refuse selection, like every other heading.
+_RELATIONSHIP_TYPE = "relationship_group"
+_DATABASE_RESULT_TYPE = "database_result_group"
+_CODE_RESULT_TYPE = "code_result_group"
+_BRIDGE_INSTALLATION_TYPE = "bridge_installation_group"
 
 #: A node that reports the INDEX's coverage rather than a thing in the
 #: database. NEW VOCABULARY, and deliberate: without it, an object the index
@@ -963,8 +960,8 @@ _RESULT_GROUP_TYPE = "reference_group"
 #: nothing, which is the negative-trust failure this estate keeps paying for.
 _INDEX_STATUS_TYPE = "index_status"
 
-#: Which collection an object type belongs to, for the icon. The reverse of
-#: _MEMBER_TYPE, which maps the collection to the member.
+#: Which collection an object type belongs to. The reverse of _MEMBER_TYPE, which
+#: maps the collection to the member.
 _COLLECTION_OF = {
     "table": "tables", "view": "views",
     "procedure": "procedures", "function": "functions",
@@ -981,40 +978,24 @@ _MEMBER_TYPE = {
     "functions": "function",
 }
 
-#: What each collection's members read as.
-_COLLECTION_ICON = {
-    "tables": "table",
-    "views": "view",
-    "procedures": "procedure",
-    "functions": "function",
-}
-
-#: A heading over part of what an object is made of. It expands and refuses
-#: selection, like every other heading in the tree.
-_STRUCTURE_TYPE = "structure_group"
-
-#: What an object is made of, in the order its headings are listed: (key,
-#: label, icon). Each appears only where the object has some.
+#: What an object is made of, in the order its headings are listed: (key, label,
+#: node type). Each heading is its own node type, which carries its icon alias
+#: (#1326); each expands and refuses selection, like every other heading. Each
+#: appears only where the object has some.
 _STRUCTURES = (
-    ("columns", "Columns", "table-column"),
-    ("parameters", "Parameters", "list-details"),
-    ("indexes", "Indexes", "list-details"),
-    ("constraints", "Constraints", "validation"),
+    ("columns", "Columns", "column_group"),
+    ("parameters", "Parameters", "parameter_group"),
+    ("indexes", "Indexes", "index_group"),
+    ("constraints", "Constraints", "constraint_group"),
 )
 
-#: The groups beneath Constraints, in their stated order.
+#: The groups beneath Constraints, in their stated order: (key, label, node type).
 _CONSTRAINT_GROUPS = (
-    ("primary_key", "Primary Keys", "key"),
-    ("foreign_keys", "Foreign Keys", "link-plus"),
-    ("unique", "Unique", "fingerprint"),
-    ("checks", "Checks", "checkbox"),
+    ("primary_key", "Primary Keys", "primary_key_group"),
+    ("foreign_keys", "Foreign Keys", "foreign_key_group"),
+    ("unique", "Unique", "unique_constraint_group"),
+    ("checks", "Checks", "check_constraint_group"),
 )
-
-#: What an entry beneath each heading reads as: its heading's mark.
-_STRUCTURE_ICON = {
-    **{key: icon for key, _label, icon in _STRUCTURES},
-    **{key: icon for key, _label, icon in _CONSTRAINT_GROUPS},
-}
 
 #: What one constraint in each group is.
 _CONSTRAINT_TYPE = {

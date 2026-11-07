@@ -181,7 +181,6 @@ class JsonlDataObject:
         may name any field the file exposes while the fields the tree reads
         stay this object's answer rather than the file's.
         """
-        icon = self._declared(row, declared, "icon_field")
         has_children = bool(self._declared(row, declared, "has_children_field"))
         return {
             # What the source declared, as columns, so a mapping may bind to a
@@ -197,7 +196,7 @@ class JsonlDataObject:
             "row_type": "node",
             "node_type": str(self._declared(row, declared, "node_type_field") or ""),
             "label": str(row.get(str(declared["label_field"])) or ""),
-            **({"icon": str(icon)} if icon else {}),
+            # No icon: a record's icon is its node type's alias (#1326).
             # Carried, never inferred: whether a record has records of its own
             # is the file's answer and arrived with it.
             "has_children": has_children,
