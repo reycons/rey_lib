@@ -308,6 +308,17 @@ class WorkflowStep:
             """One field the workflow defines, selectable for its reference."""
             return fixed_field(name, label, value, hint, subject, self._selected, references)
 
+        settings = setting_form(self.configured_settings, self.settings,
+                                self.operation.contract_definition, subject,
+                                references, self._selected)
+        # A feed is one of the feeds this step's own sanitization configures.
+        feeds = (self.configured_settings.get("sanitization") or {}).get("feeds")
+        if isinstance(feeds, Mapping):
+            for item in settings:
+                if item.get("name") == "feed":
+                    item["control"] = "select"
+                    item["choices"] = [str(one) for one in feeds]
+
         return [
             definition_section("Workflow", [
                 fixed("step.name", "name", self.id, "The step's name in the workflow."),
@@ -322,10 +333,7 @@ class WorkflowStep:
             ]),
             definition_section(
                 " · ".join(one for one in (application, self.operation.name) if one),
-                setting_form(self.configured_settings, self.settings,
-                             self.operation.contract_definition, subject,
-                             references, self._selected),
-                self.operation.description),
+                settings, self.operation.description),
         ]
 
     def update(self, name: str, value: Any) -> None:
