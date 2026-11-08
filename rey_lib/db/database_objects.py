@@ -28,6 +28,7 @@ from hashlib import sha1
 from types import MethodType
 from typing import Any, ClassVar, Iterable, Mapping
 
+from rey_lib.config.applications import allowed_values
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_type import DatabaseType
 from rey_lib.errors.error_utils import (
@@ -61,6 +62,7 @@ __all__ = [
     "DatabaseUserDefinedType",
     "DatabaseView",
     "schema_and_table",
+    "supported_object_kinds",
 ]
 
 
@@ -2363,6 +2365,15 @@ _LISTED: tuple[type, ...] = (
     DatabaseProcedure,
     DatabaseTrigger,
 )
+
+
+def supported_object_kinds() -> list[str]:
+    """Every kind a listed object has, in listing order: the plural ``KIND`` of each type.
+
+    The words a listed object's reference carries, so the words an object filter
+    selects by: a kind outside them names no listed object.
+    """
+    return allowed_values(tuple(owner.KIND for owner in _LISTED))
 
 
 def _inventory(

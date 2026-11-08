@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.encryption import sha256_file
+from rey_lib.config.applications import allowed_values
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.csv import parse_delimited_line
 from rey_lib.files.json import write_json_file
@@ -64,6 +65,8 @@ __all__ = [
     "prepare_rule_set_inputs",
     "resolve_rule_set_onboarding_config",
     "resolve_rule_set_onboarding_configs",
+    "supported_control_total_aggregations",
+    "supported_control_total_applicabilities",
 ]
 
 _INLINE_ONBOARDINGS_FIELD = "onboardings"
@@ -86,6 +89,28 @@ class ControlTotalCalculation:
     source_column: str
     tolerance: str
     applicability: str = "required"
+
+
+#: How a control total is aggregated over its group.
+_CONTROL_TOTAL_AGGREGATIONS = ("sum",)
+
+#: When a control total applies: always, or only where its column is present.
+_CONTROL_TOTAL_APPLICABILITIES = ("required", "when_present")
+
+
+def supported_control_total_aggregations() -> list[str]:
+    """Every control-total aggregation accepted: what ``aggregation`` is checked against."""
+    return allowed_values(_CONTROL_TOTAL_AGGREGATIONS)
+
+
+def supported_control_total_applicabilities() -> list[str]:
+    """Every control-total applicability accepted: what ``applicability`` is checked against."""
+    return allowed_values(_CONTROL_TOTAL_APPLICABILITIES)
+
+
+def _one_of(values: tuple[str, ...]) -> str:
+    """The accepted values as a refusal names them: 'a' or 'b'."""
+    return " or ".join(f"'{value}'" for value in values)
 
 
 @dataclass(frozen=True)
@@ -1506,16 +1531,17 @@ def _control_total_config(
 ) -> ControlTotalCalculation:
     item = _mapping(value, f"{config_name}.control_totals[{index}]")
     aggregation = str(item.get("aggregation") or "sum")
-    if aggregation != "sum":
+    if aggregation not in _CONTROL_TOTAL_AGGREGATIONS:
         raise RedactorError(
-            f"{config_name}.control_totals[{index}].aggregation must be 'sum'."
+            f"{config_name}.control_totals[{index}].aggregation must be "
+            f"{_one_of(_CONTROL_TOTAL_AGGREGATIONS)}."
         )
     column = _required_string(item, "column", config_name)
     applicability = str(item.get("applicability") or "required")
-    if applicability not in {"required", "when_present"}:
+    if applicability not in _CONTROL_TOTAL_APPLICABILITIES:
         raise RedactorError(
             f"{config_name}.control_totals[{index}].applicability must be "
-            "'required' or 'when_present'."
+            f"{_one_of(_CONTROL_TOTAL_APPLICABILITIES)}."
         )
     return ControlTotalCalculation(
         name=_required_string(item, "name", config_name),

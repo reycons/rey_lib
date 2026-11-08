@@ -928,6 +928,17 @@ def supported_classification_types() -> list[str]:
     return allowed_values(_CLASSIFICATION_TYPES)
 
 
+#: The variable sources a source classification accepts. Narrower than what the
+#: shared variable reader takes: classification fills its variables from the
+#: path_regex captures and nothing else, and refuses a variable naming another.
+_CLASSIFICATION_VARIABLE_SOURCES = ("classification",)
+
+
+def supported_classification_variable_sources() -> list[str]:
+    """Every variable source a source classification accepts: what ``source`` is checked against."""
+    return allowed_values(_CLASSIFICATION_VARIABLE_SOURCES)
+
+
 def _candidate(
     config: FileClassificationSourceConfig,
     manifest_record: Mapping[str, Any],
@@ -1095,10 +1106,10 @@ def _classification_source_config(
         config_kind="Source classification",
     )
     for variable in variables:
-        if variable.source != "classification":
+        if variable.source not in _CLASSIFICATION_VARIABLE_SOURCES:
             raise ClassificationError(
                 f"Source classification '{name}' variable '{variable.name}' "
-                "must use source 'classification'."
+                f"must use source {' or '.join(map(repr, _CLASSIFICATION_VARIABLE_SOURCES))}."
             )
 
     classification = _required_mapping(entry, "classification", name)

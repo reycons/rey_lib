@@ -78,6 +78,7 @@ __all__ = [
     "PreparationError",
     "PrepareTransform",
     "run_create_prepared_files",
+    "supported_header_conversions",
     "supported_outputs",
 ]
 
@@ -92,6 +93,15 @@ _OUTPUTS: dict[str, str] = {
 def supported_outputs() -> list[str]:
     """Every prepared output this step accepts: the outputs it checks ``output`` against."""
     return allowed_values(_OUTPUTS)
+
+
+#: What a prepared file's headers are converted to.
+_HEADER_CONVERSIONS = ("snake_case",)
+
+
+def supported_header_conversions() -> list[str]:
+    """Every header conversion this step accepts: what it checks ``convert_to`` against."""
+    return allowed_values(_HEADER_CONVERSIONS)
 
 
 class PreparationError(AppError):
@@ -700,10 +710,10 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
             "create_prepared_files requires 'preparation.headers'."
         )
     convert_to = _required_text(headers, "convert_to", "preparation.headers")
-    if convert_to != "snake_case":
+    if convert_to not in _HEADER_CONVERSIONS:
         raise PreparationError(
             f"create_prepared_files header conversion {convert_to!r} is "
-            "unsupported; the prepared header is snake_case."
+            f"unsupported; the prepared header is {', '.join(_HEADER_CONVERSIONS)}."
         )
 
     return _PreparedConfig(
