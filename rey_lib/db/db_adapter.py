@@ -509,6 +509,7 @@ class DBAdapter:
         limit: int,
         order_by: Optional[list[dict[str, Any]]] = None,
         filters: Optional[list[dict[str, Any]]] = None,
+        read_only: bool = False,
     ) -> PageResult:
         """Return one page of a query's result, and the size of the whole.
 
@@ -559,6 +560,8 @@ class DBAdapter:
                 and must not be reported as one.
         """
         provider = self._provider_for_conn(conn)
+        if read_only and provider != "postgres":
+            raise UnsupportedDatabaseCapabilityError(f"Read-only paging is not supported for {provider}.")
         backend = _backend(provider)
         own = getattr(backend, "execute_page", None)
         if not callable(own):
@@ -572,6 +575,7 @@ class DBAdapter:
             limit=limit,
             order_by=order_by,
             filters=filters,
+            **({"read_only": True} if read_only else {}),
         )
 
     def query_rows(

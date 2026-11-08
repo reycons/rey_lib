@@ -178,12 +178,12 @@ class AIToolSet:
         A schema the tool validates itself, ``sequential`` for a tool that is
         not replay-safe so concurrency cannot defeat its once-only guarantee,
         and Rey's outcomes in Pydantic AI's terms: arguments that break the
-        schema ask the model to correct them (``ModelRetry``); a refusal by the
-        canonical owner is that call's failure, which the model may adapt to
-        (``ToolFailed``).
+        schema and refusals by the canonical owner ask the model to correct its
+        request (``ModelRetry``). Both consume the existing tool-correction
+        allowance: a failed request cannot consume the whole execution budget
+        by being repeated without correction.
         """
         from pydantic_ai import ModelRetry, Tool  # noqa: PLC0415 -- AI's dependency only
-        from pydantic_ai.exceptions import ToolFailed  # noqa: PLC0415
 
         def carried(name: str) -> Callable[..., Any]:
             def run(**arguments: Any) -> Any:
@@ -192,7 +192,11 @@ class AIToolSet:
                 except AIToolError as invalid:
                     raise ModelRetry(str(invalid)) from invalid
                 except AppError as refused:
-                    raise ToolFailed(str(refused)) from refused
+                    raise ModelRetry(
+                        f"Tool {name!r} was refused: {refused} "
+                        "Do not repeat this unchanged request. Correct its inputs, use "
+                        "another granted tool, or explain the evidence gap."
+                    ) from refused
             return run
 
         return [

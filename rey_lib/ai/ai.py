@@ -42,6 +42,7 @@ from rey_lib.ai.results import (
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AIToolCall, AIToolResult, AIToolSet, Operation
+from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.app_logger import AppLogger
 
 if TYPE_CHECKING:
@@ -458,6 +459,8 @@ class AI:
         task: AITask,
         operations: Mapping[str, Operation] | None = None,
         observe: Callable[[AIEvent], None] | None = None,
+        *,
+        record: Callable[[AIEvent], None] | None = None,
     ) -> AIResult:
         """Perform one hydrated unit of work (backlog 1020).
 
@@ -522,23 +525,18 @@ class AI:
 
         key = task.task_key or "(default)"
         execution_id = uuid.uuid4().hex
-        observer = observe
+        observers = [sink for sink in (record, observe) if sink is not None]
 
         def tell(event: AIEvent) -> None:
-            """Hand one event to the observer, which cannot decide the outcome."""
-            nonlocal observer
-            if observer is None:
-                return
-            try:
-                observer(event)
-            except Exception as exc:  # noqa: BLE001 — canonical execution boundary
-                # The observer is external behaviour (backlog 1038, as 1045):
-                # converted to its AppError and reported once. Detached first, so
-                # nothing further -- not even word that it broke -- reaches it.
-                observer = None
-                error = AIExecutionError(f"AI task '{key}': event observer failed", cause=exc)
-                error.__cause__ = exc
-                error.report(f"AI task '{key}' event notification", source=__name__)
+            """Notify independent sinks: a broken reader cannot stop durable evidence."""
+            for sink in tuple(observers):
+                try:
+                    sink(event)
+                except Exception as exc:  # noqa: BLE001 — canonical execution boundary
+                    observers.remove(sink)
+                    error = AIExecutionError(f"AI task '{key}': event observer failed", cause=exc)
+                    error.__cause__ = exc
+                    error.report(f"AI task '{key}' event notification", source=__name__)
 
         # Fresh for this execution: a cancelled token cancels any later run it
         # is given. Held only while this execution runs, whatever ends it.
@@ -572,7 +570,7 @@ class AI:
             # unstreamed request it always was.
             output, usage, (tool_calls, tool_results) = step(
                 task, prompt, schema, toolset, token,
-                tell if observe is not None else None, execution_id,
+                tell if observe is not None or record is not None else None, execution_id,
             )
         except AICancelled:
             # A withdrawal, not a fault: the task records it as its own outcome
@@ -638,7 +636,13 @@ class AI:
         for any other task) or its failure or cancellation (LLM_ANALYSIS_FAILURE).
         Every record is that caller's run's: ``RunLog.append_under``.
 
-        A task carrying no origin records nothing and runs as any other. An origin
+        Tool executions also journal canonical lifecycle/call/result events as
+        INFO records, incrementally, so failure does not discard the exchange.
+        These use the caller's parent when supplied, otherwise the hosting
+        application's own RunLog, linked by task_run_id and execution_id.
+        They are independent of the live presentation observer.
+
+        Without an origin no caller-owned package/result is written. An origin
         that is not an execution context is refused before the engine is called. A
         write that fails is reported by the run log and changes nothing here: the
         answer, the events and the raised error are what ``execute_task`` gives.
@@ -654,13 +658,28 @@ class AI:
         from rey_lib.ai import evidence as recording
 
         parent = recording.origin_of(task)
+        task_run_id = task.run_id
+
+        def trace(event: AIEvent) -> None:
+            payload = recording.trace_of(task, event, task_run_id=task_run_id)
+            if payload is None:
+                return
+            fields = {"record_group": "results", "ai_trace": payload}
+            if parent is not None:
+                evidence.append_under(parent, "INFO", message="AI execution trace", **fields)
+            else:
+                # With no caller parent, the hosting application's own RunLog
+                # remains the owner; task_run_id links its INFO to the task run.
+                evidence.append("INFO", message="AI execution trace", **fields)
+
+        tracing = {"record": trace} if evidence is not None and task.tools else {}
         if parent is None or evidence is None:
-            return self.execute_task(task, operations, observe=observe)
+            return self.execute_task(task, operations, observe=observe, **tracing)
         evidence.append_under(
             parent, recording.PACKAGE_RECORD, record_group="results",
             **recording.package_of(task, source, source_record_type, runtime))
         try:
-            result = self.execute_task(task, operations, observe=observe)
+            result = self.execute_task(task, operations, observe=observe, **tracing)
         except AICancelled as withdrawn:
             evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
                                   **recording.failure_of(task, "cancelled", str(withdrawn)))
@@ -816,6 +835,13 @@ class AI:
                 f"AI task '{key}' reached a usage limit.", cause=error,
             ) from error
         except UnexpectedModelBehavior as error:
+            retry = error.__cause__
+            refused = getattr(retry, "__cause__", None)
+            if isinstance(retry, ModelRetry) and isinstance(refused, AppError) and not isinstance(refused, AIOutputError):
+                raise AIExecutionError(
+                    f"AI task '{key}' exhausted its tool-correction allowance: {refused}",
+                    cause=error,
+                ) from error
             raise AIOutputError(
                 f"AI task '{key}' produced no output that satisfies its contract.",
                 cause=error,

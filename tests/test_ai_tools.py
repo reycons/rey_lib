@@ -344,7 +344,7 @@ class TestThroughPydanticAI:
         owner = _Owner(refuses="read-only connection")
         task = _hydrated()
 
-        result = _ai(engine, monkeypatch).execute_task(
+        result = _ai(engine, monkeypatch, corrections=1).execute_task(
             task, {"database.query": owner, "tree.children": _Owner()},
         )
 
@@ -364,3 +364,27 @@ class TestThroughPydanticAI:
 
         assert task.status == AITask.FAILED
         assert engine.seen == []
+
+
+def test_repeated_owner_refusals_stop_at_existing_correction_allowance(monkeypatch):
+    from rey_lib.ai.errors import AIExecutionError
+    from dataclasses import replace
+    denied=('run_query',{'sql':"SELECT * FROM ai.ai_application_vw WHERE application_key = 'ApplicationAI'"})
+    engine=_ScriptedEngine(denied,denied,denied,denied)
+    owner=_Owner(refuses='Permission denied for schema ai (SQLSTATE 42501)')
+    with pytest.raises(AIExecutionError,match='tool-correction allowance.*Permission denied'):
+        _ai(engine,monkeypatch,corrections=2).execute_task(
+            replace(_hydrated(),max_turns=100),{'database.query':owner,'tree.children':_Owner()})
+    assert len(owner.calls)==3
+
+
+def test_a_refusal_can_be_followed_by_another_granted_read_tool(monkeypatch):
+    engine=_ScriptedEngine(('run_query',{'sql':'SELECT * FROM ai.ai_application_vw'}),
+                           ('list_children',{'node':'known-source'}))
+    denied=_Owner(refuses='Permission denied for schema ai')
+    source=_Owner(answer={'source':'class ApplicationAI: ...'})
+    result=_ai(engine,monkeypatch,corrections=2).execute_task(
+        _hydrated(),{'database.query':denied,'tree.children':source})
+    assert result.text=='done'
+    assert len(denied.calls)==len(source.calls)==1
+    assert any('Do not repeat this unchanged request' in retry for retry in engine.retried)

@@ -33,6 +33,8 @@ __all__ = [
     "commit",
     "get_head_commit",
     "run_git",
+    "read_file_changes",
+    "read_working_tree",
 ]
 
 _logger = AppLogger(__name__)
@@ -144,3 +146,28 @@ def commit(repo_root: _PathLike, message: str, *, allow_empty: bool = False) -> 
 def get_head_commit(repo_root: _PathLike) -> str:
     """Return the current HEAD commit hash of ``repo_root``."""
     return run_git(repo_root, "rev-parse", "HEAD").stdout.strip()
+
+
+def read_file_changes(repo_root: _PathLike, relative_path: str) -> dict[str, str]:
+    """Read one literal path's status and diffs; no executable arguments accepted.
+
+    Optional locks, fsmonitor, external diff and text conversion are disabled:
+    these reads neither refresh the index nor run configured diff helpers.
+    The caller owns source-path authorization, including secret-name policy.
+    """
+    prefix = ('--no-optional-locks', '--literal-pathspecs', '-c', 'core.fsmonitor=false')
+    def read(*args: str) -> str:
+        return run_git(repo_root, *prefix, *args).stdout
+    return {
+        'status': read('status', '--porcelain=v1', '--untracked-files=all', '--', relative_path),
+        'staged': read('diff', '--cached', '--no-ext-diff', '--no-textconv', '--no-renames', '--', relative_path),
+        'unstaged': read('diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--', relative_path),
+    }
+
+
+def read_working_tree(repo_root: _PathLike) -> list[dict[str, str]]:
+    """Read status as literal NUL-separated paths without optional index writes."""
+    result = run_git(repo_root, '--no-optional-locks', '-c', 'core.fsmonitor=false',
+                     'status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all')
+    return [{'status': entry[:2], 'relative_path': entry[3:]}
+            for entry in result.stdout.split('\0') if entry]

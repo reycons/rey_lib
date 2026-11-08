@@ -367,8 +367,12 @@ class DatabaseQuery:
         order_by: list[dict[str, Any]] | None = None,
         filters: list[dict[str, Any]] | None = None,
         adapter: Any = None,
+        read_only: bool = False,
     ) -> PageResult:
         """One page of the text's result, and the size of the whole.
+
+        ``read_only`` requires provider-enforced read-only execution. Unsupported
+        providers refuse; this call never retries through an eager/write path.
 
         Raises:
             UnsupportedDatabaseCapabilityError: If the provider cannot page this
@@ -379,6 +383,7 @@ class DatabaseQuery:
         return _adapter(adapter).execute_page(
             conn, self.statement, offset=offset, limit=limit,
             order_by=order_by, filters=filters,
+            **({"read_only": True} if read_only else {}),
         )
 
     def read(

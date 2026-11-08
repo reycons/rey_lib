@@ -502,6 +502,7 @@ def ai_query_operations(
     """
     from rey_lib.db.database_query import DatabaseQuery  # noqa: PLC0415
     from rey_lib.files.json import json_value  # noqa: PLC0415
+    from rey_lib.db.catalog import schema_operations  # noqa: PLC0415
 
     built = build_connections(ctx)
 
@@ -530,8 +531,22 @@ def ai_query_operations(
             }
         return query
 
+    def read_query_on(connection: Any) -> Any:
+        def read(arguments: dict[str, Any], tool: Any) -> dict[str, Any]:
+            if not tool.result_row_limit:
+                raise ConfigError('A read query tool needs a governed row limit.')
+            page = DatabaseQuery(str(arguments['sql'])).page(
+                connection.handle(), offset=int(arguments.get('offset', 0)),
+                limit=tool.result_row_limit, read_only=True)
+            return {'columns': page.columns, 'rows': [json_value(row) for row in page.rows],
+                    'total_row_count': page.total_row_count, 'next_offset': page.next_offset,
+                    'read_only': True}
+        return read
+
     return {
-        name: {"database.query": query_on(built[name])}
+        name: {"database.query": query_on(built[name]),
+               "database.read_query": read_query_on(built[name]),
+               **schema_operations(built[name].handle, name)}
         for name in permitted if name in built
     }
 

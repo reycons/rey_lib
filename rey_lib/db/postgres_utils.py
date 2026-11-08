@@ -2829,6 +2829,14 @@ def _refuse_if_not_pageable(core: Any, wrapped: str) -> None:
     try:
         core.exec_driver_sql(f"EXPLAIN SELECT 1 FROM {wrapped}")
     except Exception as exc:
+        original = getattr(exc, "orig", exc)
+        state = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+        if state == "42501":
+            raise DatabaseError(f"Permission denied while reading the query (SQLSTATE 42501). {_reason(exc)}") from exc
+        if state is not None and state not in {"42601", "0A000"}:
+            raise DatabaseError(f"PostgreSQL refused the query (SQLSTATE {state}). {_reason(exc)}") from exc
+        if state is None:
+            raise DatabaseError(f"PostgreSQL could not validate the query. {_reason(exc)}") from exc
         raise UnsupportedDatabaseCapabilityError(
             "This statement cannot be paged: it is not a query that can be "
             f"read as a subquery. {_reason(exc)}"
@@ -2849,6 +2857,7 @@ def execute_page(
     limit: int,
     order_by: Optional[list[dict[str, Any]]] = None,
     filters: Optional[list[dict[str, Any]]] = None,
+    read_only: bool = False,
 ) -> Any:
     """Return one page of a query, and the exact size of the whole result.
 
@@ -2889,7 +2898,13 @@ def execute_page(
     order = _rendered_order(order_by)
 
     with own_connection(conn, isolation_level=_PAGE_ISOLATION) as core:
+        # SQLAlchemy otherwise sends an empty parameter container to psycopg,
+        # which treats literal LIKE percentages as parameter placeholders.
+        # Bound filter calls still carry their actual parameter tuple.
+        core = core.execution_options(no_parameters=True)
         with core.begin():
+            if read_only:
+                core.exec_driver_sql("SET TRANSACTION READ ONLY")
             # Declined here or not at all. Nothing below this line may raise
             # UnsupportedDatabaseCapabilityError.
             _refuse_if_not_pageable(core, wrapped)

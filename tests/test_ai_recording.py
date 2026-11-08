@@ -206,3 +206,81 @@ def test_the_origin_is_read_as_the_callers_place_and_nothing_more() -> None:
     assert origin_of(_task(origin_id="")) is None
     assert origin_of(_task(origin_id=json.dumps({"run_id": 1, "parent_run_log_id": 2}))) == {
         "run_id": 1, "parent_run_log_id": 2, "nest_level": 0, "correlation_id": "", "app": ""}
+
+
+@pytest.mark.parametrize('origin', ['', json.dumps(ORIGIN)], ids=['host-log','caller-parent'])
+def test_usage_exhaustion_retains_each_call_and_result_without_a_live_observer(monkeypatch, origin):
+    from pydantic_ai.messages import ToolCallPart
+    from rey_lib.ai.errors import AIExecutionError
+    from rey_lib.ai.tools import AITool
+    class Log(_Evidence):
+        def append(self,record_type,**fields):
+            self.appended.append((None,record_type,fields))
+    log=Log()
+    ai=AI()
+    from pydantic_ai.models.function import DeltaToolCall
+    requests=[]
+    async def stream(messages,info):
+        requests.append(True)
+        yield {0:DeltaToolCall(name='lookup',json_args='{"name":"same"}',tool_call_id=f'call{len(requests)}')}
+    model=FunctionModel(stream_function=stream)
+    monkeypatch.setattr(ai,'_model',lambda *args:model)
+    tool=AITool(name='lookup',description='Read a fact',input_schema={'type':'object','properties':{'name':{'type':'string'}},'required':['name']},replay_safe=True,capability_key='lookup')
+    task=_task(origin_id=origin,tools=(tool,),max_turns=2)
+    task.record_run('5416')
+    with pytest.raises(AIExecutionError,match='usage limit'):
+        ai.execute_recorded(task,{'lookup':lambda arguments,tool:{'found':'same evidence'}},log)
+    traces=[(parent,fields['ai_trace']) for parent,kind,fields in log.appended if kind=='INFO']
+    assert [value['event']['kind'] for _,value in traces] == [
+        'execution_started','tool_call_requested','tool_result_accepted',
+        'tool_call_requested','tool_result_accepted','execution_failed']
+    assert all(value['task_run_id']=='5416' for _,value in traces)
+    assert all(parent==(ORIGIN if origin else None) for parent,_ in traces)
+    assert traces[1][1]['event']['tool_call']['arguments']=={'name':'same'}
+    assert traces[2][1]['event']['tool_result']['value']=={'found':'same evidence'}
+
+
+def test_a_broken_live_observer_does_not_disable_the_durable_trace(monkeypatch):
+    from pydantic_ai.messages import ToolCallPart
+    from rey_lib.ai.tools import AITool
+    class Log(_Evidence):
+        def append(self,record_type,**fields):self.appended.append((None,record_type,fields))
+    log=Log()
+    ai=AI()
+    calls=[]
+    from pydantic_ai.models.function import DeltaToolCall
+    async def reply(messages,info):
+        calls.append(True)
+        if len(calls)==1:
+            yield {0:DeltaToolCall(name='lookup',json_args='{}',tool_call_id='call1')}
+        else:
+            yield 'done'
+    monkeypatch.setattr(ai,'_model',lambda *args:FunctionModel(stream_function=reply))
+    tool=AITool(name='lookup',description='Read',input_schema={'type':'object','properties':{}},replay_safe=True,capability_key='lookup')
+    def broken(event):raise RuntimeError('reader disappeared')
+    result=ai.execute_recorded(_task(origin_id='',tools=(tool,)),{'lookup':lambda *args:'value'},log,observe=broken)
+    assert result.text=='done'
+    kinds=[fields['ai_trace']['event']['kind'] for _,kind,fields in log.appended if kind=='INFO']
+    assert kinds==['execution_started','tool_call_requested','tool_result_accepted','execution_completed']
+
+
+def test_failed_tool_trace_is_written_through_real_run_log_to_jsonl_and_db(monkeypatch,tmp_path):
+    from pydantic_ai.models.function import DeltaToolCall
+    from rey_lib.ai.errors import AIExecutionError
+    from rey_lib.ai.tools import AITool
+    from tests.conftest import make_db_run_log
+    log=make_db_run_log(tmp_path,app='ai_app')
+    async def repeats(messages,info):
+        yield {0:DeltaToolCall(name='lookup',json_args='{}',tool_call_id='call1')}
+    ai=AI()
+    monkeypatch.setattr(ai,'_model',lambda *args:FunctionModel(stream_function=repeats))
+    task=_task(origin_id='',max_turns=1,tools=(AITool(name='lookup',description='Read',input_schema={'type':'object','properties':{}},replay_safe=True,capability_key='lookup'),))
+    task.record_run('5416')
+    with pytest.raises(AIExecutionError,match='usage limit'):
+        ai.execute_recorded(task,{'lookup':lambda *args:{'revision':'abc123','text':'source evidence'}},log)
+    disk=[json.loads(line)['ai_trace'] for line in log.path().read_text().splitlines()]
+    stored=[row['info']['ai_trace'] for row in log.writer._database.rows]
+    assert disk==stored
+    assert [trace['event']['kind'] for trace in disk]==['execution_started','tool_call_requested','tool_result_accepted','execution_failed']
+    assert disk[2]['event']['tool_result']['value']=={'revision':'abc123','text':'source evidence'}
+    assert all(trace['task_run_id']=='5416' for trace in disk)

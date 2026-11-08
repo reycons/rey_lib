@@ -78,8 +78,12 @@ class ApplicationAI:
 
     @classmethod
     def at_load(cls, control: Any, installation: str, installation_id: int | None,
-                application: str) -> "ApplicationAI":
+                application: str, *, transports: AppTransports | None = None) -> "ApplicationAI":
         """The tasks available to ``application`` in ``installation``, read once at load.
+
+        A supplied ``transports`` is the invoking execution context's existing
+        fabric, so its already-open subject and ai_app share routing. The
+        invocation context owns its lifetime; ``close`` ends that invocation.
 
         The application's declaration (control.application_installation_vw.ai, by
         application_id) names the tasks it supports; the installation's
@@ -99,7 +103,7 @@ class ApplicationAI:
         rows = control.get_application_installations(int(installation_id), application)
         declared = (rows[0].get("ai") if rows else None) or {}
         if declared.get("is_enabled") is False:
-            return cls((), AppTransports())
+            return cls((), transports if transports is not None else AppTransports())
         enabled = {
             str(row.get("task_key") or "")
             for row in control.ai_configuration(installation)
@@ -112,7 +116,7 @@ class ApplicationAI:
         ]
         logger.debug("application %s has AI tasks %s in installation %s",
                      application, keys, installation)
-        return cls(keys, AppTransports())
+        return cls(keys, transports if transports is not None else AppTransports())
 
     def task_keys(self) -> tuple[str, ...]:
         """The governed tasks this application may run, in declared order."""
@@ -120,7 +124,9 @@ class ApplicationAI:
 
     def call(self, runtime: Any, task_key: str, text: str, relay: Relay,
              context: Mapping[str, Any] | None = None,
-             origin: Mapping[str, Any] | None = None) -> None:
+             origin: Mapping[str, Any] | None = None, *,
+             subject_reference: Mapping[str, Any] | None = None,
+             coordinates: Mapping[str, Any] | None = None) -> None:
         """Run one available task on ai_app's live AI with ``text`` as its input.
 
         The AI's own sequence over its hosted commands: ``task`` opens the governed
@@ -137,6 +143,11 @@ class ApplicationAI:
         each event as it happens, the projection as it ended, or the refusal --
         goes to ``relay`` as emitted.
 
+        ``subject_reference`` names the already-live governed subject at task
+        creation. ``coordinates`` are its transient transport context on this
+        same execution fabric, sent only with run and never persisted as identity.
+        Neither input opens a subject or selects its owner.
+
         Blocks only for the opening; call it off the thread reading commands, as
         any work that outlives a command runs.
 
@@ -151,9 +162,13 @@ class ApplicationAI:
                 f"AI task {key!r} is not available to this application; available: "
                 f"{', '.join(self._task_keys) or 'none'}."
             )
+        if coordinates is not None and not subject_reference:
+            raise AIRequestError("Hosted coordinates require a governed subject reference.")
         transport = self._ai_app(runtime)
         request: dict[str, Any] = {"command": "task", "task_key": key,
                                    "object": self._ai_object}
+        if subject_reference is not None:
+            request["subject_reference"] = dict(subject_reference)
         if origin is not None:
             # The task's origin is a string fact (AITask.origin_id): the place, as text.
             request["origin_id"] = json.dumps(dict(origin), default=str)
@@ -170,7 +185,13 @@ class ApplicationAI:
         if context is not None:
             changes["context"] = dict(context)
         transport.send({"command": "edit", "object": object_id, "changes": changes})
-        transport.send({"command": "run", "object": object_id})
+        transport.send({"command": "run", "object": object_id,
+                        **({"coordinates": dict(coordinates)} if coordinates is not None else {})})
+
+    def ended(self) -> bool:
+        """Whether this invocation's already-open AI application has ended."""
+        with self._guard:
+            return self._transport is not None and self._transport.ended()
 
     def close(self) -> None:
         """The application stops serving: the ai_app it launched ends with it."""

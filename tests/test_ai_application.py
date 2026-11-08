@@ -259,3 +259,18 @@ class TestACallOnAiApp:
 
         ai.close()
         assert transports.closed_all == 1
+
+
+def test_hosted_subject_and_coordinates_share_the_existing_call_without_persistence():
+    transports = _Transports()
+    ai = ApplicationAI(('code_investigation',), transports)
+    subject = {'kind':'repository_estate','installation':'local'}
+    coordinates = {'connection':'existing-estate','object':'held-estate'}
+    ai.call(object(),'code_investigation','Trace across applications',lambda msg:None,
+            subject_reference=subject,coordinates=coordinates)
+    assert transports.transport.requested[0]['subject_reference'] == subject
+    assert 'coordinates' not in transports.transport.requested[0]
+    assert transports.transport.sent[-1] == {'command':'run','object':'t1','coordinates':coordinates}
+    assert 'coordinates' not in transports.transport.sent[0]['changes']
+    with pytest.raises(AIRequestError):
+        ai.call(object(),'code_investigation','Question',lambda msg:None,coordinates=coordinates)

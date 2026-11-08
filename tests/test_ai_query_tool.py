@@ -112,7 +112,7 @@ class TestGovernedFact:
 class TestComposition:
     def test_only_offered_connections_get_an_operation(self, operations: dict) -> None:
         assert set(operations) == {"llm_reader"}
-        assert set(operations["llm_reader"]) == {"database.query"}
+        assert set(operations["llm_reader"]) == {"database.query", "database.read_query", "database.schemas", "database.schema"}
 
     def test_the_governed_limit_goes_straight_to_database_query(
         self, operations: dict, ran: list,
@@ -193,3 +193,15 @@ class TestThroughAI:
         with pytest.raises(AIConfigurationError, match="database.query"):
             _ai(engine, monkeypatch, operations).execute_task(task)
         assert ran == [] and engine.seen == []
+
+
+def test_read_query_requests_database_enforced_read_only_paging(operations, monkeypatch):
+    from types import SimpleNamespace
+    seen=[]
+    def page(query,conn,**options):
+        seen.append((query.statement,conn,options))
+        return SimpleNamespace(columns=['answer'],rows=[{'answer':1}],total_row_count=101,next_offset=100)
+    monkeypatch.setattr(database_query.DatabaseQuery,'page',page)
+    result=operations['llm_reader']['database.read_query']({'sql':'SELECT 1','offset':0},SimpleNamespace(result_row_limit=100))
+    assert seen==[('SELECT 1','handle:llm_reader',{'offset':0,'limit':100,'read_only':True})]
+    assert result['next_offset']==100 and result['read_only'] is True

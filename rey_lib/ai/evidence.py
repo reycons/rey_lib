@@ -35,6 +35,7 @@ __all__ = [
     "origin_of",
     "package_of",
     "result_of",
+    "trace_of",
 ]
 
 #: The record types AI writes, as the run log already declares them (#1305):
@@ -187,3 +188,23 @@ def _plain(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     return value
+
+
+def trace_of(task: Any, event: Any, *, task_run_id: str = "") -> dict[str, Any] | None:
+    """A canonical tool/lifecycle event for the existing typed run log.
+
+    Content deltas are deliberately not records. Calls, returned evidence and
+    terminal outcomes survive failed executions, correlated to the actual task
+    run even when the hosting process is the only available logging parent.
+    """
+    from rey_lib.ai.streaming import AIEventKind
+    kinds = {AIEventKind.EXECUTION_STARTED, AIEventKind.TOOL_CALL_REQUESTED,
+             AIEventKind.TOOL_RESULT_ACCEPTED, AIEventKind.EXECUTION_COMPLETED,
+             AIEventKind.EXECUTION_FAILED, AIEventKind.EXECUTION_CANCELLED}
+    if event.kind not in kinds:
+        return None
+    projected = event.projection()
+    projected.pop("result", None)  # the ordinary result record owns the final answer
+    return {"task_id": task.id, "task_key": task.task_key,
+            "task_run_id": task_run_id or task.run_id, "model_identifier": task.model_identifier,
+            "max_turns": task.max_turns, "event": projected}

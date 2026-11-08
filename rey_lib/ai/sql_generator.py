@@ -111,32 +111,5 @@ class SQLGenerator:
         names, columns and their types -- not DDL, which the model does not need
         to write a query and which would crowd out what it does.
         """
-        from rey_lib.db.database_objects import DatabaseSchema  # noqa: PLC0415
-
-        def schemas(arguments: dict[str, Any], tool: Any) -> list[str]:
-            """The connection's schemas, by name."""
-            return [one.schema for one in DatabaseSchema.list(conn, connection, adapter)]
-
-        def schema(arguments: dict[str, Any], tool: Any) -> dict[str, Any]:
-            """One schema's tables and views, with their columns."""
-            read = DatabaseSchema.read(conn, connection, "", str(arguments["schema"]), adapter)
-
-            def columns(owner: Any) -> list[dict[str, Any]]:
-                return [
-                    {"name": column.name, "type": column.type, "nullable": column.nullable}
-                    for column in owner.columns
-                ]
-
-            return {
-                "schema": read.schema,
-                "tables": [
-                    {"name": table.identity.name, "columns": columns(table)}
-                    for table in read.tables
-                ],
-                "views": [
-                    {"name": view.identity.name, "columns": columns(view)}
-                    for view in read.views
-                ],
-            }
-
-        return {self.LIST_SCHEMAS: schemas, self.READ_SCHEMA: schema}
+        from rey_lib.db.catalog import schema_operations
+        return schema_operations(conn, connection, adapter)
