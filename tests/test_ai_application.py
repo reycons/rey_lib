@@ -30,7 +30,7 @@ class _Control:
     def get_application_installations(self, installation_id: int,
                                       application: str) -> list[dict[str, Any]]:
         self.asked.append(("declaration", (installation_id, application)))
-        return [{"application": application, "ai": self.declared}]
+        return [{"application": application, "application_id": 7, "ai": self.declared}]
 
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
         self.asked.append(("configuration", installation))
@@ -56,6 +56,12 @@ class TestTheTasksAreResolvedAtLoad:
 
         assert ai.task_keys() == ("comment_code", "generate_sql")
         assert control.asked == [("declaration", (3, "rey_db_admin")), ("configuration", "local")]
+
+    def test_the_application_id_is_kept_from_its_declaration_row(self) -> None:
+        """What an AI conversation the application owns is recorded under (#1338)."""
+        control = _Control(_declaration("generate_sql"), _installation("generate_sql"))
+
+        assert ApplicationAI.at_load(control, "local", 3, "rey_db_admin").application_id == 7
 
     def test_a_task_disabled_on_either_side_is_not_available(self) -> None:
         control = _Control(

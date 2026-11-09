@@ -1488,6 +1488,75 @@ class Control:
             "connection_name": connection_name,
         }, required=required)
 
+    # -- AI conversations (backlog 1338) --------------------------------------
+
+    def create_ai_conversation(self, installation_id: int, application_id: int,
+                               subject_identity: dict[str, Any], *,
+                               title: Optional[str] = None,
+                               required: bool = True) -> Optional[int]:
+        """Begin one AI conversation about one subject; return its id.
+
+        The routine owns the row: it begins active and empty.
+        """
+        return self._call("insert_ai_conversation", {
+            "installation_id": int(installation_id),
+            "application_id": int(application_id),
+            "subject_identity": dict(subject_identity),
+            "title": title,
+        }, required=required)
+
+    def append_ai_conversation_message(self, conversation_id: int, *, run_id: Optional[int],
+                                       role: str, content: str,
+                                       required: bool = True) -> Optional[int]:
+        """Append one message to an active AI conversation; return its id.
+
+        Its order is the routine's: the conversation's next sequence.
+        """
+        return self._call("insert_ai_conversation_message", {
+            "conversation_id": int(conversation_id),
+            "run_id": run_id,
+            "role": str(role),
+            "content": str(content),
+        }, required=required)
+
+    def update_ai_conversation_status(self, conversation_id: int, status: str,
+                                      required: bool = True) -> None:
+        """Set one AI conversation's status, active or archived."""
+        self._call("update_ai_conversation_status", {
+            "conversation_id": int(conversation_id),
+            "status": str(status),
+        }, required=required)
+
+    def ai_conversations(self, *, conversation_id: Optional[int] = None,
+                         installation_id: Optional[int] = None,
+                         application_id: Optional[int] = None,
+                         subject_identity: Optional[dict[str, Any]] = None,
+                         status: Optional[str] = None,
+                         required: bool = True) -> list[dict[str, Any]]:
+        """AI conversations by id, or by installation, application and subject.
+
+        Most recently updated first, as the routine orders them; ``status``
+        narrows either.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_ai_conversation", {
+                "conversation_id": conversation_id,
+                "installation_id": installation_id,
+                "application_id": application_id,
+                "subject_identity": None if subject_identity is None else dict(subject_identity),
+                "status": status,
+            }, required=required) or [])
+        ]
+
+    def ai_conversation_messages(self, conversation_id: int,
+                                 required: bool = True) -> list[dict[str, Any]]:
+        """One AI conversation's messages in order, each with its run's status."""
+        return [
+            dict(row) for row in (self._call_rows("get_ai_conversation_messages", {
+                "conversation_id": int(conversation_id),
+            }, required=required) or [])
+        ]
+
     def analysis_contract(self, name: str) -> Optional[dict[str, Any]]:
         """This installation's stored analysis contract ``name``, or None.
 

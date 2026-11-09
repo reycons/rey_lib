@@ -63,8 +63,13 @@ class ApplicationAI:
             ai_app it launches for as long as the application serves.
     """
 
-    def __init__(self, task_keys: Sequence[str], transports: AppTransports) -> None:
+    def __init__(self, task_keys: Sequence[str], transports: AppTransports,
+                 application_id: int | None = None) -> None:
         self._task_keys = tuple(str(key) for key in task_keys)
+        #: The application's own id (code.application), as its declaration row
+        #: carries it: what an AI conversation it owns is recorded under (#1338).
+        #: None where no declaration was read.
+        self.application_id = None if application_id is None else int(application_id)
         self._transports = transports
         self._transport: AppTransport | None = None
         self._ref = ""
@@ -102,8 +107,10 @@ class ApplicationAI:
             )
         rows = control.get_application_installations(int(installation_id), application)
         declared = (rows[0].get("ai") if rows else None) or {}
+        application_id = rows[0].get("application_id") if rows else None
         if declared.get("is_enabled") is False:
-            return cls((), transports if transports is not None else AppTransports())
+            return cls((), transports if transports is not None else AppTransports(),
+                       application_id)
         enabled = {
             str(row.get("task_key") or "")
             for row in control.ai_configuration(installation)
@@ -116,7 +123,8 @@ class ApplicationAI:
         ]
         logger.debug("application %s has AI tasks %s in installation %s",
                      application, keys, installation)
-        return cls(keys, transports if transports is not None else AppTransports())
+        return cls(keys, transports if transports is not None else AppTransports(),
+                   application_id)
 
     def task_keys(self) -> tuple[str, ...]:
         """The governed tasks this application may run, in declared order."""
