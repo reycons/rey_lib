@@ -8,7 +8,13 @@ objects in its registration:
     nesting, arrays, required fields, types, defaults, allowed values, keyed
     maps, variants and descriptions. It is authoritative for constructing and
     validating the operation's workflow settings, by the front end and by an
-    LLM, and it holds no workflow values.
+    LLM, and it holds no workflow values. A field or group uses ``title`` as its
+    prompt. Named scalar choices use ``oneOf`` entries with ``title`` (the prompt)
+    and ``const`` (the value the program parses); ordinary ``enum`` remains valid.
+    For example, ``{"type": "string", "title": "Read strategy", "oneOf": [
+    {"const": "full", "title": "Whole input"},
+    {"const": "delta", "title": "Changes only"}]}``. Properties and item schemas
+    retain the application's hierarchy; prompts never replace machine keys.
 
 ``contract_sample``
     The starter settings a new settings instance copies, conforming to the
@@ -43,7 +49,7 @@ from jsonschema.exceptions import SchemaError
 
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["check_contract", "check_definition", "contract_review", "contract_violations"]
+__all__ = ["check_contract", "check_definition", "contract_review", "contract_violations", "settings_shape"]
 
 #: The dialect every contract is written in.
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -160,3 +166,32 @@ def _path(parts: Any) -> str:
     for part in parts:
         rendered += f"[{part}]" if isinstance(part, int) else (f".{part}" if rendered else str(part))
     return rendered or "(settings)"
+
+
+def settings_shape(definition: Mapping[str, Any], settings: Any) -> dict[str, Any]:
+    """The declared hierarchy for the currently selected discriminator variant.
+
+    An object's oneOf branches may add properties selected by a const/enum
+    property, such as its operation. Select by that declared discriminator even
+    while other required values are still being edited. Validation always uses
+    the original full contract; this read only describes its active fields.
+    """
+    shape = dict(definition)
+    if not isinstance(settings, Mapping):
+        return shape
+    branches = []
+    for branch in definition.get("oneOf", []):
+        selectors = {name: spec for name, spec in branch.get("properties", {}).items()
+                     if "const" in spec or "enum" in spec}
+        if selectors and all(name in settings and Draft202012Validator(spec).is_valid(settings[name])
+                             for name, spec in selectors.items()):
+            branches.append(branch)
+    if len(branches) == 1:
+        branch = branches[0]
+        base = definition.get("properties", {})
+        shape["properties"] = {**base, **{
+            name: (base[name] if name in base and ("const" in spec or "enum" in spec) else spec)
+            for name, spec in branch.get("properties", {}).items()}}
+        shape["required"] = list(dict.fromkeys([*definition.get("required", []),
+                                               *branch.get("required", [])]))
+    return shape

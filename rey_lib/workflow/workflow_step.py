@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.config.inventory import to_plain_data
-from rey_lib.config.operation_contract import contract_review
+from rey_lib.config.operation_contract import contract_review, settings_shape
 from rey_lib.content import Content
 from rey_lib.errors.error_utils import AppError
 from rey_lib.formatting import markdown_to_html
@@ -344,16 +344,17 @@ class WorkflowStep:
         ``value`` arrives as the editor's text and is read as the contract's type
         there; blank clears it (a list item is removed). The configured settings
         keep the {} expressions as given, and the resolved settings the run reads
-        follow them. Refused while the Workflow runs, for a path neither the contract
-        nor the step holds, and where the edit adds a contract violation.
+        follow them. Refused while the Workflow runs, for a path the contract does
+        not describe, and where the edited value violates its declaration or the
+        edit adds a contract violation.
 
         Raises:
             AppError: When the edit is refused.
         """
         schema = dict(self.operation.contract_definition or {})
         path = _path_of(self.id, name)
-        spec = _spec_at(schema, path)
-        if spec is None and _value_at(self.configured_settings, path) is _ABSENT:
+        spec = _spec_at(schema, path, self.settings)
+        if spec is None:
             raise AppError(
                 f"step '{self.id}': operation '{self.operation.name}' has no setting '{name}'.")
         if getattr(self._observer, "directing", False):
@@ -371,9 +372,16 @@ class WorkflowStep:
             _set_at(self.id, configured, path, _from_text(self.id, name, value, spec or {}))
         resolved = (self._resolve(configured) if self._resolve is not None
                     else deepcopy(configured))
-        _unsupported, before = contract_review(schema, to_plain_data(self.settings))
-        _unsupported, after = contract_review(schema, to_plain_data(resolved))
-        added = [one for one in after if one not in before]
+        before_unknown, before = contract_review(schema, to_plain_data(self.settings))
+        after_unknown, after = contract_review(schema, to_plain_data(resolved))
+        # A changed field must itself satisfy its declaration, even if the old
+        # value already violated the same enclosing variant.
+        edited = _value_at(resolved, path)
+        if edited is not _ABSENT:
+            _unknown, invalid = contract_review(spec, to_plain_data(edited))
+            if invalid or _unknown:
+                raise AppError(f"step '{self.id}': {name}: {'; '.join([*_unknown, *invalid])}")
+        added = [one for one in [*after_unknown, *after] if one not in [*before_unknown, *before]]
         if added:
             raise AppError(f"step '{self.id}': {'; '.join(added)}")
         self.configured_settings = configured
@@ -539,6 +547,9 @@ def _from_text(step: str, name: str, value: Any, spec: Mapping[str, Any]) -> Any
     """
     if not isinstance(value, str):
         return value
+    for choice in spec.get("oneOf", []):
+        if "const" in choice and _as_text(choice["const"]) == value:
+            return deepcopy(choice["const"])
     kind = spec.get("type")
     try:
         if kind == "boolean":
@@ -654,6 +665,9 @@ def _items(path: list[Any], label: list[str], spec: Mapping[str, Any], configure
            references: Mapping[str, Mapping[str, Any]],
            selected: Optional[str]) -> list[dict[str, Any]]:
     """The sections and fields at ``path``: the hierarchy the schema describes."""
+    spec = settings_shape(spec, resolved)
+    if spec.get("title"):
+        label = [*label[:-1], str(spec["title"])]
     kind = spec.get("type") or (
         "object" if isinstance(configured, Mapping) or isinstance(resolved, Mapping) else
         "array" if isinstance(configured, list) or isinstance(resolved, list) else None)
@@ -664,7 +678,9 @@ def _items(path: list[Any], label: list[str], spec: Mapping[str, Any], configure
         after = resolved if isinstance(resolved, Mapping) else {}
         items: list[dict[str, Any]] = []
         for key in dict.fromkeys([*properties, *held, *after]):
-            items.extend(_items([*path, key], [*label, str(key)], dict(properties.get(key) or {}),
+            extra = spec.get("additionalProperties")
+            child = properties.get(key, extra if isinstance(extra, Mapping) else {})
+            items.extend(_items([*path, key], [*label, str(key)], dict(child or {}),
                                 held.get(key, _ABSENT), after.get(key, _ABSENT), key in needed,
                                 subject, references, selected))
         return items if not path else [_section(path, label, spec, items)]
@@ -702,7 +718,12 @@ def _field(path: list[Any], label: list[str], spec: Mapping[str, Any], value: st
            selected: Optional[str] = None) -> dict[str, Any]:
     """One setting as its editor draws it: label, control, values, help, its commands,
     and -- only while it is the selected field -- its instructions."""
-    choices = spec.get("enum")
+    variants = spec.get("oneOf") or []
+    pairs = ([{"value": _as_text(one["const"]),
+               "label": str(one.get("title") or _as_text(one["const"]))}
+              for one in variants]
+             if variants and all("const" in one for one in variants) else [])
+    choices = pairs or spec.get("enum")
     named = _path_text(path)
     return {
         "name": named,
@@ -712,7 +733,7 @@ def _field(path: list[Any], label: list[str], spec: Mapping[str, Any], value: st
                     "checkbox" if spec.get("type") == "boolean" else "text"),
         "value": value,
         "resolved": resolved,
-        **({"choices": [_as_text(one) for one in choices]} if choices else {}),
+        **({"choices": pairs or [_as_text(one) for one in choices]} if choices else {}),
         "hint": _help(named, spec, required),
         "required": required,
         **({"instructions": _instructions(
@@ -836,12 +857,16 @@ def _path_of(step: str, name: str) -> list[Any]:
     return parts
 
 
-def _spec_at(schema: Mapping[str, Any], path: list[Any]) -> Optional[dict[str, Any]]:
+def _spec_at(schema: Mapping[str, Any], path: list[Any], values: Any = None) -> Optional[dict[str, Any]]:
     """The schema describing the value at ``path``, or None where it describes none."""
     spec: Mapping[str, Any] = schema
     for part in path:
+        spec = settings_shape(spec, values)
+        extra = spec.get("additionalProperties")
         spec = (spec.get("items") if isinstance(part, int)
-                else dict(spec.get("properties") or {}).get(part)) or {}
+                else dict(spec.get("properties") or {}).get(
+                    part, extra if isinstance(extra, Mapping) else None)) or {}
+        values = _value_at(values, [part])
         if not spec:
             return None
     return dict(spec)
