@@ -61,7 +61,7 @@ from rey_lib.logs import (
     log_step_failure,
 )
 from rey_lib.run.run import FAILED, NOT_RUN, SKIPPED, SUCCEEDED
-from rey_lib.workflow.workflow_process import WorkflowProcess
+from rey_lib.workflow.workflow_process import WorkflowProcess, position_at
 from rey_lib.workflow.workflow_step import (
     RUNNING, WorkflowStep, definition_section, fixed_field, form_fields, setting_form,
 )
@@ -122,6 +122,8 @@ class Workflow:
         log: Any = None,
         run_id: Optional[int] = None,
         configured_config: Optional[Mapping[str, Any]] = None,
+        approved: Optional[Mapping[str, Mapping[str, Callable[..., Any]]]] = None,
+        applications: Optional[Iterable[Application]] = None,
     ) -> None:
         """Hold the workflow's governed state and take ownership of its processes.
 
@@ -151,6 +153,13 @@ class Workflow:
         run_id : int | None
             The Application Run id of the application creating this Workflow,
             as that application passes it.
+        approved : Mapping[str, Mapping[str, Callable]] | None
+            Each application's approved implementation catalog, by application
+            name, as hydration was given it: what a step added while editing is
+            bound through (#1325). None where none was given.
+        applications : Iterable[Application] | None
+            The applications hydration was given: what a process added while
+            editing instantiates (#1325). None where none was given.
 
         Raises
         ------
@@ -181,6 +190,12 @@ class Workflow:
         self.runtime = runtime
         self.log = log
         self.run_id = run_id
+        # The approved implementation catalogs a step added while editing is bound
+        # through (#1325), by application name.
+        self._approved: dict[str, Mapping[str, Callable[..., Any]]] = dict(approved or {})
+        # The applications a process added while editing instantiates (#1325), by name.
+        self._applications: dict[str, Application] = {
+            one.name: one for one in (applications or ())}
         for process in processes:
             if process.workflow is not None:
                 raise AppError(
@@ -330,6 +345,8 @@ class Workflow:
             runtime=runtime,
             log=log,
             run_id=run_id,
+            approved=approved,
+            applications=by_name.values(),
         )
 
     @classmethod
@@ -481,6 +498,209 @@ class Workflow:
     def act(self) -> Any:
         """The lock one act is taken under: an operation, and the snapshot answering it."""
         return self._acting
+
+    # -- editing its definition (#1325) --------------------------------------
+
+    def add_process(self, application: str, name: str,
+                    after: Optional[str] = None) -> WorkflowProcess:
+        """Add a process instantiating one of the Workflow's applications.
+
+        Only the working definition changes; it is written when the Workflow is
+        saved. The application is one of those this Workflow was hydrated with;
+        the process is built by the constructor hydration builds each process
+        with, with no configuration and no steps. It goes after the process
+        ``after`` names, or at the end; the order is restated.
+
+        Args:
+            application: The application, by name.
+            name: The process's name: not blank, and no other process has it.
+            after: The process it follows, or None for the end.
+
+        Returns:
+            The process added.
+
+        Raises:
+            AppError: While a direction runs, for a blank or taken name, an
+                ``after`` naming no process, or an application this Workflow was
+                not hydrated with.
+        """
+        self.refuse_edit_while_directing()
+        if not str(name or "").strip():
+            raise AppError(f"workflow '{self.name}': a new process needs a name.")
+        if any(one.name == name for one in self.processes):
+            raise AppError(f"workflow '{self.name}' already has a process '{name}'.")
+        landed = (len(self.processes) if after is None
+                  else self.processes.index(self.process_named(after)) + 1)
+        instantiated = self._applications.get(application)
+        if instantiated is None:
+            raise AppError(
+                f"workflow '{self.name}': application '{application}' is not published "
+                f"for this workflow.")
+        process = WorkflowProcess(name=name, ordinal=0, application=instantiated,
+                                  config=None, steps=())
+        process.workflow = self
+        processes = list(self.processes)
+        processes.insert(landed, process)
+        self.processes = tuple(processes)
+        self.renumber()
+        return process
+
+    def remove_process(self, name: str) -> None:
+        """Remove one process, and the steps it holds, from the working definition.
+
+        Nothing is written: the governed rows go when the Workflow is saved. The
+        steps after it close up, keeping the Workflow-wide order.
+
+        Raises:
+            AppError: While a direction runs, or when no process has that name.
+        """
+        self.refuse_edit_while_directing()
+        process = self.process_named(name)
+        self.processes = tuple(one for one in self.processes if one is not process)
+        process.workflow = None
+        if self.focused_process is process:
+            self.focused_process, self.focused_step = None, None
+        self.renumber()
+
+    def move_process(self, name: str, to: int) -> None:
+        """Move one process to position ``to`` (0-based) among the processes.
+
+        Its steps move with it as a group, in their own order. Moving it where it
+        is changes nothing. Nothing is written.
+
+        Raises:
+            AppError: While a direction runs, when no process has that name, or
+                ``to`` names no position.
+        """
+        self.refuse_edit_while_directing()
+        process = self.process_named(name)
+        position = position_at(to, len(self.processes), f"workflow '{self.name}': process")
+        if self.processes.index(process) == position:
+            return
+        ordered = [one for one in self.processes if one is not process]
+        ordered.insert(position, process)
+        self.processes = tuple(ordered)
+        self.renumber()
+
+    def process_named(self, name: str) -> WorkflowProcess:
+        """This Workflow's process of that name.
+
+        Raises:
+            AppError: When it holds none.
+        """
+        process = next((one for one in self.processes if one.name == name), None)
+        if process is None:
+            raise AppError(f"workflow '{self.name}' holds no process '{name}'.")
+        return process
+
+    def refuse_edit_while_directing(self) -> None:
+        """Refuse an edit of the definition while a direction runs (#1325).
+
+        Raises:
+            AppError: While a direction runs.
+        """
+        if self.directing:
+            raise AppError(f"workflow '{self.name}' cannot be edited while it runs.")
+
+    def approved_for(self, application: str) -> Mapping[str, Callable[..., Any]]:
+        """The approved implementation catalog of one application, as hydration had it."""
+        return self._approved.get(application) or {}
+
+    def adopt(self, step: WorkflowStep) -> None:
+        """Take a step added while editing as hydration takes each step: observed,
+        its configured settings resolved through this Workflow's paths, its setting
+        references read through Control where it offers them (#1325, #1330)."""
+        step.observe(self)
+        step.bind_resolution(self._resolved_settings)
+        step.settings = self._resolved_settings(step.configured_settings)
+        read = getattr(self.control, "references", None)
+        if callable(read):
+            step.bind_references(
+                lambda application=step.process.application.name,
+                operation=step.operation.name: read(application, operation))
+
+    def renumber(self) -> None:
+        """Restate the order after a structural edit, and tell the observers.
+
+        Processes are numbered 1.. in their order; steps 1.. Workflow-wide, each
+        process's steps together and in their own order. ``steps`` follows.
+        """
+        ordered = []
+        for at, process in enumerate(self.processes, start=1):
+            process.ordinal = at
+            ordered.extend(process.steps)
+        for at, step in enumerate(ordered, start=1):
+            step.ordinal = at
+        self.steps = {step.id: step for step in ordered}
+        if self.focused_step is not None and self.focused_step.id not in self.steps:
+            self.focused_step = None
+        self._changed()
+
+    # -- saving its definition (#1325) ---------------------------------------
+
+    def save(self) -> None:
+        """Save the complete working definition to the governed workflow it came from.
+
+        THE WORKFLOW SAVES ITSELF, as the Loader's Transform does: its config
+        (each step's apply_only and always_run as ``execution.steps``), every
+        process and every step in order, as configured -- {} expressions intact --
+        each with the governed id it holds (None for one added while editing),
+        through its own Control. The database owns how they become rows: updated,
+        inserted, or deleted when not sent. The ids it answers with, in order,
+        become the processes' and steps' governed ids.
+
+        Raises:
+            AppError: While a direction runs, or when the answer does not account
+                for every process and step.
+            ConfigError: When this Workflow holds no Control to save through.
+        """
+        self.refuse_edit_while_directing()
+        if self.control is None:
+            raise ConfigError(f"workflow '{self.name}' has no control database to save to.")
+        config = deepcopy(self.configured_config or {})
+        execution = dict(config.get("execution") or {})
+        execution["steps"] = {
+            step.id: {"apply_only": step.apply_only, "always_run": step.always_run}
+            for step in self.steps.values()
+        }
+        config["execution"] = execution
+        definition = {"config": config, "processes": [
+            {
+                "workflow_process_id": process.governed_id,
+                "name": process.name,
+                "application": process.application.name,
+                "config": deepcopy(process.configured_config),
+                "steps": [
+                    {
+                        "workflow_step_id": step.governed_id,
+                        "name": step.id,
+                        "operation": step.operation.name,
+                        "process_name": step.process_name,
+                        "label": step.label,
+                        "settings": deepcopy(step.configured_settings),
+                    }
+                    for step in process.steps
+                ],
+            }
+            for process in self.processes
+        ]}
+        saved = self.control.update_workflow(self.workflow_id, definition)
+        steps = list(self.steps.values())
+        if (len(saved["processes"]) != len(self.processes)
+                or len(saved["steps"]) != len(steps)):
+            raise AppError(
+                f"workflow '{self.name}': the save answered {len(saved['processes'])} "
+                f"processes and {len(saved['steps'])} steps for {len(self.processes)} "
+                f"and {len(steps)}.")
+        for process, governed in zip(self.processes, saved["processes"]):
+            process.governed_id = governed
+        for step, governed in zip(steps, saved["steps"]):
+            step.governed_id = governed
+        self.configured_config = config
+        resolved = dict(self.config or {})
+        resolved["execution"] = deepcopy(execution)
+        self.config = resolved
+        self._changed()
 
     # -- its observers -------------------------------------------------------
 

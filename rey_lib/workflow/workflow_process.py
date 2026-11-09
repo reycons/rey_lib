@@ -37,7 +37,18 @@ from rey_lib.workflow.workflow_step import (
 if TYPE_CHECKING:
     from rey_lib.workflow.workflow import Workflow
 
-__all__ = ["WorkflowProcess"]
+__all__ = ["WorkflowProcess", "position_at"]
+
+
+def position_at(to: Any, count: int, what: str) -> int:
+    """``to`` as a 0-based position among ``count`` parts, or a refusal (#1325).
+
+    Raises:
+        AppError: When ``to`` is not a whole number naming one of the positions.
+    """
+    if isinstance(to, bool) or not isinstance(to, int) or not 0 <= to < count:
+        raise AppError(f"{what}: no position {to!r} among {count}.")
+    return to
 
 
 class WorkflowProcess:
@@ -133,6 +144,112 @@ class WorkflowProcess:
         for step in self.steps:
             step.process = self
         self.workflow: Optional["Workflow"] = None
+
+    # -- editing its steps (#1325) -------------------------------------------
+
+    def add_step(self, operation: str, name: str, after: Optional[str] = None) -> WorkflowStep:
+        """Add a step instantiating one of its application's operations.
+
+        Only the working definition changes; it is written when the Workflow is
+        saved. The step is bound through the Workflow's approved implementation
+        catalog, its settings start from the operation's contract_sample, and
+        apply_only and always_run start false. It goes after the step ``after``
+        names, which must be one of this process's, or at the end of this
+        process's steps; the Workflow-wide order is restated.
+
+        Args:
+            operation: The operation, as the application publishes it.
+            name: The step's name: not blank, and no other step of the Workflow
+                has it.
+            after: The step of this process it follows, or None for the end.
+
+        Returns:
+            The step added.
+
+        Raises:
+            AppError: While the Workflow runs, outside a Workflow, for a blank or
+                taken name, an ``after`` this process does not hold, or an
+                operation the application does not publish or approve.
+        """
+        workflow = self._editing()
+        if not str(name or "").strip():
+            raise AppError(f"process '{self.name}': a new step needs a name.")
+        if name in workflow.steps:
+            raise AppError(f"workflow '{workflow.name}' already has a step '{name}'.")
+        landed = len(self.steps) if after is None else self.steps.index(self.step_named(after)) + 1
+        published = next((one for one in self.application.workflow_operations
+                          if one.name == operation), None)
+        sample = deepcopy(dict(published.contract_sample)) if published is not None else {}
+        step = WorkflowStep(
+            id=name,
+            process_name=self.name,
+            label="",
+            ordinal=0,
+            application=self.application,
+            operation_name=operation,
+            approved=workflow.approved_for(self.application.name),
+            settings=sample,
+            configured_settings=sample,
+            apply_only=False,
+            always_run=False,
+        )
+        step.process = self
+        steps = list(self.steps)
+        steps.insert(landed, step)
+        self.steps = tuple(steps)
+        workflow.adopt(step)
+        workflow.renumber()
+        return step
+
+    def remove_step(self, name: str) -> None:
+        """Remove one of its steps from the working definition; nothing is written.
+
+        Raises:
+            AppError: While the Workflow runs, outside a Workflow, or when this
+                process holds no step of that name.
+        """
+        workflow = self._editing()
+        step = self.step_named(name)
+        self.steps = tuple(one for one in self.steps if one is not step)
+        workflow.renumber()
+
+    def move_step(self, name: str, to: int) -> None:
+        """Move one of its steps to position ``to`` (0-based) among its own steps.
+
+        A step moves within its process only. Moving it where it is changes
+        nothing. Nothing is written.
+
+        Raises:
+            AppError: While the Workflow runs, outside a Workflow, when this
+                process holds no step of that name, or ``to`` names no position.
+        """
+        workflow = self._editing()
+        step = self.step_named(name)
+        position = position_at(to, len(self.steps), f"process '{self.name}': step")
+        if self.steps.index(step) == position:
+            return
+        steps = [one for one in self.steps if one is not step]
+        steps.insert(position, step)
+        self.steps = tuple(steps)
+        workflow.renumber()
+
+    def step_named(self, name: str) -> WorkflowStep:
+        """This process's step of that name.
+
+        Raises:
+            AppError: When it holds none.
+        """
+        step = next((one for one in self.steps if one.id == name), None)
+        if step is None:
+            raise AppError(f"process '{self.name}' holds no step '{name}'.")
+        return step
+
+    def _editing(self) -> "Workflow":
+        """The Workflow this process is edited within, while it may be edited."""
+        if self.workflow is None:
+            raise AppError(f"process '{self.name}' belongs to no workflow to edit it in.")
+        self.workflow.refuse_edit_while_directing()
+        return self.workflow
 
     def data_source(self, name: str) -> Namespace:
         """One of this process's data sources, by name (backlogs 1032, 1043).

@@ -29,7 +29,7 @@ from rey_lib.config.config_paths import (
 )
 from rey_lib.config.inventory import to_plain_data
 from rey_lib.control.control import Control
-from rey_lib.errors.error_utils import AppError
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.workflow import workflow as workflow_module
 from rey_lib.workflow.workflow import Workflow
 from rey_lib.workflow.workflow_process import WorkflowProcess
@@ -602,6 +602,293 @@ class TestALiveStepIsEditedThroughItsContract:
                 export.update("limit", "1")
         finally:
             workflow._running.release()
+
+
+def _two_processes() -> Workflow:
+    """Workflow ``wf``: process fixture_app (export, commit) then process second (only, s);
+    ``load`` starts from a contract_sample."""
+    application = Application(name="fixture_app", workflow_operations=(
+        ApplicationOperation(name="load", contract_definition=_CONTRACT,
+                             contract_sample={"output_root": "{root}/out"}),
+        ApplicationOperation(name="commit", contract_definition={"$schema": _SCHEMA,
+                                                                 "type": "object"}),
+    ))
+    second = {"workflow_process_id": 20, "process_name": "second", "process_ordinal": 2}
+    rows = [
+        *_rows(),
+        _row(1, "wf", "only", 3, "commit", {}, **second),
+        _row(1, "wf", "s", 4, "commit", {}, **second),
+    ]
+    return Workflow.hydrate(rows, applications=[application], approved=_APPROVED,
+                            control=RecordingControl())
+
+
+def _order(workflow: Workflow) -> list[tuple[str, int, str, int]]:
+    """Each step as (process, process ordinal, step, step ordinal), Workflow-wide."""
+    return [(step.process.name, step.process.ordinal, step.id, step.ordinal)
+            for step in workflow.steps.values()]
+
+
+class TestTheWorkflowDefinitionIsEditedLive:
+    """#1325: processes and steps are added, removed and moved on the live objects --
+    the working definition only -- and the Workflow-wide order is restated each time."""
+
+    def test_a_step_is_added_after_a_step_of_its_process(self) -> None:
+        workflow = _two_processes()
+        first = workflow.process_named("fixture_app")
+
+        added = first.add_step("load", "extract", after="export")
+
+        assert _order(workflow) == [
+            ("fixture_app", 1, "export", 1), ("fixture_app", 1, "extract", 2),
+            ("fixture_app", 1, "commit", 3), ("second", 2, "only", 4), ("second", 2, "s", 5)]
+        assert added.governed_id is None
+        assert (added.apply_only, added.always_run) == (False, False)
+        assert added.configured_settings == {"output_root": "{root}/out"}
+        assert added.settings == {"output_root": "/installations/rey/out"}
+        assert added.process is first and workflow.steps["extract"] is added
+
+    def test_with_no_after_a_step_ends_its_process(self) -> None:
+        workflow = _two_processes()
+
+        workflow.process_named("fixture_app").add_step("commit", "last")
+
+        assert [one[2] for one in _order(workflow)] == ["export", "commit", "last", "only", "s"]
+
+    def test_an_added_step_is_edited_like_any_other(self) -> None:
+        workflow = _two_processes()
+        added = workflow.process_named("fixture_app").add_step("load", "extract")
+
+        added.update("output_root", "{data}/x")
+
+        assert added.settings["output_root"] == "/installations/rey/data/x"
+
+    @pytest.mark.parametrize(("operation", "name", "after", "refusal"), [
+        ("load", " ", None, "needs a name"),
+        ("load", "only", None, "already has a step 'only'"),
+        ("load", "new", "only", "holds no step 'only'"),
+        ("nope", "new", None, "does not publish"),
+    ])
+    def test_an_add_is_refused_and_changes_nothing(self, operation: str, name: str,
+                                                   after: str | None, refusal: str) -> None:
+        workflow = _two_processes()
+        before = _order(workflow)
+
+        with pytest.raises(AppError, match=refusal):
+            workflow.process_named("fixture_app").add_step(operation, name, after=after)
+        assert _order(workflow) == before
+
+    def test_a_step_is_removed_and_the_order_closes_up(self) -> None:
+        workflow = _two_processes()
+
+        workflow.process_named("fixture_app").remove_step("export")
+
+        assert _order(workflow) == [
+            ("fixture_app", 1, "commit", 1), ("second", 2, "only", 2), ("second", 2, "s", 3)]
+        with pytest.raises(AppError, match="holds no step 'only'"):
+            workflow.process_named("fixture_app").remove_step("only")
+
+    def test_a_step_moves_within_its_process(self) -> None:
+        workflow = _two_processes()
+        second = workflow.process_named("second")
+
+        second.move_step("s", 0)
+
+        assert [one[2] for one in _order(workflow)] == ["export", "commit", "s", "only"]
+        with pytest.raises(AppError, match="no position 2 among 2"):
+            second.move_step("s", 2)
+        with pytest.raises(AppError, match="holds no step 'export'"):
+            second.move_step("export", 0)
+
+    def test_a_process_is_added_after_a_process_and_takes_steps(self) -> None:
+        workflow = _two_processes()
+
+        added = workflow.add_process("fixture_app", "middle", after="fixture_app")
+        added.add_step("commit", "tidy")
+
+        assert [(one.name, one.ordinal) for one in workflow.processes] == [
+            ("fixture_app", 1), ("middle", 2), ("second", 3)]
+        assert _order(workflow) == [
+            ("fixture_app", 1, "export", 1), ("fixture_app", 1, "commit", 2),
+            ("middle", 2, "tidy", 3), ("second", 3, "only", 4), ("second", 3, "s", 5)]
+        assert added.workflow is workflow and added.governed_id is None
+        assert added.application.name == "fixture_app" and added.config is None
+
+    def test_with_no_after_a_process_ends_the_workflow(self) -> None:
+        workflow = _two_processes()
+
+        workflow.add_process("fixture_app", "last")
+
+        assert [one.name for one in workflow.processes] == ["fixture_app", "second", "last"]
+
+    @pytest.mark.parametrize(("application", "name", "after", "refusal"), [
+        ("fixture_app", "", None, "needs a name"),
+        ("fixture_app", "second", None, "already has a process 'second'"),
+        ("fixture_app", "new", "nowhere", "holds no process 'nowhere'"),
+        ("other_app", "new", None, "'other_app' is not published for this workflow"),
+    ])
+    def test_a_process_add_is_refused_and_changes_nothing(
+            self, application: str, name: str, after: str | None, refusal: str) -> None:
+        workflow = _two_processes()
+        before = [one.name for one in workflow.processes]
+
+        with pytest.raises(AppError, match=refusal):
+            workflow.add_process(application, name, after=after)
+        assert [one.name for one in workflow.processes] == before
+
+    def test_a_process_is_removed_with_its_steps(self) -> None:
+        workflow = _two_processes()
+        removed = workflow.process_named("fixture_app")
+
+        workflow.remove_process("fixture_app")
+
+        assert _order(workflow) == [("second", 1, "only", 1), ("second", 1, "s", 2)]
+        assert removed.workflow is None
+        with pytest.raises(AppError, match="holds no process 'fixture_app'"):
+            workflow.remove_process("fixture_app")
+
+    def test_a_process_moves_with_its_steps_in_their_order(self) -> None:
+        workflow = _two_processes()
+
+        workflow.move_process("second", 0)
+
+        assert _order(workflow) == [
+            ("second", 1, "only", 1), ("second", 1, "s", 2),
+            ("fixture_app", 2, "export", 3), ("fixture_app", 2, "commit", 4)]
+        assert [one.name for one in workflow.processes] == ["second", "fixture_app"]
+
+    def test_the_definition_is_not_edited_while_it_runs(self) -> None:
+        workflow = _two_processes()
+        before = _order(workflow)
+
+        workflow._running.acquire()
+        try:
+            with pytest.raises(AppError, match="while it runs"):
+                workflow.process_named("fixture_app").add_step("load", "extract")
+            with pytest.raises(AppError, match="while it runs"):
+                workflow.move_process("second", 0)
+        finally:
+            workflow._running.release()
+        assert _order(workflow) == before
+
+    def test_the_projection_follows_the_edit(self) -> None:
+        workflow = _two_processes()
+
+        workflow.process_named("second").add_step("load", "extract", after="only")
+
+        actions = workflow.actions()
+        assert [key for key in actions if key.startswith("step:")] == [
+            "step:1", "step:2", "step:3", "step:4", "step:5"]
+        assert actions["step:4"][1]["command"] == {"command": "direct", "to_step": "extract"}
+
+
+class _SavingControl(RecordingControl):
+    """Answers update_workflow as the routine does: sent ids kept, new rows minted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved: list[tuple[int, dict[str, Any]]] = []
+        self._minted = 900
+
+    def update_workflow(self, workflow_id: int, definition: dict[str, Any]) -> dict[str, list[int]]:
+        self.saved.append((workflow_id, definition))
+
+        def kept(governed: Any) -> int:
+            if governed is not None:
+                return int(governed)
+            self._minted += 1
+            return self._minted
+
+        processes = [kept(one["workflow_process_id"]) for one in definition["processes"]]
+        steps = [kept(step["workflow_step_id"])
+                 for one in definition["processes"] for step in one["steps"]]
+        return {"processes": processes, "steps": steps}
+
+
+def _saving() -> tuple[Workflow, _SavingControl]:
+    """``_two_processes``, saving through a control that answers as the routine does."""
+    workflow = _two_processes()
+    control = _SavingControl()
+    workflow.control = control
+    return workflow, control
+
+
+class TestTheWorkflowSavesItsCompleteDefinition:
+    """#1325: Workflow.save sends the whole working definition through one governed
+    call -- configured values, order, ids (None for new) -- and takes the answered ids."""
+
+    def test_editing_writes_nothing(self) -> None:
+        workflow, control = _saving()
+
+        workflow.process_named("second").add_step("load", "extract", after="only")
+        workflow.process_named("fixture_app").remove_step("export")
+
+        assert control.saved == []
+
+    def test_the_complete_definition_is_sent_as_configured(self) -> None:
+        workflow, control = _saving()
+        workflow.process_named("second").add_step("load", "extract", after="only")
+        workflow.process_named("fixture_app").remove_step("export")
+        workflow.process_named("fixture_app").steps[0].always_run = False
+
+        workflow.save()
+
+        ((workflow_id, definition),) = control.saved
+        assert workflow_id == 1
+        assert [(one["workflow_process_id"], one["name"], one["application"])
+                for one in definition["processes"]] == [
+            (10, "fixture_app", "fixture_app"), (20, "second", "fixture_app")]
+        steps = [step for one in definition["processes"] for step in one["steps"]]
+        assert [(one["workflow_step_id"], one["name"], one["operation"]) for one in steps] == [
+            (102, "commit", "commit"), (103, "only", "commit"),
+            (None, "extract", "load"), (104, "s", "commit")]
+        assert steps[0]["settings"] == {"repo_root": "{root}/db_backups/ddl"}
+        assert steps[2]["settings"] == {"output_root": "{root}/out"}
+        assert definition["processes"][0]["config"] == {"app": {"records_path": "{data}/records"}}
+        execution = definition["config"]["execution"]
+        assert execution["steps"] == {
+            "commit": {"apply_only": False, "always_run": False},
+            "only": {"apply_only": False, "always_run": False},
+            "extract": {"apply_only": False, "always_run": False},
+            "s": {"apply_only": False, "always_run": False},
+        }
+        assert (execution["full"], execution["dry_run"]) == (True, True)
+        assert definition["config"]["paths"][0] == {"name": "root", "path": "/installations/rey"}
+
+    def test_the_answered_ids_become_the_governed_ids(self) -> None:
+        workflow, _ = _saving()
+        added = workflow.add_process("fixture_app", "middle")
+        step = added.add_step("commit", "tidy")
+
+        workflow.save()
+
+        assert (added.governed_id, step.governed_id) == (901, 902)
+        assert [one.governed_id for one in workflow.processes] == [10, 20, 901]
+        assert workflow.configured_config["execution"]["steps"]["tidy"] == {
+            "apply_only": False, "always_run": False}
+        assert workflow.config["execution"]["steps"]["tidy"] == {
+            "apply_only": False, "always_run": False}
+
+    def test_a_short_answer_is_refused(self) -> None:
+        workflow, control = _saving()
+        control.update_workflow = lambda _id, _definition: {"processes": [10], "steps": []}
+
+        with pytest.raises(AppError, match="answered 1 processes and 0 steps for 2 and 4"):
+            workflow.save()
+
+    def test_it_is_not_saved_while_it_runs_or_without_a_control(self) -> None:
+        workflow, control = _saving()
+
+        workflow._running.acquire()
+        try:
+            with pytest.raises(AppError, match="while it runs"):
+                workflow.save()
+        finally:
+            workflow._running.release()
+        assert control.saved == []
+        workflow.control = None
+        with pytest.raises(ConfigError, match="no control database"):
+            workflow.save()
 
 
 _SOURCES_CONTRACT = {

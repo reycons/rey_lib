@@ -1331,6 +1331,24 @@ class Control:
             saved = json.loads(saved)
         return [int(one) for one in (saved or [])]
 
+    def update_workflow(self, workflow_id: int, definition: dict[str, Any],
+                        required: bool = True) -> dict[str, list[int]]:
+        """Save a Workflow's complete definition; answer the saved ids in order (#1325).
+
+        The definition is handed over exactly as given; the routine owns how it
+        becomes rows -- updated by id, inserted without one, deleted when not sent.
+        Answers ``{"processes": [...], "steps": [...]}``, each in saved order.
+        """
+        saved = self._call("update_workflow", {
+            "workflow_id": int(workflow_id),
+            "definition": definition,
+        }, required=required)
+        if isinstance(saved, str):
+            saved = json.loads(saved)
+        saved = dict(saved or {})
+        return {part: [int(one) for one in (saved.get(part) or [])]
+                for part in ("processes", "steps")}
+
     def save_transform_target(self, transform_id: int, transform_target_id: Optional[int],
                               declaration: Mapping[str, Any], required: bool = True) -> int:
         """Save one of a Transform's Targets exactly as it holds it; answer its saved id (#1334).
