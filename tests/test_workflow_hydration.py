@@ -623,6 +623,11 @@ def _two_processes() -> Workflow:
                             control=RecordingControl())
 
 
+def _process(workflow: Workflow, name: str) -> WorkflowProcess:
+    """The Workflow's process of that name."""
+    return next(one for one in workflow.processes if one.name == name)
+
+
 def _order(workflow: Workflow) -> list[tuple[str, int, str, int]]:
     """Each step as (process, process ordinal, step, step ordinal), Workflow-wide."""
     return [(step.process.name, step.process.ordinal, step.id, step.ordinal)
@@ -635,7 +640,7 @@ class TestTheWorkflowDefinitionIsEditedLive:
 
     def test_a_step_is_added_after_a_step_of_its_process(self) -> None:
         workflow = _two_processes()
-        first = workflow.process_named("fixture_app")
+        first = _process(workflow, "fixture_app")
 
         added = first.add_step("load", "extract", after="export")
 
@@ -651,13 +656,13 @@ class TestTheWorkflowDefinitionIsEditedLive:
     def test_with_no_after_a_step_ends_its_process(self) -> None:
         workflow = _two_processes()
 
-        workflow.process_named("fixture_app").add_step("commit", "last")
+        _process(workflow, "fixture_app").add_step("commit", "last")
 
         assert [one[2] for one in _order(workflow)] == ["export", "commit", "last", "only", "s"]
 
     def test_an_added_step_is_edited_like_any_other(self) -> None:
         workflow = _two_processes()
-        added = workflow.process_named("fixture_app").add_step("load", "extract")
+        added = _process(workflow, "fixture_app").add_step("load", "extract")
 
         added.update("output_root", "{data}/x")
 
@@ -675,22 +680,22 @@ class TestTheWorkflowDefinitionIsEditedLive:
         before = _order(workflow)
 
         with pytest.raises(AppError, match=refusal):
-            workflow.process_named("fixture_app").add_step(operation, name, after=after)
+            _process(workflow, "fixture_app").add_step(operation, name, after=after)
         assert _order(workflow) == before
 
     def test_a_step_is_removed_and_the_order_closes_up(self) -> None:
         workflow = _two_processes()
 
-        workflow.process_named("fixture_app").remove_step("export")
+        _process(workflow, "fixture_app").remove_step("export")
 
         assert _order(workflow) == [
             ("fixture_app", 1, "commit", 1), ("second", 2, "only", 2), ("second", 2, "s", 3)]
         with pytest.raises(AppError, match="holds no step 'only'"):
-            workflow.process_named("fixture_app").remove_step("only")
+            _process(workflow, "fixture_app").remove_step("only")
 
     def test_a_step_moves_within_its_process(self) -> None:
         workflow = _two_processes()
-        second = workflow.process_named("second")
+        second = _process(workflow, "second")
 
         second.move_step("s", 0)
 
@@ -738,7 +743,7 @@ class TestTheWorkflowDefinitionIsEditedLive:
 
     def test_a_process_is_removed_with_its_steps(self) -> None:
         workflow = _two_processes()
-        removed = workflow.process_named("fixture_app")
+        removed = _process(workflow, "fixture_app")
 
         workflow.remove_process("fixture_app")
 
@@ -764,7 +769,7 @@ class TestTheWorkflowDefinitionIsEditedLive:
         workflow._running.acquire()
         try:
             with pytest.raises(AppError, match="while it runs"):
-                workflow.process_named("fixture_app").add_step("load", "extract")
+                _process(workflow, "fixture_app").add_step("load", "extract")
             with pytest.raises(AppError, match="while it runs"):
                 workflow.move_process("second", 0)
         finally:
@@ -774,7 +779,7 @@ class TestTheWorkflowDefinitionIsEditedLive:
     def test_the_projection_follows_the_edit(self) -> None:
         workflow = _two_processes()
 
-        workflow.process_named("second").add_step("load", "extract", after="only")
+        _process(workflow, "second").add_step("load", "extract", after="only")
 
         actions = workflow.actions()
         assert [key for key in actions if key.startswith("step:")] == [
@@ -820,16 +825,16 @@ class TestTheWorkflowSavesItsCompleteDefinition:
     def test_editing_writes_nothing(self) -> None:
         workflow, control = _saving()
 
-        workflow.process_named("second").add_step("load", "extract", after="only")
-        workflow.process_named("fixture_app").remove_step("export")
+        _process(workflow, "second").add_step("load", "extract", after="only")
+        _process(workflow, "fixture_app").remove_step("export")
 
         assert control.saved == []
 
     def test_the_complete_definition_is_sent_as_configured(self) -> None:
         workflow, control = _saving()
-        workflow.process_named("second").add_step("load", "extract", after="only")
-        workflow.process_named("fixture_app").remove_step("export")
-        workflow.process_named("fixture_app").steps[0].always_run = False
+        _process(workflow, "second").add_step("load", "extract", after="only")
+        _process(workflow, "fixture_app").remove_step("export")
+        _process(workflow, "fixture_app").steps[0].always_run = False
 
         workflow.save()
 

@@ -37,7 +37,7 @@ from rey_lib.workflow.workflow_step import (
 if TYPE_CHECKING:
     from rey_lib.workflow.workflow import Workflow
 
-__all__ = ["WorkflowProcess", "position_at"]
+__all__ = ["WorkflowProcess"]
 
 
 def position_at(to: Any, count: int, what: str) -> int:
@@ -176,7 +176,7 @@ class WorkflowProcess:
             raise AppError(f"process '{self.name}': a new step needs a name.")
         if name in workflow.steps:
             raise AppError(f"workflow '{workflow.name}' already has a step '{name}'.")
-        landed = len(self.steps) if after is None else self.steps.index(self.step_named(after)) + 1
+        landed = len(self.steps) if after is None else self.steps.index(self._step_named(after)) + 1
         published = next((one for one in self.application.workflow_operations
                           if one.name == operation), None)
         sample = deepcopy(dict(published.contract_sample)) if published is not None else {}
@@ -209,7 +209,7 @@ class WorkflowProcess:
                 process holds no step of that name.
         """
         workflow = self._editing()
-        step = self.step_named(name)
+        step = self._step_named(name)
         self.steps = tuple(one for one in self.steps if one is not step)
         workflow.renumber()
 
@@ -224,7 +224,7 @@ class WorkflowProcess:
                 process holds no step of that name, or ``to`` names no position.
         """
         workflow = self._editing()
-        step = self.step_named(name)
+        step = self._step_named(name)
         position = position_at(to, len(self.steps), f"process '{self.name}': step")
         if self.steps.index(step) == position:
             return
@@ -233,7 +233,7 @@ class WorkflowProcess:
         self.steps = tuple(steps)
         workflow.renumber()
 
-    def step_named(self, name: str) -> WorkflowStep:
+    def _step_named(self, name: str) -> WorkflowStep:
         """This process's step of that name.
 
         Raises:

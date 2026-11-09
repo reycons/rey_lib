@@ -530,7 +530,7 @@ class Workflow:
         if any(one.name == name for one in self.processes):
             raise AppError(f"workflow '{self.name}' already has a process '{name}'.")
         landed = (len(self.processes) if after is None
-                  else self.processes.index(self.process_named(after)) + 1)
+                  else self.processes.index(self._process_named(after)) + 1)
         instantiated = self._applications.get(application)
         if instantiated is None:
             raise AppError(
@@ -555,7 +555,7 @@ class Workflow:
             AppError: While a direction runs, or when no process has that name.
         """
         self.refuse_edit_while_directing()
-        process = self.process_named(name)
+        process = self._process_named(name)
         self.processes = tuple(one for one in self.processes if one is not process)
         process.workflow = None
         if self.focused_process is process:
@@ -573,7 +573,7 @@ class Workflow:
                 ``to`` names no position.
         """
         self.refuse_edit_while_directing()
-        process = self.process_named(name)
+        process = self._process_named(name)
         position = position_at(to, len(self.processes), f"workflow '{self.name}': process")
         if self.processes.index(process) == position:
             return
@@ -582,7 +582,7 @@ class Workflow:
         self.processes = tuple(ordered)
         self.renumber()
 
-    def process_named(self, name: str) -> WorkflowProcess:
+    def _process_named(self, name: str) -> WorkflowProcess:
         """This Workflow's process of that name.
 
         Raises:
