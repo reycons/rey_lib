@@ -314,6 +314,8 @@ class Transform:
         manifest = source.manifest() if source is not None else None
         if manifest is not None:
             manifest.populate_transform(built)
+            # ITS TARGET IS ITS OWN (#1334): restored from its saved Targets.
+            built._restore_target(control)
         return built
 
     def declaration(self) -> dict[str, Any]:
@@ -749,15 +751,17 @@ class Transform:
     def select_saved_setting(self, ctx: Any, transform_id: Any) -> list[Any]:
         """Make one saved setting the active configuration, in memory.
 
-        The Source's governed read selects the transform -- nothing is read --
-        and rehydrates the Source and this Transform.
+        The Source's governed read selects the transform and rehydrates the Source
+        and this Transform; this Transform's Target is then restored from the
+        selected transform's saved Targets (#1334), the one read made.
 
         Args:
-            ctx: The runtime context. Unused: nothing is read.
+            ctx: The runtime context, whose control database the saved Targets
+                are read through.
             transform_id: The saved setting, by its transform id.
 
         Returns:
-            The other objects it changed: its Source.
+            The other objects it changed: its Source, and its Target.
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed file.
@@ -775,7 +779,7 @@ class Transform:
             ) from exc
         manifest.select_transform(chosen)
         manifest.populate(self._source, self)
-        return [self._source]
+        return [self._source, *self._restore_target(self._saved_settings_control(ctx))]
 
     def new_saved_setting(self, ctx: Any) -> list[Any]:
         """Create a saved setting from the selected one, select it, and rehydrate both objects.
@@ -784,15 +788,16 @@ class Transform:
             ctx: The runtime context, whose control database is written.
 
         Returns:
-            The other objects it changed: its Source.
+            The other objects it changed: its Source, and its Target (#1334).
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed file.
             ConfigError: If the runtime has no control database.
         """
         manifest = self._governed_manifest()
-        manifest.new_transform(self._saved_settings_control(ctx), self._source, self)
-        return [self._source]
+        control = self._saved_settings_control(ctx)
+        manifest.new_transform(control, self._source, self)
+        return [self._source, *self._restore_target(control)]
 
     def delete_saved_setting(self, ctx: Any) -> list[Any]:
         """Delete the selected saved setting, resolve the next, and rehydrate both objects.
@@ -801,7 +806,7 @@ class Transform:
             ctx: The runtime context, whose control database is written.
 
         Returns:
-            The other objects it changed: its Source.
+            The other objects it changed: its Source, and its Target (#1334).
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed
@@ -809,8 +814,26 @@ class Transform:
             ConfigError: If the runtime has no control database.
         """
         manifest = self._governed_manifest()
-        manifest.delete_transform(self._saved_settings_control(ctx), self._source, self)
-        return [self._source]
+        control = self._saved_settings_control(ctx)
+        manifest.delete_transform(control, self._source, self)
+        return [self._source, *self._restore_target(control)]
+
+    def _restore_target(self, control: Any) -> list[Any]:
+        """Give this Transform's Target its default saved Target (#1334); what changed.
+
+        THE TRANSFORM OWNS ITS TARGETS: once its governed read has given it its
+        stored identity, it hands that to its Target, which restores itself from
+        the Transform's saved Targets and saves under it from then on. Nothing
+        changes without a Target, a Control, or a governed transform.
+        """
+        persistence = self._values.get("persistence")
+        if self._target is None or control is None or not _held(persistence):
+            return []
+        transform_id = dict(persistence).get("transform_id")
+        if transform_id is None:
+            return []
+        self._target.restore_saved(control, int(transform_id))
+        return [self._target]
 
     def _governed_manifest(self) -> Any:
         """The governed read of the Source this Transform references, or a refusal."""

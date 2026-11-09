@@ -351,6 +351,8 @@ class ManifestSource:
         self.resolved_query_sql: Optional[str] = chosen.get("resolved_query_sql")
         #: The governed query row the selected transform's SQL template is in.
         self.transform_query_id: Optional[int] = _as_int(chosen.get("transform_query_id"))
+        #: The connection saved with that query (#1334), or None where none was.
+        self.query_connection_name: Optional[str] = chosen.get("query_connection_name") or None
         #: The manifest's live mutations, each with its path and the selected
         #: transform's resolved SQL. Unresolved: the mutations, with no SQL.
         self.mutation_choices: list[dict[str, Any]] = [
@@ -778,6 +780,10 @@ class ManifestSource:
         # governing type where one is active. Its own configuration, not context.
         source.select("database")
         source.update("statement", self.resolved_query_sql or "")
+        # ITS SAVED CONNECTION (#1334), where one was saved with the query; a
+        # query saved with none leaves the Source's connection as it is.
+        if self.query_connection_name:
+            source.update("source-connection", self.query_connection_name)
         source.update("file", self.path or "")
         source.update("file-manifest-id", str(self.file_manifest_id))
         source.update("file-mutation-id", str(self.file_mutation_id))

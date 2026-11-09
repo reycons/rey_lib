@@ -55,7 +55,8 @@ class _Control:
     def maintain_transform(self, file_type_id: Any, **given: Any) -> None:
         self.maintained.append((file_type_id, given))
 
-    def update_transform_query_sql(self, transform_query_id: Any, query_sql: Any) -> None:
+    def update_transform_query_sql(self, transform_query_id: Any, query_sql: Any,
+                                   connection_name: Any = None) -> None:
         self.queries.append((transform_query_id, query_sql))
 
     def update_transform_columns(self, _transform_id: Any, entries: list[Any]) -> list[int]:

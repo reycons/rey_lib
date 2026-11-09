@@ -355,6 +355,14 @@ class TestTheSourceIsAnOrdinaryDatabaseSource:
     def test_the_mutation_choices_are_context_as_returned(self) -> None:
         assert _chosen_from().governed_context()["mutation_choices"] == _CHOICES
 
+    def test_the_connection_saved_with_its_query_is_its_connection(self) -> None:
+        """#1334: the read carries the saved connection; the Source holds it."""
+        assert _chosen_from(query_connection_name="data_engine").value(
+            "source-connection") == "data_engine"
+
+    def test_a_query_saved_with_no_connection_sets_none(self) -> None:
+        assert _chosen_from().value("source-connection") is None
+
 
 class TestChoosingAMutation:
 
@@ -381,10 +389,11 @@ class _Writer:
     """Records what a save hands the database, and does nothing else."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[Any, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
 
-    def update_transform_query_sql(self, transform_query_id: Any, query_sql: Any) -> None:
-        self.calls.append((transform_query_id, query_sql))
+    def update_transform_query_sql(self, transform_query_id: Any, query_sql: Any,
+                                   connection_name: Any = None) -> None:
+        self.calls.append((transform_query_id, query_sql, connection_name))
 
 
 class TestSavingTheWorkingQuery:
@@ -403,7 +412,18 @@ class TestSavingTheWorkingQuery:
 
         source.save_query(SimpleNamespace(shared_control=writer))
 
-        assert writer.calls == [(42, working)]
+        assert writer.calls == [(42, working, None)]
+
+    def test_its_connection_is_saved_beside_the_query(self) -> None:
+        """#1334: the Source's connection is saved with its query, as held."""
+        source = _chosen_from(transform_query_id=42)
+        source.update("statement", "select 1")
+        source.update("source-connection", "data_engine")
+        writer = _Writer()
+
+        source.save_query(SimpleNamespace(shared_control=writer))
+
+        assert writer.calls == [(42, "select 1", "data_engine")]
 
     def test_a_source_with_no_transform_query_cannot_save(self) -> None:
         source = _chosen_from()

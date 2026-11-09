@@ -455,12 +455,12 @@ class Source:
             }
 
     def save_query(self, ctx: Any) -> None:
-        """Save the working statement as the governed transform's template.
+        """Save the working statement as the governed transform's template, and its connection.
 
-        THE SOURCE SAVES ITSELF: it holds the transform_query_id and the
-        statement, and persists them through the runtime's own database access.
-        Both are handed over exactly as held; the database owns turning the
-        reader's file argument into the template token.
+        THE SOURCE SAVES ITSELF: it holds the transform_query_id, the statement
+        and its connection (#1334), and persists them through the runtime's own
+        database access. Each is handed over exactly as held; the database owns
+        turning the reader's file argument into the template token.
 
         Args:
             ctx: The runtime context, whose control database this is saved to.
@@ -482,6 +482,7 @@ class Source:
             raise ConfigError("Source: this runtime has no control database to save to.")
         control.update_transform_query_sql(
             self._governed["transform_query_id"], self._values.get("statement"),
+            self._values.get("source-connection") or None,
         )
         # THE HELD READ IS STALE: the persisted query changed (backlog 830).
         self.reread_governed(ctx)

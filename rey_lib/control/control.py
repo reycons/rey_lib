@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import (
@@ -1302,15 +1302,18 @@ class Control:
         self._call("update_file_manifest", values, required=required)
 
     def update_transform_query_sql(self, transform_query_id: int, query_sql: str,
+                                   connection_name: Optional[str] = None,
                                    required: bool = True) -> None:
-        """Save a working query as its transform's template.
+        """Save a working query as its transform's template, and its connection (#1334).
 
         The SQL is handed over exactly as given; the routine owns turning its
-        reader's file argument into the template token.
+        reader's file argument into the template token. The connection is the
+        Source's, written beside it; None where the Source names none.
         """
         self._call("update_transform_query_sql", {
             "transform_query_id": transform_query_id,
             "query_sql": query_sql,
+            "connection_name": connection_name,
         }, required=required)
 
     def update_transform_columns(self, transform_id: int, columns: list[dict[str, Any]],
@@ -1327,6 +1330,34 @@ class Control:
         if isinstance(saved, str):
             saved = json.loads(saved)
         return [int(one) for one in (saved or [])]
+
+    def save_transform_target(self, transform_id: int, transform_target_id: Optional[int],
+                              declaration: Mapping[str, Any], required: bool = True) -> int:
+        """Save one of a Transform's Targets exactly as it holds it; answer its saved id (#1334).
+
+        ``declaration`` is the Target's own declarative form, handed over unchanged:
+        the routine writes every value it states and nothing more. With no
+        ``transform_target_id`` a new saved Target is made; with one, it is updated.
+        """
+        saved = self._call("save_transform_target", {
+            "transform_id": transform_id,
+            "transform_target_id": transform_target_id,
+            "declaration": dict(declaration),
+        }, required=required)
+        return int(saved)
+
+    def transform_targets(self, transform_id: int,
+                          required: bool = True) -> list[dict[str, Any]]:
+        """A Transform's saved Targets, default first, each with its declaration (#1334).
+
+        Rows of control.transform_target_vw: the saved identity, the name, whether it
+        is the default, and ``declaration`` -- what the Target is rebuilt from.
+        """
+        return [
+            dict(row) for row in (self._call_rows("list_transform_targets", {
+                "transform_id": transform_id,
+            }, required=required) or [])
+        ]
 
     def ai_configuration(self, installation: str,
                          required: bool = True) -> list[dict[str, Any]]:

@@ -1685,3 +1685,51 @@ class TestItsRowsTransformOptions:
         assert shown["column_choices"][2][-1] == {
             "value": "encrypt", "label": "encrypt", "disabled": True,
         }
+
+
+class _TargetsOf:
+    """A stand-in Control answering one Transform's saved Targets (#1334)."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.asked: list[int] = []
+
+    def transform_targets(self, transform_id: int) -> list[dict[str, Any]]:
+        self.asked.append(transform_id)
+        return list(self.rows)
+
+
+class TestItsTarget:
+    """#1334: the Transform owns its Targets and hands its identity to its Target."""
+
+    def test_a_governed_transform_restores_its_target_from_its_default_saved_target(self) -> None:
+        from rey_lib.load import Target
+
+        target = Target()
+        transform = Transform.from_declaration({})
+        transform._target = target  # noqa: SLF001
+        transform.update("persistence", {"transform_id": 11, "file_type_id": 2})
+        control = _TargetsOf([{"transform_target_id": 5, "transform_id": 11, "is_default": True,
+                               "declaration": {"selected": "database", "values": {
+                                   "connection": "data_engine",
+                                   "table": "finance.fidelity_transactions_v01"}}}])
+
+        changed = transform._restore_target(control)  # noqa: SLF001
+
+        assert changed == [target]
+        assert control.asked == [11]
+        assert target.saves()
+        assert target.declaration() == {"selected": "database", "values": {
+            "connection": "data_engine", "table": "finance.fidelity_transactions_v01"}}
+
+    def test_a_transform_of_no_governed_file_leaves_its_target_alone(self) -> None:
+        from rey_lib.load import Target
+
+        target = Target({"connection": "c"})
+        transform = Transform.from_declaration({})
+        transform._target = target  # noqa: SLF001
+        control = _TargetsOf([])
+
+        assert transform._restore_target(control) == []  # noqa: SLF001
+        assert control.asked == []
+        assert not target.saves()

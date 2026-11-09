@@ -31,13 +31,14 @@ Manifest supplies nothing here: the governed context carries no destination.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.database_objects import DatabaseTable
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, StateError
 from rey_lib.files.data_file import DataFile
 from rey_lib.files.file import File
 from rey_lib.load import load_operation
@@ -157,6 +158,10 @@ class Target:
         # ONE ACT AT A TIME: an operation and the snapshot answering it are taken
         # under this, so the snapshot is the state that operation produced.
         self._acting = threading.RLock()
+        # WHERE THIS TARGET IS SAVED (#1334): the Transform that owns it and, once
+        # saved, its saved Target's id. Held beside the declaration, never in it;
+        # None for a Target of no governed Transform, which cannot be saved.
+        self._saved: Optional[dict[str, Optional[int]]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -282,7 +287,89 @@ class Target:
                 "modes": list(MODES),
                 # WHICH KIND THE MODES ARE OF: the one whose fields they are.
                 "modes_kind": _MODES_KIND,
+                # WHAT IT CAN DO BEYOND ITS EDITS (#1334).
+                "operations": ["save"] if self.saves() else [],
             }
+
+    # -- its saved state (#1334) -----------------------------------------------
+
+    def saves(self) -> bool:
+        """Whether this Target can be saved: it is a governed Transform's."""
+        return self._saved is not None
+
+    def restore_saved(self, control: Any, transform_id: int) -> None:
+        """Become a Transform's default saved Target, and save under that Transform.
+
+        THE TRANSFORM OWNS ITS TARGETS: it hands its id here when it is populated
+        from its governed file. Its saved Targets are read once; where it has one,
+        this Target becomes the default exactly as it was saved. Where it has none,
+        this Target keeps what it holds, and its first save makes one.
+
+        Args:
+            control: The runtime's Control, the saved Targets are read through.
+            transform_id: The governed Transform this Target belongs to.
+        """
+        rows = control.transform_targets(int(transform_id))
+        with self._acting:
+            self._saved = {"transform_id": int(transform_id), "transform_target_id": None}
+            if rows:
+                self._restore(rows[0])
+
+    def save(self, ctx: Any) -> None:
+        """Save this Target exactly as it holds its state, then hold what was stored.
+
+        THE TARGET SAVES ITSELF, whatever it holds: ``declaration()`` is handed over
+        unchanged -- the selected kind or none, both kinds' settings, each write-mode
+        flag as stated -- complete or not. Readiness is :meth:`validate`'s, asked
+        when the Target is executed, never here. The saved Target is then read
+        back, so what this Target holds is what is stored.
+
+        Args:
+            ctx: The runtime context, whose control database this is saved to.
+
+        Raises:
+            StateError: If this Target is not a governed Transform's.
+            ConfigError: If the runtime has no control database.
+        """
+        if self._saved is None:
+            _logger.debug("target: refused -- a save with no governed transform")
+            raise StateError(
+                "Target: only the Target of a Transform opened on a governed file can be saved."
+            )
+        # Imported here: the bootstrap reaches the load package, not the other way.
+        from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            raise ConfigError("Target: this runtime has no control database to save to.")
+        transform_id = int(self._saved["transform_id"])
+        saved_id = control.save_transform_target(
+            transform_id, self._saved["transform_target_id"], self.declaration(),
+        )
+        stored = next(
+            (row for row in control.transform_targets(transform_id)
+             if int(row["transform_target_id"]) == int(saved_id)),
+            None,
+        )
+        if stored is None:
+            raise StateError(
+                f"Target: saved target {saved_id} was not read back for transform {transform_id}."
+            )
+        self._restore(stored)
+
+    def _restore(self, row: Mapping[str, Any]) -> None:
+        """Hold one saved Target's declaration and id, in place of what was held."""
+        declaration = row.get("declaration") or {}
+        if isinstance(declaration, str):
+            declaration = json.loads(declaration)
+        self._values = {}
+        self._selected = None
+        for name, value in dict(declaration.get("values") or {}).items():
+            self.update(name, value)
+        if declaration.get("selected"):
+            self.select(str(declaration["selected"]))
+        if self._saved is not None:
+            self._saved["transform_target_id"] = int(row["transform_target_id"])
 
     # -- changing ------------------------------------------------------------
 

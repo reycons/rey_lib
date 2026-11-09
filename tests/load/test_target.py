@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, StateError
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.load import Source, Target, derived_load_shape
 from rey_lib.load.target import TARGET_FIELD_METADATA, TARGET_FIELDS
@@ -345,6 +345,8 @@ class TestItsSnapshot:
             "write_policy": "replace",
             "modes": ["create", "replace", "recreate", "append"],
             "modes_kind": "database",
+            # A Target of no governed Transform cannot be saved (#1334).
+            "operations": [],
         }
 
     def test_every_field_states_what_it_is(self) -> None:
@@ -416,3 +418,123 @@ class TestASelectionFromItsTree:
         assert target.selected_kind() == "database"
         assert target.declaration()["values"] == {
             "out-file": "o.csv", "connection": "warehouse", "table": "landing.orders"}
+
+
+class _SavedTargets:
+    """A stand-in Control holding saved Targets as control.transform_target does (#1334).
+
+    Each declaration is kept as handed over and read back as the view returns it:
+    the selected kind or None, and every stated value -- an unstated one absent.
+    This proves the Target's side of the round trip, not the SQL.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[int, dict[str, Any]] = {}
+        self.saves: list[tuple[int, Any, dict[str, Any]]] = []
+
+    def save_transform_target(self, transform_id: int, transform_target_id: Any,
+                              declaration: dict[str, Any]) -> int:
+        self.saves.append((transform_id, transform_target_id, json.loads(json.dumps(declaration))))
+        saved_id = transform_target_id or len(self.rows) + 1
+        defaulted = not any(row["is_default"] for row in self.rows.values()
+                            if row["transform_id"] == transform_id)
+        held = self.rows.get(saved_id, {"is_default": defaulted})
+        self.rows[saved_id] = {
+            "transform_target_id": saved_id, "transform_id": transform_id,
+            "is_default": held["is_default"],
+            "declaration": {
+                "selected": declaration.get("selected"),
+                "values": {name: value for name, value in
+                           dict(declaration.get("values") or {}).items() if value is not None},
+            },
+        }
+        return saved_id
+
+    def transform_targets(self, transform_id: int) -> list[dict[str, Any]]:
+        held = [row for row in self.rows.values() if row["transform_id"] == transform_id]
+        return sorted(held, key=lambda row: (not row["is_default"], row["transform_target_id"]))
+
+
+def _governed(control: Any) -> SimpleNamespace:
+    """A runtime carrying its shared Control, as open_shared_control leaves one."""
+    return SimpleNamespace(shared_control=control)
+
+
+class TestItsSavedState:
+    """#1334: the Transform owns its Targets; a Target saves exactly what it holds."""
+
+    def test_a_target_of_no_governed_transform_cannot_be_saved(self) -> None:
+        target = Target({"connection": "w"})
+
+        assert not target.saves()
+        with pytest.raises(StateError):
+            target.save(_governed(_SavedTargets()))
+
+    def test_once_its_transform_hands_it_over_it_declares_save(self) -> None:
+        target = Target()
+        target.restore_saved(_SavedTargets(), 7)
+
+        assert target.saves()
+        assert target.projection(SimpleNamespace())["operations"] == ["save"]
+
+    def test_it_saves_exactly_what_declaration_returns_and_rebuilds_the_same_state(self) -> None:
+        control = _SavedTargets()
+        target = Target({"connection": "data_engine", "table": "finance.fidelity_transactions_v01",
+                         "out-file": "/tmp/rows.csv"}, selected="database")
+        target.set_write_policy("append")
+        target._saved = {"transform_id": 7, "transform_target_id": None}  # noqa: SLF001
+        held = target.declaration()
+
+        target.save(_governed(control))
+
+        assert control.saves == [(7, None, held)]
+        reopened = Target()
+        reopened.restore_saved(control, 7)
+        assert reopened.declaration() == held
+        assert reopened.selected_kind() == "database"
+        assert reopened.value("out-file") == "/tmp/rows.csv"
+
+    def test_an_unset_write_policy_and_an_explicit_append_stay_distinct(self) -> None:
+        control = _SavedTargets()
+        unset = Target({"connection": "c", "table": "s.t"})
+        unset._saved = {"transform_id": 1, "transform_target_id": None}  # noqa: SLF001
+        unset.save(_governed(control))
+        explicit = Target({"connection": "c", "table": "s.t"})
+        explicit.set_write_policy("append")
+        explicit._saved = {"transform_id": 2, "transform_target_id": None}  # noqa: SLF001
+        explicit.save(_governed(control))
+
+        assert "append" not in control.transform_targets(1)[0]["declaration"]["values"]
+        assert control.transform_targets(2)[0]["declaration"]["values"]["append"] is True
+
+    def test_an_incomplete_target_is_saved_and_selected_stays_unset(self) -> None:
+        control = _SavedTargets()
+        target = Target({"connection": "c"})
+        target._saved = {"transform_id": 3, "transform_target_id": None}  # noqa: SLF001
+        assert target.validate() == ["table"]
+
+        target.save(_governed(control))
+
+        reopened = Target()
+        reopened.restore_saved(control, 3)
+        assert reopened.declaration() == {"selected": None, "values": {"connection": "c"}}
+
+    def test_a_second_save_updates_the_same_saved_target(self) -> None:
+        control = _SavedTargets()
+        target = Target({"connection": "c"})
+        target._saved = {"transform_id": 4, "transform_target_id": None}  # noqa: SLF001
+        target.save(_governed(control))
+        target.update("table", "s.t")
+
+        target.save(_governed(control))
+
+        assert [one[1] for one in control.saves] == [None, 1]
+        assert len(control.transform_targets(4)) == 1
+
+    def test_a_transform_with_no_saved_target_leaves_the_target_as_it_was(self) -> None:
+        target = Target({"connection": "c"})
+
+        target.restore_saved(_SavedTargets(), 9)
+
+        assert target.declaration() == {"selected": None, "values": {"connection": "c"}}
+        assert target.saves()
