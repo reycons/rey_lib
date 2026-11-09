@@ -1883,6 +1883,7 @@ class Control:
                              transform_id: Optional[int] = None,
                              transform_snapshot: Optional[dict[str, Any]] = None,
                              destination: Optional[dict[str, Any]] = None,
+                             table_name: Optional[str] = None,
                              required: bool = True) -> Optional[int]:
         """Append one event to a file's history.
 
@@ -1891,6 +1892,9 @@ class Control:
         database call that created the mutation rather than the application
         step above it -- which is the parent, and travels as
         ``in_parent_batch_step_id`` like every other governed call.
+
+        ``table_name`` is the table a load wrote, as ``schema.table``
+        (backlog 1335); None for a mutation that wrote no table.
         """
         return self._call("insert_file_mutation", {
             "file_manifest_id":  file_manifest_id,
@@ -1913,6 +1917,7 @@ class Control:
             "transform_id":       transform_id,
             "transform_snapshot": transform_snapshot,
             "destination":        destination,
+            "table_name":         table_name,
         }, required=required)
 
     def get_current_classification(self, file_manifest_id: Optional[int] = None,

@@ -379,6 +379,38 @@ def test_absent_conversion_and_result_sections_are_omitted() -> None:
     assert "result" not in record
     assert "file_id" not in record
     assert "classification" not in record
+    assert "table_name" not in record
+
+
+def test_a_table_load_mutation_records_its_table(tmp_path: Path) -> None:
+    """A load to a table names the table on the mutation row (backlog 1335).
+
+    A load to a file names its file in path; a load to a table writes no file,
+    so the table it wrote travels as table_name to the row the control
+    database holds.
+    """
+    ctx = _ctx(tmp_path)
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
+    start_test_run(ctx)
+
+    with _bound(run_log):
+        log_source_file_mutation(
+            ctx, action="load",
+            status="failed",
+            file_id=_governed_file(ctx),
+            source_path="/prepared/a.csv",
+            application_name="test",
+            operation="load",
+            transform_id=7,
+            destination={"connection": "warehouse", "schema": "staging",
+                         "name": "a"},
+            table_name="staging.a",
+        )
+
+    row = _rows(ctx)[0]
+    assert row["table_name"] == "staging.a"
+    assert row["path"] is None
+    assert row["status"] == "failed"
 
 
 @pytest.mark.parametrize(

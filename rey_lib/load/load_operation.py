@@ -1368,6 +1368,7 @@ def _load_one_file(
                     transform_id=transform_id,
                     transform_snapshot=transform_snapshot,
                     destination=destination_identity,
+                    table_name="" if writes_a_file else named,
                 )
             _logger.exit(f"_load_one_file done: {source!r}")
             return inserted
@@ -1467,6 +1468,7 @@ def _load_one_file(
                 transform_id=transform_id,
                 transform_snapshot=transform_snapshot,
                 destination=destination_identity,
+                table_name="" if writes_a_file else named,
             )
         _logger.exit(f"_load_one_file done: {source!r}")
         return len(rows)
@@ -1517,6 +1519,7 @@ def _load_one_file(
                 transform_id=transform_id,
                 transform_snapshot=transform_snapshot,
                 destination=destination_identity,
+                table_name="" if writes_a_file else named,
                 message=str(exc),
             )
         _logger.exit(f"_load_one_file failed: {source!r}")

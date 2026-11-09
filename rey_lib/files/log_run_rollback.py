@@ -212,6 +212,7 @@ def serialize_source_file_mutation(
     transform_id: int | None = None,
     transform_snapshot: Mapping[str, Any] | None = None,
     destination: Mapping[str, Any] | None = None,
+    table_name: str = "",
 ) -> dict[str, Any]:
     """Build one authoritative canonical filesystem-mutation manifest record.
 
@@ -304,6 +305,10 @@ def serialize_source_file_mutation(
         record["transform_snapshot"] = dict(transform_snapshot)
     if destination is not None:
         record["destination"] = dict(destination)
+    # The table a load wrote, as schema.table (backlog 1335). A load to a file
+    # names it in file.path; a load to a table has no path to name it in.
+    if _path_text(table_name):
+        record["table_name"] = _path_text(table_name)
     if outcome:
         record["result"] = outcome
     # producer identifies what produced the mutation, not merely which
@@ -338,6 +343,7 @@ def log_source_file_mutation(
     transform_id: int | None = None,
     transform_snapshot: Mapping[str, Any] | None = None,
     destination: Mapping[str, Any] | None = None,
+    table_name: str = "",
 ) -> int:
     """Commit run evidence, then append its linked mutation manifest record.
 
@@ -404,6 +410,7 @@ def log_source_file_mutation(
             transform_id=transform_id,
             transform_snapshot=transform_snapshot,
             destination=destination,
+            table_name=table_name,
         )
         manifest_record_id = log_file_manifest_record(ctx, record)
         return SourceFileMutationEvidenceResult(

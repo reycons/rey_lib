@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity
+from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
 from tests.support.connector_double import ConnectorPrimitives
@@ -139,3 +140,84 @@ class TestAFileLoadStillRecordsWhereItCameFrom:
         assert recorded["count"] == 2
         assert recorded["schema"] == "landing"
         assert recorded["table"] == "records"
+
+
+class _FailingAdapter(_Adapter):
+    """A destination whose insert fails, as a database does."""
+
+    def bulk_insert(self, _conn, _schema, _table, rows, _columns) -> int:
+        raise DatabaseError("insert failed")
+
+
+class TestAGovernedTableLoadNamesItsTable:
+    """The load mutation names the table it wrote (backlog 1335).
+
+    A load to a file records its file in path; a load to a table had no path to
+    record and named its table nowhere, so whether a prepared file had been
+    loaded to a table could not be read from the manifest.
+    """
+
+    @pytest.mark.parametrize(
+        ("adapter", "status"),
+        [(_Adapter(), "success"), (_FailingAdapter(), "failed")],
+    )
+    def test_the_mutation_carries_schema_dot_table(
+        self, tmp_path: Path, monkeypatch, run_log, adapter, status,
+    ) -> None:
+        """Success or failure, a governed table load's mutation carries schema.table.
+
+        A failed load is what keeps a prepared file eligible to load again, so
+        it names its table as a successful one does.
+        """
+        mutations: list[dict] = []
+
+        stand_beneath_the_table(monkeypatch, adapter)
+        monkeypatch.setattr(load_operation, "log_loader_step_failure",
+                            lambda *_a, **_k: None)
+        monkeypatch.setattr(load_operation, "execute_movements",
+                            lambda *_a, **_k: None)
+        monkeypatch.setattr(load_operation, "log_row_count",
+                            lambda _run_log, **_kwargs: None)
+        monkeypatch.setattr(
+            load_operation, "shared_connection",
+            lambda _ctx, _name: SimpleNamespace(
+                handle=lambda: SimpleNamespace(
+                    commit=lambda: None, rollback=lambda: None,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            load_operation, "log_governed_source_file_mutation",
+            lambda _ctx, _context, **kwargs: mutations.append(kwargs) or 1,
+        )
+
+        source = tmp_path / "incoming.csv"
+        source.write_text("a,b\n1,x\n2,y\n", encoding="utf-8")
+
+        try:
+            load_operation._load_one_file(
+                data_file_for(source, file_type="CSV", encoding="utf-8"),
+                None,
+                _TARGET,
+                ctx=SimpleNamespace(app_name="test"), run_log=run_log,
+                load_cfg=SimpleNamespace(
+                    name="a_load",
+                    load=SimpleNamespace(destination_table="landing.records"),
+                    movements=None,
+                ),
+                paths=SimpleNamespace(),
+                file_manifest_id=11,
+                file_mutation_id=22,
+                transform_id=7,
+                destination_identity=_TARGET.to_dict(),
+            )
+        except DatabaseError:
+            # A single load with no routing re-raises its failure, after
+            # recording it.
+            assert status == "failed"
+
+        assert len(mutations) == 1
+        assert mutations[0]["action"] == "load"
+        assert mutations[0]["status"] == status
+        assert mutations[0]["table_name"] == "landing.records"
+        assert mutations[0]["destination_path"] == ""

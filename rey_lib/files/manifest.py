@@ -284,6 +284,7 @@ class FileManifest:
         transform_id: Optional[int] = None,
         transform_snapshot: Optional[dict[str, Any]] = None,
         destination: Optional[dict[str, Any]] = None,
+        table_name: str = "",
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
 
@@ -306,7 +307,8 @@ class FileManifest:
 
         ``transform_id``, ``transform_snapshot`` and ``destination`` belong to
         an executed transform: the saved setting, the definition that ran, and
-        where it wrote.
+        where it wrote. ``table_name`` is the table a load wrote, as
+        ``schema.table`` (backlog 1335).
         """
         return int(self._control.append_file_mutation(
             file_manifest_id, record_type=record_type, action=action,
@@ -318,7 +320,7 @@ class FileManifest:
             clear_profile=clear_profile, redacted_profile=redacted_profile,
             base_path=base_path or None,
             transform_id=transform_id, transform_snapshot=transform_snapshot,
-            destination=destination,
+            destination=destination, table_name=table_name or None,
         ))
 
     # -- reading -------------------------------------------------------------

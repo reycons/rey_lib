@@ -24,7 +24,9 @@ _PUBLISHED = {
                     "sanitize_file", "profile_csv_record_types", "create_prepared_files",
                     "file_operation", "sql_operation", "validate", "etl_operation",
                     "transform_files", "load_files", "validate_load", "sql_apply",
-                    "prepare_rule_set_inputs"},
+                    "prepare_rule_set_inputs",
+                    # Loading prepared manifest files (backlog 1335).
+                    "load_manifest_files"},
     "rey_analyzer": {"analysis"},
     "rey_db_admin": {"export_database_ddl", "git_commit", "lint_sql", "assist_sql",
                      "recreate_objects", "verify_diff"},
@@ -76,7 +78,7 @@ def test_each_published_operation_has_exactly_one_contract(operations) -> None:
     for application, name in operations:
         published.setdefault(application, set()).add(name)
     assert published == _PUBLISHED
-    assert len(operations) == 28
+    assert len(operations) == 29
 
 
 def test_canonical_names_only(operations) -> None:
