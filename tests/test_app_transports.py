@@ -455,3 +455,44 @@ def test_one_running_application_asks_another_through_their_runtime() -> None:
         assert asked["answer"]["request_id"] == asked["request_id"]
     finally:
         transports.close_all()
+
+
+# -- the holder answers what its own launched applications ask (#1325) --------------
+
+def test_a_request_routed_to_the_holder_is_answered_by_it_and_names_its_sender() -> None:
+    transports = AppTransports()
+    a = _Peer()
+    _, transport_a = transports.open(a, "ai_app")
+    asked: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    holder = transports.answer_requests(
+        lambda request, sender: asked.append((request, sender)) or {"result": "done"})
+    transport_a.start()
+
+    # The request states a caller of its own; routing does not read it.
+    a.emit({"route": {"destination": holder,
+                      "payload": {"command": "invoke", "capability": "x.y", "inputs": {},
+                                  "caller": {"application": "someone_else"}}},
+            "request_id": "r-7"})
+
+    _until(lambda: a.sent)
+    assert asked == [({"command": "invoke", "capability": "x.y", "inputs": {},
+                       "caller": {"application": "someone_else"}, "request_id": "r-7"},
+                      {"application": "ai_app", "run_id": 1})]
+    assert a.sent == [{"answer": {"result": "done"}, "request_id": "r-7"}]
+    a.end()
+
+
+def test_a_holder_ref_of_another_runtime_is_not_reachable() -> None:
+    mine, theirs = AppTransports(), AppTransports()
+    a = _Peer()
+    _, transport_a = mine.open(a, "ai_app")
+    elsewhere = theirs.answer_requests(lambda request, sender: {"result": "never"})
+    transport_a.start()
+
+    a.emit({"route": {"destination": elsewhere, "payload": {"command": "invoke"}},
+            "request_id": "r-8"})
+
+    _until(lambda: a.sent)
+    assert a.sent == [{"error": "No application with that transport is held here.",
+                       "request_id": "r-8"}]
+    a.end()

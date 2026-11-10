@@ -280,3 +280,26 @@ def test_hosted_subject_and_coordinates_share_the_existing_call_without_persiste
     assert 'coordinates' not in transports.transport.sent[0]['changes']
     with pytest.raises(AIRequestError):
         ai.call(object(),'code_investigation','Question',lambda msg:None,coordinates=coordinates)
+
+
+def test_the_application_answers_what_its_ai_app_asks_through_its_own_transports() -> None:
+    """#1325: the launching application's answer is held by the transports it launched
+    ai_app through; the ref is the connection its coordinates name."""
+    class _Answering(_Transports):
+        def __init__(self) -> None:
+            super().__init__()
+            self.answerers: list[Any] = []
+
+        def answer_requests(self, answer: Any) -> str:
+            self.answerers.append(answer)
+            return "holder-ref"
+
+    def answer(request: dict[str, Any], sender: dict[str, Any]) -> dict[str, Any]:
+        return {"result": None}
+
+    transports = _Answering()
+    ai = ApplicationAI(("build_workflow",), transports)
+
+    assert ai.answer_requests(answer) == "holder-ref"
+    assert transports.answerers == [answer]
+    assert transports.launched == []

@@ -4,7 +4,8 @@ A key is invocable only where the registration, the governed declaration and the
 owner's catalogue all have it and the first two agree on every declared field;
 each disagreement disables that key alone. invoke then refuses, in order: a key
 not invocable, inputs violating the contract, a hosted kind outside the target
-kinds, access other than read -- and otherwise calls the catalogue.
+kinds, a write for a caller the transport did not identify -- and otherwise
+calls the catalogue.
 """
 
 from __future__ import annotations
@@ -155,19 +156,39 @@ def test_a_hosted_kind_outside_the_target_kinds_is_refused() -> None:
         hosted.invoke("file.facts", {})
 
 
-def test_a_write_capability_is_refused_in_d1() -> None:
+def test_a_write_is_refused_for_a_caller_the_transport_did_not_identify() -> None:
     write = _declared("file.write_text", _NO_INPUTS, access="write")
     called: list[Any] = []
     hosted, _ = _hosted(published=(write,), catalogue={"file.write_text": called.append})
 
-    with pytest.raises(AppError, match="only read capabilities are answered"):
-        hosted.invoke("file.write_text", {})
+    for caller in (None, {}, {"application": ""}):
+        with pytest.raises(AppError, match="only for a caller the transport identified"):
+            hosted.invoke("file.write_text", {}, caller=caller)
     assert called == []
 
 
-def test_its_interface_carries_no_transport_identity_or_caller() -> None:
+def test_a_write_is_answered_for_a_caller_the_transport_identified() -> None:
+    """#1325: routing names who asked; the key, inputs and kind are still checked."""
+    write = _declared("file.write_text", _NO_INPUTS, access="write")
+    called: list[Any] = []
+    hosted, _ = _hosted(published=(write,), catalogue={"file.write_text": called.append})
+
+    hosted.invoke("file.write_text", {}, caller={"application": "ai_app", "run_id": 4})
+
+    assert called == [{}]
+    with pytest.raises(AppError, match="refuses its inputs"):
+        hosted.invoke("file.write_text", {"extra": 1}, caller={"application": "ai_app"})
+
+
+def test_a_read_needs_no_caller() -> None:
+    hosted, _ = _hosted()
+
+    assert hosted.invoke("file.facts", {}) == {"file_type": "text"}
+
+
+def test_its_interface_carries_no_transport_and_the_caller_only_as_routing_names_it() -> None:
     construction = set(inspect.signature(HostedCapabilities.__init__).parameters)
     invocation = set(inspect.signature(HostedCapabilities.invoke).parameters)
 
     assert construction == {"self", "application", "control", "catalogue", "hosted_kind"}
-    assert invocation == {"self", "capability", "inputs"}
+    assert invocation == {"self", "capability", "inputs", "caller"}

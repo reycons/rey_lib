@@ -51,6 +51,11 @@ _LAST_LINE_CHARS = 300
 Listener = Callable[[dict[str, Any]], None]
 
 
+#: What the application holding the transports answers a request routed to it with
+#: (#1325): given the request and its sender ({application, run_id}), the answer.
+Answerer = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+
+
 class TransportNotHeld(AppError):
     """An opaque transport ref names no transport this execution context holds.
 
@@ -74,10 +79,14 @@ class AppTransport:
     """
 
     def __init__(self, app: Any,
-                 route: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None) -> None:
+                 route: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None,
+                 application: str = "") -> None:
         self._listeners: list[Listener] = []
         self._guard = threading.Lock()
         self._app: Any = app
+        #: The application this transport's context launched, by name (#1325): who a
+        #: request it routes comes from, as the context knows it -- never as it says.
+        self.application = str(application or "")
         self._pumps: list[threading.Thread] = []
         self._route = route
         # This transport's own outstanding requests, by request_id.
@@ -230,15 +239,37 @@ class AppTransports:
 
     def __init__(self) -> None:
         self._held: dict[str, AppTransport] = {}
+        # The holder's own answers (#1325): what the application holding these
+        # transports answers itself, by the ref it handed out for it.
+        self._answerers: dict[str, Answerer] = {}
         self._guard = threading.Lock()
 
-    def open(self, app: Any) -> tuple[str, AppTransport]:
-        """Hold a new transport for the launched ``app``, not yet started; answer its ref."""
+    def open(self, app: Any, application: str = "") -> tuple[str, AppTransport]:
+        """Hold a new transport for the launched ``app``, not yet started; answer its ref.
+
+        ``application`` is the application ``app`` is, as this context launched it.
+        """
         ref = uuid.uuid4().hex
-        transport = AppTransport(app, route=self._route)
+        transport = AppTransport(app, route=self._route, application=application)
         with self._guard:
             self._held[ref] = transport
         return ref, transport
+
+    def answer_requests(self, answer: Answerer) -> str:
+        """Answer, as the application holding these transports, what they route to it (#1325).
+
+        The application that launched them holds its own live object; an
+        application it launched reaches that object by routing a request to the ref
+        answered here, exactly as it reaches a transport this context holds. Each
+        request is given to ``answer`` with its sender -- the application this
+        context launched it as, and its run -- which routing establishes and the
+        request cannot state. What ``answer`` returns is the answer, as a held
+        transport's would be.
+        """
+        ref = uuid.uuid4().hex
+        with self._guard:
+            self._answerers[ref] = answer
+        return ref
 
     def get(self, ref: str) -> AppTransport:
         """The transport held as ``ref``.
@@ -270,7 +301,7 @@ class AppTransports:
             AppError: When the application cannot be launched.
         """
         launched = LaunchedApp.launch_operation(runtime, application, operation, dict(inputs))
-        ref, transport = self.open(launched)
+        ref, transport = self.open(launched, application)
         release = transport.subscribe(listener)
         transport.start()
         return ref, transport, release
@@ -379,7 +410,17 @@ class AppTransports:
         try:
             if not isinstance(payload, dict):
                 raise ConfigError("A routed request carries one command as its payload.")
-            destination = self.get(str(route.get("destination") or ""))
+            named = str(route.get("destination") or "")
+            with self._guard:
+                answerer = self._answerers.get(named)
+            if answerer is not None:
+                # The holder answers it, told who asked as this context knows it.
+                sender = {"application": source.application, "run_id": source.run_id}
+                answer = {"answer": answerer({**payload, "request_id": request_id}, sender),
+                          "request_id": request_id}
+                _answer(source, answer)
+                return
+            destination = self.get(named)
             answer = {"answer": destination.request({**payload, "request_id": request_id}),
                       "request_id": request_id}
         except TransportNotHeld:

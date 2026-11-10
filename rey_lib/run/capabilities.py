@@ -15,9 +15,16 @@ nothing more. A key is invocable only where all three are present and the
 registration and governed row agree on every declared field. The catalogue is
 not a fourth declaration: it carries no kinds, access, contract or description.
 
-**What it never does.** It receives no transport, token, caller or identity and
-looks none up; it checks no caller grant (D2), reads no AI state, and leaves the
-object's own refusals to the object. In D1 it answers read capabilities only.
+**What it never does.** It receives no transport or token and looks none up; it
+checks no caller grant, reads no AI state, and leaves the object's own refusals
+to the object.
+
+**Writes (#1325).** A read is answered for any caller. A write is answered only
+for a caller the transport identified -- the ``caller`` routing hands over from
+what it launched ({application, run_id}), never anything a request states. The
+calling application has already enforced its own grants (ai_app its tasks' tool
+grants); this boundary still checks the key, the inputs and the target kind, and
+the object still validates and refuses for itself.
 """
 
 from __future__ import annotations
@@ -35,9 +42,10 @@ __all__ = ["HostedCapabilities"]
 
 _LOG = AppLogger(__name__)
 
-#: The access D1 answers. A write capability is refused until mutation is ruled
-#: (#45 step 17); keeping access in the declaration does not authorize it.
+#: The access answered for any caller; a write is answered only for an identified
+#: caller (#1325).
 _ANSWERED_ACCESS = "read"
+_WRITE_ACCESS = "write"
 
 
 class HostedCapabilities:
@@ -102,16 +110,21 @@ class HostedCapabilities:
             else:
                 self._invocable[key] = published[key]
 
-    def invoke(self, capability: str, inputs: Any) -> Any:
+    def invoke(self, capability: str, inputs: Any,
+               caller: Mapping[str, Any] | None = None) -> Any:
         """Answer one invocation against the hosted object, or refuse it.
 
         Checked in order: the key is invocable; the inputs satisfy its input
         contract; the hosted kind is one of its target kinds; its access is
-        answered. Then the catalogue's callable is called with the inputs.
+        answered -- a read for any caller, a write only for an identified one.
+        Then the catalogue's callable is called with the inputs.
 
         Args:
             capability: The capability key, e.g. ``file.text``.
             inputs: The invocation's inputs, checked against the input contract.
+            caller: Who asked, as the transport established it (#1325):
+                ``{application, run_id}`` from the routing, or None where no
+                transport identified one.
 
         Returns:
             Whatever the catalogue's callable returns.
@@ -136,10 +149,15 @@ class HostedCapabilities:
                 f"capability '{key}' does not apply to the hosted kind "
                 f"'{self._hosted_kind}' (target kinds: {', '.join(declared.target_kinds)})."
             )
-        if declared.access != _ANSWERED_ACCESS:
+        if declared.access == _WRITE_ACCESS:
+            if not str((caller or {}).get("application") or ""):
+                raise AppError(
+                    f"capability '{key}' declares write access; a write is answered only "
+                    "for a caller the transport identified, and none was."
+                )
+        elif declared.access != _ANSWERED_ACCESS:
             raise AppError(
-                f"capability '{key}' declares {declared.access} access; only read "
-                "capabilities are answered."
+                f"capability '{key}' declares {declared.access} access, which is not answered."
             )
         _LOG.debug("invoking capability '%s' on the hosted %s", key, self._hosted_kind)
         return self._catalogue[key](inputs)

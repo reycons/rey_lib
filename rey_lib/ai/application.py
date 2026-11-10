@@ -37,7 +37,7 @@ from rey_lib.ai.errors import AIConfigurationError, AIRequestError, AIUnavailabl
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import AppLogger
 from rey_lib.run.app_channel import IO_REQUEST_SECONDS
-from rey_lib.run.app_transports import AppTransport, AppTransports
+from rey_lib.run.app_transports import Answerer, AppTransport, AppTransports
 
 __all__ = ["ApplicationAI", "Relay"]
 
@@ -195,6 +195,18 @@ class ApplicationAI:
         transport.send({"command": "edit", "object": object_id, "changes": changes})
         transport.send({"command": "run", "object": object_id,
                         **({"coordinates": dict(coordinates)} if coordinates is not None else {})})
+
+    def answer_requests(self, answer: Answerer) -> str:
+        """Answer, as this application, what the ai_app it launches asks of its live object.
+
+        The application holds its live object and launches ai_app through this
+        ApplicationAI's own transports (#1325): a task's granted hosted tool reaches
+        that object by routing to the ref answered here -- the ``connection`` of the
+        coordinates the application passes to :meth:`call`. Each request is given to
+        ``answer`` with its sender as routing establishes it. Nothing else is
+        launched, attached or looked up.
+        """
+        return self._transports.answer_requests(answer)
 
     def ended(self) -> bool:
         """Whether this invocation's already-open AI application has ended."""
