@@ -1169,3 +1169,36 @@ class TestEachSettingCarriesItsGovernedReference:
         export.apply_selection("scope")
 
         assert "No reference is written" in self._fields(export)["scope"]["instructions"]["text"]
+
+
+class TestSaveIsOfferedWhileTheDefinitionIsUnsaved:
+    """#1325: Save is declared on every subject only while the working definition
+    differs from the one last saved -- the Workflow's own save, as an operate command."""
+
+    _SAVE = {"id": "save", "command": {"command": "operate", "object": "workflow",
+                                       "operation": "save", "arguments": {}}}
+
+    def test_a_workflow_as_hydrated_offers_no_save(self) -> None:
+        workflow, _ = _saving()
+
+        assert not workflow.unsaved()
+        assert all(self._SAVE not in listed for listed in workflow.actions().values())
+
+    def test_an_edit_offers_save_on_every_subject_until_it_is_saved(self) -> None:
+        workflow, _ = _saving()
+
+        _process(workflow, "second").move_step("s", 0)
+
+        assert workflow.unsaved()
+        assert all(self._SAVE in listed for listed in workflow.actions().values())
+        workflow.save()
+        assert not workflow.unsaved()
+        assert all(self._SAVE not in listed for listed in workflow.actions().values())
+
+    def test_an_edit_undone_offers_no_save(self) -> None:
+        workflow, _ = _saving()
+
+        _process(workflow, "second").move_step("s", 0)
+        _process(workflow, "second").move_step("s", 1)
+
+        assert not workflow.unsaved()

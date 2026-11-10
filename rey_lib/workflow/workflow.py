@@ -240,6 +240,9 @@ class Workflow:
         # One act at a time: an operation, and the snapshot answering it (the
         # same contract as Source, Transform and Target).
         self._acting = threading.RLock()
+        # The definition as last saved -- as governed when hydrated -- against which
+        # the working one is unsaved (#1325): Save is offered only while they differ.
+        self._saved = self.configured_definition()
 
     @classmethod
     def hydrate(
@@ -712,6 +715,7 @@ class Workflow:
         resolved = dict(self.config or {})
         resolved["execution"] = deepcopy(execution)
         self.config = resolved
+        self._saved = self.configured_definition()
         self._changed()
 
     # -- its observers -------------------------------------------------------
@@ -758,8 +762,21 @@ class Workflow:
                     error.__cause__ = exc
                 error.report(f"workflow '{self.name}' observer notification", source=__name__)
 
+    def unsaved(self) -> bool:
+        """Whether the working definition differs from the one last saved (#1325)."""
+        return self.configured_definition() != self._saved
+
     def actions(self) -> dict[str, list[dict[str, Any]]]:
-        """The existing display subjects and their exact direction commands."""
+        """The existing display subjects and their exact commands.
+
+        Each subject's direction commands; and, on every subject while the working
+        definition is unsaved, Save (#1325) -- the Workflow's own save, by the operate
+        command the host answers.
+        """
+        save = ([{"id": "save", "command": {"command": "operate", "object": "workflow",
+                                             "operation": "save", "arguments": {}}}]
+                if self.unsaved() else [])
+
         def commands(name: Optional[str] = None) -> list[dict[str, Any]]:
             offered = [{"id": "workflow_run", "command": {"command": "direct"}}]
             if name is not None:
@@ -771,7 +788,7 @@ class Workflow:
                         ("workflow_run_only", "step"),
                     )
                 )
-            return offered
+            return offered + save
 
         return {
             "workflow": commands(),
