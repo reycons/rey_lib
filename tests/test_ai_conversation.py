@@ -19,6 +19,7 @@ from rey_lib.ai.conversation import (
     supported_conversation_roles,
     supported_conversation_statuses,
 )
+from rey_lib.ai.ai import AI
 from rey_lib.ai.errors import AIRequestError
 
 _SUBJECT = {"kind": "workflow", "workflow_id": 8}
@@ -182,3 +183,34 @@ class TestTheContextOffered:
 def test_the_roles_and_statuses_are_the_tables_own() -> None:
     assert supported_conversation_roles() == ["user", "assistant"]
     assert supported_conversation_statuses() == ["active", "archived"]
+
+
+class TestTheAIOwnsItsConversations:
+    """The live AI holds one conversation per subject, as it is persisted (#1338)."""
+
+    def test_an_existing_conversation_is_restored_once_and_appended_to(self) -> None:
+        control = _Control()
+        existing = control.create_ai_conversation(1, 7, _SUBJECT)
+        control.append_ai_conversation_message(existing, run_id=1, role="user", content="hi")
+        ai = AI()
+
+        held = ai.conversation(control, 1, 7, dict(_SUBJECT))
+        ai.record_exchange(control, 1, 7, {"workflow_id": 8, "kind": "workflow"},
+                           prompt="Again", run_id=2, answer="Done")
+
+        assert held is ai.conversation(control, 1, 7, _SUBJECT)
+        assert held.conversation_id == existing and len(control.conversations) == 1
+        assert [one["content"] for one in held.messages()] == ["hi", "Again", "Done"]
+
+    def test_two_subjects_and_two_applications_never_share_a_conversation(self) -> None:
+        control = _Control()
+        ai = AI()
+
+        ai.record_exchange(control, 1, 7, _SUBJECT, prompt="A", run_id=1, answer=None)
+        ai.record_exchange(control, 1, 7, {"kind": "workflow", "workflow_id": 9},
+                           prompt="B", run_id=2, answer=None)
+        ai.record_exchange(control, 1, 5, _SUBJECT, prompt="C", run_id=3, answer=None)
+
+        assert len(control.conversations) == 3
+        assert [one["content"] for one in ai.conversation(control, 1, 7, _SUBJECT).messages()
+                ] == ["A"]

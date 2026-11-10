@@ -340,6 +340,20 @@ def test_with_no_task_named_ai_app_is_given_the_applications_tasks_to_choose_fro
     ]
 
 
+def test_the_application_and_its_subject_travel_with_the_task_without_coordinates() -> None:
+    """#1338: the AI's conversation is the asking application's, about its subject."""
+    transports = _Transports()
+    ai = ApplicationAI(("generate_sql",), transports, application_id=7)
+
+    ai.call(object(), "generate_sql", "count", lambda message: None,
+            subject_reference={"kind": "workflow", "workflow_id": 8})
+
+    assert transports.transport.requested == [
+        {"command": "task", "task_key": "generate_sql", "object": "ai",
+         "application_id": 7, "subject_reference": {"kind": "workflow", "workflow_id": 8}}]
+    assert transports.transport.sent[-1] == {"command": "run", "object": "t1"}
+
+
 def test_a_named_task_runs_on_the_engine_chosen_for_the_session() -> None:
     transports = _Transports()
     ai = ApplicationAI(("generate_sql",), transports, engines=("local_precision",))

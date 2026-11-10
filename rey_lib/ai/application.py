@@ -215,6 +215,10 @@ class ApplicationAI:
                   "object": self._ai_object})
         if chosen:
             request["profile_key"] = chosen
+        if self.application_id is not None:
+            # Who is asking (#1338): the AI's conversation about the subject is the
+            # one this application owns.
+            request["application_id"] = self.application_id
         if subject_reference is not None:
             request["subject_reference"] = dict(subject_reference)
         if origin is not None:

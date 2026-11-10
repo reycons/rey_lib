@@ -20,6 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from rey_lib.ai.content import AIContentKind
+from rey_lib.ai.conversation import AIConversation
 from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import (
     AICancelled,
@@ -134,6 +135,11 @@ class AI:
         self._workbench_tasks: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
         self._governed_settings: dict[str, dict[str, dict[str, Any]]] = {}
         self._working_settings: dict[str, dict[str, dict[str, Any]]] = {}
+        # THE AI'S CONVERSATIONS, one per subject it is asked about (#1338): each
+        # keyed as it is persisted -- installation, owning application, subject
+        # identity -- restored when the subject is first named, then held here.
+        self._conversations: dict[tuple[int, int, str], AIConversation] = {}
+        self._conversations_lock = threading.Lock()
 
     def projection(self, control: Any, installation: str) -> dict[str, Any]:
         """What this AI offers an installation, as plain data (backlog 1041).
@@ -307,6 +313,40 @@ class AI:
         if scope not in self._settings_of(control, installation):
             raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
         self._workbench_selection[installation] = scope
+
+    def conversation(self, control: Any, installation_id: int, application_id: int,
+                     subject: Mapping[str, Any]) -> AIConversation:
+        """This AI's conversation about one subject: held, or restored when first named.
+
+        Keyed as it is persisted (#1338) -- the installation, the application that
+        owns it, the subject's identity -- so an existing conversation is restored,
+        not begun again, and two subjects never share one.
+
+        Raises:
+            AppError: As Control raises, when the conversation cannot be read.
+        """
+        key = (int(installation_id), int(application_id),
+               json.dumps(dict(subject), sort_keys=True, default=str))
+        with self._conversations_lock:
+            held = self._conversations.get(key)
+            if held is None:
+                held = AIConversation.restore(control, installation_id, application_id,
+                                              subject)
+                self._conversations[key] = held
+            return held
+
+    def record_exchange(self, control: Any, installation_id: int, application_id: int,
+                        subject: Mapping[str, Any], *, prompt: str, run_id: int | None,
+                        answer: str | None) -> bool:
+        """Record one exchange that reached a run on the subject's conversation (#1338).
+
+        Raises:
+            AIRequestError: When there is no run to record the exchange against.
+            AppError: As Control raises, when it cannot be read or written.
+        """
+        return self.conversation(control, installation_id, application_id,
+                                 subject).record_exchange(prompt=prompt, run_id=run_id,
+                                                          answer=answer)
 
     def workbench_scope(self, installation: str) -> str:
         """The scope this AI's Workbench is selected on: a task_key, or "" for Default."""
