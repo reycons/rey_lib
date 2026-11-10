@@ -197,6 +197,25 @@ class TestRefusalsAndFailures:
         assert task.status == AITask.IDLE
         assert engine.seen == []
 
+    def test_a_structured_part_is_sent_as_its_json_before_the_text(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1334: the live object's context reaches the model; text-only is unchanged."""
+        engine = _Engine("ready", "ready")
+        context = {"source": {"connection": "file_reader", "provider": "duckdb"}}
+        given = AIInput.of(
+            AIContent(kind=AIContentKind.TEXT, value="fix this"),
+            AIContent(kind=AIContentKind.STRUCTURED, value=context),
+        )
+        ai = _ai(engine, monkeypatch)
+
+        ai.execute_task(_task(input=given))
+        ai.execute_task(_task())
+
+        import json
+        assert engine.prompts[0] == json.dumps(context, indent=2) + "\n\nfix this"
+        assert engine.prompts[1] == "What is this?"
+
     def test_input_other_than_text_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _Engine("ready")
         image = AIContent(kind=AIContentKind.IMAGE, value="aGk=")

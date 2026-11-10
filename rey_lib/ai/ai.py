@@ -13,6 +13,7 @@ nothing: no ``ctx`` discovery, no ambient lookup, no module-level state.
 
 from __future__ import annotations
 
+import json
 import threading
 from copy import deepcopy
 from dataclasses import replace
@@ -1141,17 +1142,26 @@ class AI:
 
     @staticmethod
     def _prompt_of(task: AITask) -> str:
-        """What is sent: the subject, then the task's text, as one prompt.
+        """What is sent: the subject, then the task's context, then its text, as one prompt.
 
-        Both, because both were asked: a prompt about a subject is not a prompt
-        instead of one. Text only in this slice; anything else is refused.
+        All of them, because all were given: a prompt about a subject is not a
+        prompt instead of one, and the context is what the live object holds. A
+        structured part -- the context a launcher supplied -- is sent as its JSON;
+        text as it is. Any other kind of input is refused.
         """
-        if any(part.kind is not AIContentKind.TEXT for part in task.input.content):
+        if any(part.kind not in (AIContentKind.TEXT, AIContentKind.STRUCTURED)
+               for part in task.input.content):
             raise AIRequestError(
                 f"AI task '{task.task_key or '(default)'}' carries input other than "
-                "text, which this execution does not send."
+                "text or structured data, which this execution does not send."
             )
-        parts = [task.subject, *(str(part.value) for part in task.input.content)]
+        parts = [
+            task.subject,
+            *(json.dumps(part.value, indent=2, default=str) for part in task.input.content
+              if part.kind is AIContentKind.STRUCTURED),
+            *(str(part.value) for part in task.input.content
+              if part.kind is AIContentKind.TEXT),
+        ]
         prompt = "\n\n".join(part for part in parts if part.strip())
         if not prompt:
             raise AIRequestError(
