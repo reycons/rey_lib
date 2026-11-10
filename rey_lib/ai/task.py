@@ -25,6 +25,7 @@ It reads nothing, resolves nothing and executes nothing.
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar, Mapping, Sequence
@@ -32,7 +33,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 from rey_lib.ai.content import AIContentKind, AIInput
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstructionKind
-from rey_lib.ai.requests import AIOutputSpec
+from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.tools import AITool
 from rey_lib.content import Content
 from rey_lib.formatting import markdown_to_html
@@ -252,12 +253,10 @@ class AITask:
         -- a non-empty text, a temperature that is not ``None`` -- are recorded
         as the task's ``choices``; an empty one is no choice.
 
-        The output requirement, when the caller states none, is hydration's to
-        decide from what the governed instruction is (backlog 1047, D4): a
-        contract's body defines its own textual answer, so a contract-backed task
-        asks plain text with no media type; any other task asks Markdown. No
-        structured output is inferred -- no governed configuration states a
-        shape.
+        Without a caller output choice, a governed contract schema requires
+        structured output. Without a schema, the task's declared media type or
+        the existing instruction-kind text/Markdown default applies. A shape is
+        never inferred from contract prose.
 
         ``configuration`` is the installation's control.f_ai_configuration_get
         rows (ai.ai_installation_vw): one row per task, its inheritance already
@@ -318,9 +317,31 @@ class AITask:
         # WHAT THE TASK PRODUCES, as ai.ai_task declares it (#1323) -- the task's own
         # fact, not its execution's. Undeclared, the instruction kind decides, as it
         # always has.
+        schema = instruction.get("output_schema")
+        if schema is not None:
+            if kind is not AIInstructionKind.CONTRACT or not isinstance(schema, dict):
+                raise AIConfigurationError(
+                    f"AI instruction '{instruction.get('instruction_key')}' states "
+                    "an output schema without a contract or JSON Schema object."
+                )
+            from jsonschema import Draft7Validator, SchemaError
+
+            try:
+                Draft7Validator.check_schema(schema)
+            except SchemaError as exc:
+                raise AIConfigurationError(
+                    f"AI instruction '{instruction.get('instruction_key')}' states "
+                    f"an invalid output schema: {exc.message}"
+                ) from exc
+            schema = deepcopy(schema)
         declared = str((row or {}).get("output_media_type") or "").strip()
+        if output is None and schema is not None and declared and declared != "application/json":
+            raise AIConfigurationError(
+                f"AI task '{key}' declares '{declared}' but its contract requires JSON schema output."
+            )
         required = output if output is not None else (
-            AIOutputSpec.text(declared) if declared
+            AIOutputSpec(kind=AIOutputKind.CONTRACT, media_type="application/json") if schema is not None
+            else AIOutputSpec.text(declared) if declared
             else AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
             else AIOutputSpec.markdown()
         )
@@ -355,6 +376,7 @@ class AITask:
             contract_key=str(instruction.get("contract_key") or ""),
             contract_version=str(instruction.get("contract_version") or ""),
             contract_body=str(instruction.get("body") or ""),
+            output_schema=schema,
             temperature=None if stated is None else float(stated),
             max_turns=next((value for value in (max_turns, (row or {}).get("max_turns"),
                                                group.get("max_turns")) if value is not None), None),

@@ -986,7 +986,8 @@ class Workflow:
         Parameters
         ----------
         apply : bool
-            False for dry-run: a step with ``apply_only`` is not released (NOT RUN).
+            False requests dry-run, permitted only when config.execution.dry_run
+            is True: a step with ``apply_only`` is not released (NOT RUN).
         step : str | None
             Run exactly the one step matching this identifier, or every step of
             the process it names.
@@ -1013,6 +1014,10 @@ class Workflow:
             selection, or for a step whose settings do not satisfy its contract
             (recorded as run evidence first).
         """
+        if not isinstance(apply, bool):
+            raise AppError(f"workflow '{self.name}': apply must be a boolean.")
+        if not apply and ((self.config or {}).get("execution") or {}).get("dry_run") is not True:
+            raise AppError(f"workflow '{self.name}' does not declare dry-run support.")
         if not self._running.acquire(blocking=False):
             raise AppError(f"workflow '{self.name}' is already running.")
         outcome: Optional[str] = FAILED

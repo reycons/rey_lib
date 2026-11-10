@@ -106,7 +106,7 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
     process = WorkflowProcess(name=application.name, ordinal=1, application=application,
                               config=None, steps=steps)
     return Workflow(workflow_id=1, name=workflow["name"], enabled=workflow.get("enabled", True),
-                    config=None, processes=[process], control=control)
+                    config={"execution": {"dry_run": True}}, processes=[process], control=control)
 
 
 def _run(graph: Workflow, parent: Any, ctx: Any, **selection: Any) -> Any:
@@ -1056,3 +1056,35 @@ def test_paths_never_mark_nonreleased_steps_completed(tmp_path: Path, apply: boo
     if fails:
         assert graph.steps["s1"].state == "FAILED"
         assert edges[("workflow", "process:1")] == "FAILED"
+
+
+@pytest.mark.parametrize("capability", [False, None, "true", 1])
+def test_dry_run_requires_a_governed_boolean_capability(tmp_path, capability):
+    calls = []
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording(calls), control)
+    graph.config = {"execution": {"dry_run": capability}}
+    with pytest.raises(AppError, match="does not declare dry-run support"):
+        _run(graph, parent_run(control, log=_log(tmp_path)), ctx, apply=False)
+    assert calls == []
+    assert all(step.current_run is None for step in graph.steps.values())
+
+
+@pytest.mark.parametrize("apply", ["false", 0, None])
+def test_direction_refuses_a_non_boolean_apply_before_releasing_steps(apply):
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), RecordingControl())
+    with pytest.raises(AppError, match="apply must be a boolean"):
+        graph.direct(apply=apply)
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_normal_direction_still_applies_regardless_of_dry_run_capability(tmp_path, dry_run):
+    calls = []
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording(calls), control)
+    graph.config = {"execution": {"dry_run": dry_run}}
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx)
+    assert "p2" in calls
