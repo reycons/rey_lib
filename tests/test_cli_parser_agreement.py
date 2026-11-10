@@ -109,7 +109,10 @@ _ENFORCED_AFTER_PARSING: dict[tuple[str, str], dict[str, Any]] = {
     ("data_engine", "serve_load"): {
         "entry": "data_engine/loader_main.py",
         "given": ["--subject", "file"],
-        "companions": {"statement": ["--source-connection", "warehouse"]},
+        "companions": {
+            "statement": ["--source-connection", "warehouse"],
+            "database": ["--source-connection", "warehouse", "--subject-kind", "tables"],
+        },
     },
 }
 

@@ -12,11 +12,15 @@ block is the canonical loaded state.
 from __future__ import annotations
 
 import shutil
+import subprocess
+import threading
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from rey_lib.config.inventory import to_plain_data
+from rey_lib.errors.error_utils import AppError
 
 __all__ = ["ToolEntry", "ToolRegistry"]
 
@@ -71,6 +75,33 @@ class ToolEntry:
         """Return the full command list with runtime tokens substituted in args."""
         resolved_args = _substitute_tokens(self.args, tokens or {})
         return [self.command] + resolved_args
+
+    def open_file(self, path: str | Path, *, line: int = 1, column: int = 1) -> None:
+        """Open an existing file with this configured editor, without a shell.
+
+        Only declared, enabled, available editors accepting this file can launch.
+        The hosting application supplies its held File's path, never a browser path.
+        """
+        file = Path(path)
+        if (not self.enabled or self.category != "editor" or not self.is_available()
+                or not self.supports_file(file)):
+            raise AppError(f"Editor '{self.name}' is not available for this file.")
+        if not file.is_file():
+            raise AppError(f"The file no longer exists: {file}")
+        tokens = {_TOKEN_FILE_PATH: str(file), _TOKEN_FOLDER_PATH: str(file.parent),
+                  _TOKEN_LINE_NUMBER: str(line), _TOKEN_COLUMN_NUMBER: str(column)}
+        try:
+            if self.launch_mode == "browser":
+                url = _substitute_tokens([self.url], tokens)[0]
+                if not webbrowser.open(url):
+                    raise AppError(f"Editor '{self.name}' could not be opened.")
+            else:
+                child = subprocess.Popen(self.build_command(tokens), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+                threading.Thread(target=child.wait, daemon=True).start()
+        except OSError as exc:
+            raise AppError(f"Editor '{self.name}' could not be opened: {exc}") from exc
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict representation, including runtime availability."""
@@ -145,6 +176,17 @@ class ToolRegistry:
     def tools_for_file(self, path: str | Path) -> list[ToolEntry]:
         """Return available tools that support the given file's extension."""
         return [t for t in self.available_tools() if t.supports_file(path)]
+
+    def editors_for_file(self, path: str | Path) -> list[ToolEntry]:
+        """Configured, available editors accepting this file, in declared order."""
+        return [tool for tool in self.tools_for_file(path) if tool.category == "editor"]
+
+    def open_editor(self, name: str, path: str | Path, *, line: int = 1, column: int = 1) -> None:
+        """Resolve a declared editor and delegate its file-opening behavior."""
+        tool = self.find_tool(name)
+        if tool is None:
+            raise AppError(f"No editor is configured under '{name}'.")
+        tool.open_file(path, line=line, column=column)
 
     def find_tool(self, name: str) -> ToolEntry | None:
         """Return a tool entry by name, or None if not found."""

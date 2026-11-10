@@ -24,7 +24,6 @@ from rey_lib.db.postgres_utils import execute_named_sql
 from rey_lib.db.procedure_map import (
     ProcedureMap,
     execute_operation,
-    execute_procedure_call,
     execute_sql_text,
     get_procedure_map,
     resolve_routine_binding,
@@ -598,30 +597,6 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
     text = json.dumps(records[0])
     assert "SECRET" not in text
     assert "delete from source" not in text
-
-
-def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
-    ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path)
-    conn = object()
-    with patch("rey_lib.db.procedure_map._db") as db:
-        db.call_proc_with_output.return_value = {"out_id": 7}
-        result = execute_procedure_call(
-            ctx,
-            run_log, conn,
-            "control.finish_batch",
-            [("batch_id", 5)],
-            [("out_id", "INT")],
-            sql_label="finish_batch",
-            operation="hook_procedure",
-        )
-
-    records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
-    assert result == {"out_id": 7}
-    assert len(records) == 1
-    assert records[0]["operation"] == "hook_procedure"
-    assert records[0]["routine"] == "control.finish_batch"
-    assert records[0]["object_count"] == 1
 
 
 def test_operation_missing_execution_target_fails_closed(run_log):

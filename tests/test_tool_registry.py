@@ -85,3 +85,43 @@ def test_the_registry_reads_no_configuration_file() -> None:
 
     assert "load_tool_registry" not in defined
     assert not any(name.endswith(("parse_yaml", "read_text_file")) for name in imported)
+
+
+def test_editor_filtering_and_real_configured_launch(tmp_path):
+    import json
+    import sys
+    import time
+    source = tmp_path / "file with spaces.py"
+    source.write_text("pass")
+    received = tmp_path / "launched.json"
+    code = "import json,sys;from pathlib import Path;Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))"
+    registry = ToolRegistry.from_configuration({"editors": [{
+        "name": "test", "label": "Test editor", "command": sys.executable,
+        "file_types": [".py"], "args": ["-c", code, str(received),
+        "{file_path}", "{line_number}", "{column_number}"]},
+        {"name": "off", "command": sys.executable, "enabled": False},
+        {"name": "wrong_type", "command": sys.executable, "file_types": [".sql"]},
+        {"name": "not_editor", "command": sys.executable, "category": "tool"}]})
+    assert [e.name for e in registry.editors_for_file(source)] == ["test"]
+    registry.open_editor("test", source, line=12, column=3)
+    until = time.monotonic() + 3
+    while not received.exists() and time.monotonic() < until:
+        time.sleep(.01)
+    assert json.loads(received.read_text()) == [str(source), "12", "3"]
+
+
+def test_undeclared_disabled_and_wrong_kind_editors_cannot_launch(tmp_path, monkeypatch):
+    import sys
+    import pytest
+    from rey_lib.errors.error_utils import AppError
+    source = tmp_path / "file.py"
+    source.write_text("pass")
+    registry = ToolRegistry.from_configuration({"editors": [
+        {"name": "off", "command": sys.executable, "enabled": False},
+        {"name": "wrong_type", "command": sys.executable, "file_types": [".sql"]},
+        {"name": "not_editor", "command": sys.executable, "category": "tool"}]})
+    launched = []
+    monkeypatch.setattr(tool_registry.subprocess, "Popen", lambda *a, **kw: launched.append(a))
+    for name in ("missing", "off", "wrong_type", "not_editor"):
+        with pytest.raises(AppError): registry.open_editor(name, source)
+    assert launched == []

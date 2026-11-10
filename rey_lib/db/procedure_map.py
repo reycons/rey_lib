@@ -76,7 +76,6 @@ __all__ = [
     "ProcedureMap",
     "execute_operation",
     "execute_sql_text",
-    "execute_procedure_call",
 ]
 
 _logger = AppLogger(__name__)
@@ -580,54 +579,6 @@ def execute_sql_text(
         **context,
     )
     return result
-
-
-def execute_procedure_call(
-    ctx: Any, run_log,
-    conn: Any,
-    proc_name: str,
-    named_inputs: list[tuple[str, Any]],
-    output_specs: list[tuple[str, str]],
-    *,
-    sql_label: str,
-    operation: str,
-    safe_to_preview: bool = False,
-    **context: Any,
-) -> dict[str, Any]:
-    """Execute a procedure call and emit authoritative SQL_EXECUTION evidence."""
-    t0 = time.monotonic()
-    try:
-        if output_specs:
-            output_values = _db.call_proc_with_output(
-                conn, proc_name, named_inputs, output_specs
-            )
-        else:
-            _db.call_proc(conn, proc_name, [v for _n, v in named_inputs])
-            output_values = {}
-    except Exception as exc:
-        log_sql_execution(run_log,
-            sql_label=sql_label,
-            operation=operation,
-            status="failed",
-            duration_ms=int((time.monotonic() - t0) * 1000),
-            error_message=str(exc),
-            safe_to_preview=safe_to_preview,
-            routine=str(proc_name),
-            **context,
-        )
-        raise
-
-    log_sql_execution(run_log,
-        sql_label=sql_label,
-        operation=operation,
-        status="success",
-        duration_ms=int((time.monotonic() - t0) * 1000),
-        safe_to_preview=safe_to_preview,
-        routine=str(proc_name),
-        object_count=len(output_values) if output_values else None,
-        **context,
-    )
-    return output_values
 
 
 def _execute_sql(
