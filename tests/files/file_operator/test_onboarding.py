@@ -11,11 +11,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.workflow.workflow import Workflow
-from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import WorkflowStep
 
 from rey_lib.files import onboarding
 from rey_lib.files.error_utils import InputError, RedactorError
@@ -29,7 +26,7 @@ def _config(tmp_path: Path, name: str = "statements") -> onboarding.RuleSetOnboa
         source_inbox=(tmp_path / name / "inbox").resolve(),
         filename_regex=r"statement_(?P<file_kind>[A-Za-z]+)_[0-9]+[.]csv",
         group_capture="file_kind",
-        analyzer_workflow="infer_bad_row_redaction_rules",
+        analysis=_surface(tmp_path),
         run_workspace=(tmp_path / "runs" / "run-1").resolve(),
         output_root=(tmp_path / name / "rules").resolve(),
         rule_set_name_pattern=f"{name}_{{group_slug}}",
@@ -54,7 +51,11 @@ def _entry(config: onboarding.RuleSetOnboardingConfig) -> dict[str, object]:
             "regex": config.filename_regex,
             "group_capture": config.group_capture,
         },
-        "analyzer": {"workflow": config.analyzer_workflow},
+        "analysis": {"workflow": config.analysis.workflow, "source": config.analysis.source_name,
+            "name": config.analysis.analysis_name, "model_profile": config.analysis.model_profile,
+            "file_pattern": config.analysis.file_pattern, "candidate_extension": config.analysis.candidate_extension,
+            "paths": {"inbox": str(config.analysis.inbox), "results": str(config.analysis.results),
+                      "candidates": str(config.analysis.candidates)}},
         "run_workspace": str(config.run_workspace),
         "output_root": str(config.output_root),
         "rule_set_name_pattern": config.rule_set_name_pattern,
@@ -80,58 +81,16 @@ def _ctx(tmp_path: Path, **values: object) -> SimpleNamespace:
     return SimpleNamespace(**defaults)
 
 
-def _analyzer_workflow(name: str, surface: onboarding._AnalyzerSurface) -> Workflow:
-    """The governed Analyzer workflow: one rey_analyzer analysis step naming its source.
-
-    The data source and its analysis config are the analysis process's governed
-    configuration, so its WorkflowProcess declares them, with paths as hydration
-    leaves them (plain strings).
-    """
-    analysis = ApplicationOperation(name="analysis", contract_definition={
-        "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
-    })
-    analyzer = Application(name="rey_analyzer", workflow_operations=(analysis,))
-    step = WorkflowStep(
-        id="infer_tabular_discard_rules", process_name="rey_analyzer",
-        label="infer_tabular_discard_rules", ordinal=1, application=analyzer,
-        operation_name="analysis", approved={"analysis": lambda *_args: None},
-        settings={"source": surface.source_name},
-    )
-    config = {"data_sources": [{
-        "name": surface.source_name,
-        "file_pattern": surface.file_pattern,
-        "analysis_config": surface.analysis_name,
-        "raw_output_extension": surface.candidate_extension,
-        "paths": {
-            "inbox_path": str(surface.inbox),
-            "results_path": str(surface.results),
-            "raw_output_path": str(surface.candidates),
-        },
-    }], "analysis_configs": [{
-        "name": surface.analysis_name,
-        "llm_execution_profile": surface.model_profile,
-    }]}
-    process = WorkflowProcess(name="rey_analyzer", ordinal=1, application=analyzer,
-                              config=config, steps=[step])
-    return Workflow(workflow_id=1, name=name, enabled=True, config=None, processes=[process], control=None)
-
-
 @pytest.fixture(autouse=True)
-def governed_analyzer_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Workflow's governed hydration answers with the installation's Analyzer workflow."""
-    surface = _surface(tmp_path)
-
-    def from_governed(_ctx: object, workflow_name: str, **_kwargs: object) -> Workflow:
-        if workflow_name != surface.workflow:
-            raise ConfigError(f"Workflow: installation has no workflow '{workflow_name}'.")
-        return _analyzer_workflow(workflow_name, surface)
-
-    monkeypatch.setattr(onboarding.Workflow, "from_governed", from_governed)
+def no_other_workflow_is_hydrated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preparation must work with the retired application absent."""
+    monkeypatch.setattr(Workflow, "from_governed", lambda *_a, **_k: pytest.fail(
+        "Preparation must not hydrate an analyzer workflow."))
 
 
-def _surface(tmp_path: Path) -> onboarding._AnalyzerSurface:
-    return onboarding._AnalyzerSurface(
-        "infer_bad_row_redaction_rules",
+def _surface(tmp_path: Path) -> onboarding._AnalysisSurface:
+    return onboarding._AnalysisSurface(
+        "inventory_and_prepare_files_loader",
         "file_operator_structural_file_type",
         "infer_tabular_discard_rules",
         "local_precision",
@@ -239,10 +198,10 @@ def test_collection_reference_rejects_conflicting_analyzer_workflows(run_log,
 ) -> None:
     first = _config(tmp_path, "first")
     second = _entry(_config(tmp_path, "second"))
-    second["analyzer"] = {"workflow": "other_workflow"}
+    second["analysis"]["workflow"] = "other_workflow"
     ctx = _ctx(tmp_path)
 
-    with pytest.raises(RedactorError, match="exactly one Analyzer workflow"):
+    with pytest.raises(RedactorError, match="exactly one analysis staging configuration"):
         onboarding.prepare_rule_set_inputs(ctx, run_log,
             {"onboardings": [_entry(first), second]},
         )
@@ -560,10 +519,6 @@ def test_materialization_continues_groups_and_returns_aggregate_failure(run_log,
         onboarding,
         "resolve_rule_set_onboarding_configs",
         return_value=(config,),
-    ), patch.object(
-        onboarding,
-        "_resolve_analyzer_surface",
-        return_value=_surface(tmp_path),
     ), patch.object(
         onboarding,
         "_read_preparation_manifest",

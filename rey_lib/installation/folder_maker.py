@@ -105,10 +105,6 @@ _APP_DEFS: dict[str, dict] = {
         "subfolders": ["data_sources", "diagnostics", "redact"],
         "extra_files": [],
     },
-    "rey_analyzer": {
-        "subfolders": ["analysis_configs", "data_sources", "llm_configs", "contracts", "schemas"],
-        "extra_files": [],
-    },
     "rey_console": {
         "subfolders": [],
         "extra_files": [],

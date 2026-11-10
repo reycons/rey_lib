@@ -39,7 +39,6 @@ from rey_lib.logs import (
     log_validation_result,
 )
 from rey_lib.profiling import normalized_header
-from rey_lib.workflow.workflow import Workflow
 
 from rey_lib.files.error_utils import InputError, RedactorError
 from rey_lib.files.feed_config import FEED_CONFIG_FILENAME
@@ -122,7 +121,7 @@ class RuleSetOnboardingConfig:
     source_inbox: Path
     filename_regex: str
     group_capture: str
-    analyzer_workflow: str
+    analysis: _AnalysisSurface
     run_workspace: Path
     output_root: Path
     rule_set_name_pattern: str
@@ -130,7 +129,7 @@ class RuleSetOnboardingConfig:
 
 
 @dataclass(frozen=True)
-class _AnalyzerSurface:
+class _AnalysisSurface:
     workflow: str
     source_name: str
     analysis_name: str
@@ -234,7 +233,7 @@ def resolve_rule_set_onboarding_configs(
 
 def _typed_onboarding_config(entry: Any, name: str) -> RuleSetOnboardingConfig:
     classification = _required_mapping(entry, "filename_classification", name)
-    analyzer = _required_mapping(entry, "analyzer", name)
+    analysis = _required_mapping(entry, "analysis", name)
     raw_controls = _required_list(entry, "control_totals", name)
     controls = tuple(
         _control_total_config(item, name, index)
@@ -267,7 +266,7 @@ def _typed_onboarding_config(entry: Any, name: str) -> RuleSetOnboardingConfig:
         source_inbox=_required_path(entry, "source_inbox", name),
         filename_regex=filename_regex,
         group_capture=group_capture,
-        analyzer_workflow=_required_string(analyzer, "workflow", name),
+        analysis=_analysis_surface(analysis, name),
         run_workspace=_required_path(entry, "run_workspace", name),
         output_root=_required_path(entry, "output_root", name),
         rule_set_name_pattern=pattern,
@@ -276,18 +275,16 @@ def _typed_onboarding_config(entry: Any, name: str) -> RuleSetOnboardingConfig:
 
 
 def prepare_rule_set_inputs(ctx: Any, run_log, inline_config: Mapping[str, Any]) -> int:
-    """Prepare every configured group for a separate Rey Analyzer step."""
+    """Prepare bounded analysis artifacts from this step's declared staging configuration."""
 
     configs = resolve_rule_set_onboarding_configs(inline_config)
-    workflow_names = {
-        config.analyzer_workflow for config in configs if config.enabled
-    }
-    if len(workflow_names) != 1:
+    surfaces = {config.analysis for config in configs if config.enabled}
+    if len(surfaces) != 1:
         raise RedactorError(
-            "One preparation run must resolve exactly one Analyzer workflow; "
-            f"found {len(workflow_names)}: {', '.join(sorted(workflow_names))}."
+            "One preparation run must declare exactly one analysis staging configuration; "
+            f"found {len(surfaces)}."
         )
-    surface = _resolve_analyzer_surface(ctx, next(iter(workflow_names)))
+    surface = next(iter(surfaces))
     _assert_analyzer_inbox_clear(surface)
 
     prepared_count = 0
@@ -444,7 +441,7 @@ def materialize_prepared_rule_sets(
     for config in configs:
         if not config.enabled:
             continue
-        surface = _resolve_analyzer_surface(ctx, config.analyzer_workflow)
+        surface = config.analysis
         manifest = _read_preparation_manifest(config, surface)
         for raw_entry in manifest["groups"]:
             entry = _mapping(raw_entry, "preparation manifest group")
@@ -502,7 +499,7 @@ def materialize_prepared_rule_sets(
 def _materialize_prepared_group(
     ctx: Any, run_log,
     config: RuleSetOnboardingConfig,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     entry: Mapping[str, Any],
     materializer: Materializer,
 ) -> _PublishedRevision:
@@ -725,7 +722,7 @@ def _preparation_entry(
     group: _Group,
     classification: _ClassificationResult,
     trusted_path: Path,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     staged_name: str,
 ) -> dict[str, Any]:
     return {
@@ -766,7 +763,7 @@ def _preparation_entry(
 def _write_preparation_manifest(
     ctx: Any, run_log,
     config: RuleSetOnboardingConfig,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     groups: list[dict[str, Any]],
 ) -> Path:
     path = (
@@ -808,7 +805,7 @@ def _write_preparation_manifest(
 
 def _read_preparation_manifest(
     config: RuleSetOnboardingConfig,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
 ) -> dict[str, Any]:
     path = (
         config.run_workspace
@@ -1088,55 +1085,31 @@ def _control_totals_from_evidence(
     return tuple(controls)
 
 
-def _resolve_analyzer_surface(ctx: Any, workflow_name: str) -> _AnalyzerSurface:
-    # The Analyzer workflow is the governed Workflow of that name, hydrated
-    # through its own governed boundary (backlog 1011).
-    workflow = Workflow.from_governed(ctx, workflow_name)
-    analysis_steps = [
-        step for step in workflow.steps.values()
-        if step.process.application.name == "rey_analyzer"
-        and step.operation.name == "analysis"
-    ]
-    if len(analysis_steps) != 1:
-        raise RedactorError(
-            f"Analyzer workflow '{workflow_name}' must contain exactly one "
-            "rey_analyzer analysis step."
-        )
-    step_config = _mapping(
-        analysis_steps[0].settings,
-        "Analyzer workflow step settings",
-    )
-    source_name = _required_string(step_config, "source", workflow_name)
-    # The data source and its analysis config are part of the analysis step's
-    # process configuration: its WorkflowProcess holds both (#1032, #1043, #1005).
-    process = analysis_steps[0].process
-    source = process.data_source(source_name)
-    analysis_name = str(_get(source, "analysis_config", "") or "")
-    analysis = process.analysis_config(analysis_name)
-    paths = _mapping(_get(source, "paths", None), "Analyzer source paths")
-    return _AnalyzerSurface(
-        workflow=workflow_name,
-        source_name=source_name,
-        analysis_name=analysis_name,
-        model_profile=_required_string(
-            _mapping(analysis, "Analyzer analysis"),
-            "llm_execution_profile",
-            analysis_name,
-        ),
-        inbox=_required_path(paths, "inbox_path", source_name),
-        results=_required_path(paths, "results_path", source_name),
-        candidates=_required_path(paths, "raw_output_path", source_name),
-        candidate_extension=str(
-            _get(source, "raw_output_extension", ".candidate.json") or ".candidate.json"
-        ),
-        file_pattern=str(_get(source, "file_pattern", "*") or "*"),
+def _analysis_surface(declared: Mapping[str, Any], name: str) -> _AnalysisSurface:
+    """The preparation step's declared staging facts; no other workflow is hydrated.
+
+    ``workflow`` is artifact provenance, not an execution destination. This
+    operation prepares files and never launches analysis or selects an engine.
+    The existing artifact/manifest shape stays unchanged.
+    """
+    paths = _required_mapping(declared, "paths", name)
+    return _AnalysisSurface(
+        workflow=_required_string(declared, "workflow", name),
+        source_name=_required_string(declared, "source", name),
+        analysis_name=_required_string(declared, "name", name),
+        model_profile=_required_string(declared, "model_profile", name),
+        inbox=_required_path(paths, "inbox", name),
+        results=_required_path(paths, "results", name),
+        candidates=_required_path(paths, "candidates", name),
+        candidate_extension=_required_string(declared, "candidate_extension", name),
+        file_pattern=_required_string(declared, "file_pattern", name),
     )
 
 
 def _stage_analyzer_input(
     ctx: Any,
     analysis_path: Path,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     *,
     dest_name: str,
 ) -> Path:
@@ -1162,7 +1135,7 @@ def _stage_analyzer_input(
     )
 
 
-def _assert_analyzer_inbox_clear(surface: _AnalyzerSurface) -> None:
+def _assert_analyzer_inbox_clear(surface: _AnalysisSurface) -> None:
     existing = sorted(surface.inbox.glob(surface.file_pattern)) if surface.inbox.exists() else []
     if existing:
         raise InputError(
@@ -1173,7 +1146,7 @@ def _assert_analyzer_inbox_clear(surface: _AnalyzerSurface) -> None:
 
 def _resolve_analyzer_artifacts(
     ctx: Any,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     *,
     input_name: str,
     input_hash: str,
@@ -1392,7 +1365,7 @@ def _materialize_revision(
     config: RuleSetOnboardingConfig,
     classification: _ClassificationResult,
     analyzer: _AnalyzerArtifacts,
-    surface: _AnalyzerSurface,
+    surface: _AnalysisSurface,
     group_root: Path,
     rule_set_name: str,
     controls: tuple[ControlTotal, ...],
