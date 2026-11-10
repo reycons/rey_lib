@@ -1175,8 +1175,9 @@ class TestSaveIsOfferedWhileTheDefinitionIsUnsaved:
     """#1325: Save is declared on every subject only while the working definition
     differs from the one last saved -- the Workflow's own save, as an operate command."""
 
-    _SAVE = {"id": "save", "command": {"command": "operate", "object": "workflow",
-                                       "operation": "save", "arguments": {}}}
+    _SAVE = {"id": "save", "role": {"act": "save", "on": "definition"},
+             "command": {"command": "operate", "object": "workflow",
+                         "operation": "save", "arguments": {}}}
 
     def test_a_workflow_as_hydrated_offers_no_save(self) -> None:
         workflow, _ = _saving()

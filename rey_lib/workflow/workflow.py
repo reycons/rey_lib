@@ -773,8 +773,9 @@ class Workflow:
         definition is unsaved, Save (#1325) -- the Workflow's own save, by the operate
         command the host answers.
         """
-        save = ([{"id": "save", "command": {"command": "operate", "object": "workflow",
-                                             "operation": "save", "arguments": {}}}]
+        save = ([{"id": "save", "role": {"act": "save", "on": "definition"},
+                  "command": {"command": "operate", "object": "workflow",
+                              "operation": "save", "arguments": {}}}]
                 if self.unsaved() else [])
 
         def commands(name: Optional[str] = None) -> list[dict[str, Any]]:
