@@ -1459,8 +1459,8 @@ class TestItsTargetsColumns:
     _MAPPING = {"columns": [{"source": "A", "name": "a"}, {"source": "B", "name": "old_name"}]}
 
     @staticmethod
-    def _target(answer: Any) -> SimpleNamespace:
-        """A Target answering its destination columns, recording each read."""
+    def _target(answer: Any, policy: str = "append") -> SimpleNamespace:
+        """A Target answering its destination columns and write policy, recording each read."""
         reads: list[Any] = []
 
         def destination_columns(ctx: Any) -> Any:
@@ -1469,7 +1469,17 @@ class TestItsTargetsColumns:
                 raise answer
             return answer
 
-        return SimpleNamespace(destination_columns=destination_columns, reads=reads)
+        return SimpleNamespace(destination_columns=destination_columns, reads=reads,
+                               write_policy=lambda: policy)
+
+    def test_a_target_that_recreates_its_table_offers_no_choices(self) -> None:
+        """Its table is rebuilt from these outputs: an output is named, not chosen."""
+        target = self._target(["a", "z"], policy="recreate")
+        transform = self._established(target)
+
+        assert transform.target_columns(SimpleNamespace()) is None
+        assert transform.target_mapping_state(SimpleNamespace()) == (None, [False, False])
+        assert target.reads == []
 
     def _established(self, target: Any, *, governed: bool = True) -> Transform:
         """Established as the governed read leaves it: kind declaration, its mapping filled."""

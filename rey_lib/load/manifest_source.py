@@ -355,6 +355,9 @@ class ManifestSource:
         #: The SQL the database resolved for this file's path, from the selected
         #: transform's query -- None while the selection is unresolved.
         self.resolved_query_sql: Optional[str] = chosen.get("resolved_query_sql")
+        #: The selected transform's query as stored: the template, naming the
+        #: working file as ``{file_path}`` -- None while the selection is unresolved.
+        self.query_sql: Optional[str] = chosen.get("query_sql")
         #: The governed query row the selected transform's SQL template is in.
         self.transform_query_id: Optional[int] = _as_int(chosen.get("transform_query_id"))
         #: The connection saved with that query (#1334), or None where none was.
@@ -785,7 +788,10 @@ class ManifestSource:
         # identities the contract resolved -- the working mutation, and the
         # governing type where one is active. Its own configuration, not context.
         source.select("database")
-        source.update("statement", self.resolved_query_sql or "")
+        # THE STATEMENT AS STORED, naming its file as {file_path}: the Source resolves
+        # it from its own file when it runs. Where no template is stored, the SQL
+        # the database resolved.
+        source.update("statement", self.query_sql or self.resolved_query_sql or "")
         # ITS SAVED CONNECTION (#1334), where one was saved with the query; a
         # query saved with none leaves the Source's connection as it is.
         if self.query_connection_name:

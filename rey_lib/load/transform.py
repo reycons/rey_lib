@@ -644,12 +644,16 @@ class Transform:
         answers for the destination it currently holds. Only for a Transform
         established from a governed Manifest source -- the fact itself, not a
         kind: the governed read selects ``declaration``. None otherwise, with no
-        Target, or where the Target has no table to read.
+        Target, where the Target has no table to read, or where the Target
+        recreates its table: that table is built from these outputs, so an output
+        is named, not chosen from what is there now.
 
         Args:
             ctx: The runtime context, to reach the Target's table.
         """
         if self._source is None or self._source.manifest() is None or self._target is None:
+            return None
+        if self._target.write_policy() == "recreate":
             return None
         try:
             return self._target.destination_columns(ctx)

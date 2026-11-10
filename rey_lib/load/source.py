@@ -134,6 +134,10 @@ SOURCE_FIELD_METADATA: dict[str, dict[str, str]] = {
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in SOURCE_KINDS}
 
+#: How a statement names its file: the token its governed template stores
+#: (control.transform_query_update_sql writes it), resolved from the Source's file.
+_FILE_PATH_TOKEN = "{file_path}"
+
 #: The governed identities, in the order they are shown.
 _GOVERNED_IDENTITY: tuple[str, ...] = (
     "file_manifest_id", "file_mutation_id", "installation_id", "data_profile_id",
@@ -309,20 +313,34 @@ class Source:
             return []
         return [name for name in kind.required if not _held(held.get(name))]
 
-    def definition(self) -> dict[str, Any]:
+    def definition(self, ctx: Any = None) -> dict[str, Any]:
         """What this Source is (#1199 S5): the kind in force, its configuration, and
-        what it still needs.
+        what it still needs -- and, given the runtime, its connection's provider.
 
         Its own configuration state, under one act, and nothing it would have to
         read: no records, no governed file's facts, no values said under a kind that
-        is not in force, and none of what an editor offers.
+        is not in force, and none of what an editor offers. ``provider`` is the
+        configured connection's own answer (``Connection.provider``) for the
+        connection this Source names, so an AI task writes SQL in its dialect; it is
+        stated only where a runtime is given and the connection is configured.
         """
         with self._acting:
-            return {
+            described = {
                 "kind": self.selected_kind(),
                 "configuration": dict(self.configuration()),
                 "missing": list(self.validate()),
             }
+            connection = str(self._values.get("source-connection") or "")
+        if ctx is not None and connection:
+            try:
+                provider = shared_connection(ctx, connection).provider
+            except ConfigError:
+                _logger.debug("source: connection %s is not configured; no provider stated",
+                              connection)
+            else:
+                described["connection"] = connection
+                described["provider"] = provider
+        return described
 
     # -- changing ------------------------------------------------------------
 
@@ -356,14 +374,15 @@ class Source:
                 f"Fields: {', '.join(SOURCE_FIELDS)}."
             )
         # AN EDIT CHANGES THIS VALUE AND NOTHING ELSE -- with one exception: a
-        # governed mutation chosen by id brings its own path and resolved SQL.
-        # The governed context stays for the object's lifetime.
+        # governed mutation chosen by id brings its own path, the file the
+        # statement's {file_path} resolves to when it runs. The statement is the
+        # reader's and stays as written. The governed context stays for the
+        # object's lifetime.
         self._values[name] = value
         if name == "file-mutation-id":
             chosen = self._mutation_choice(value)
             if chosen is not None:
                 self._values["file"] = chosen.get("path") or ""
-                self._values["statement"] = chosen.get("resolved_query_sql") or ""
 
     def apply_selection(self, ctx: Any, identity: Mapping[str, Any]) -> None:
         """Become the file the reader selected in this Source's tree (#1323).
@@ -536,6 +555,20 @@ class Source:
 
     # -- execution -----------------------------------------------------------
 
+    def resolved_statement(self) -> str:
+        """The statement as it runs: ``{file_path}`` resolved to this Source's own file.
+
+        The statement names its file as ``{file_path}``, the token its governed
+        template stores; this Source holds which file that is -- the selected
+        mutation's path, its ``file``. Each occurrence is replaced exactly, as the
+        database resolves its template, so no other brace in the SQL is read. A
+        Source holding no file leaves the token as written.
+        """
+        with self._acting:
+            statement = str(self.value("statement") or "")
+            path = str(self.value("file") or "")
+        return statement.replace(_FILE_PATH_TOKEN, path) if path else statement
+
     def query(self, ctx: Any) -> DatabaseQuery:
         """This Source's statement as a live query on its own connection (#1151).
 
@@ -553,7 +586,7 @@ class Source:
         """
         with self._acting:
             kind = self.selected_kind()
-            statement = str(self.value("statement") or "")
+            statement = self.resolved_statement()
             connection = str(self.value("source-connection") or "")
         if kind != "database":
             raise ConfigError(f"Source ({kind}): only a database Source runs its statement.")
@@ -601,7 +634,7 @@ class Source:
                 str(held["file"]), file_type=str(held.get("file-type") or ""),
             )
         if kind == "database":
-            return self._query(ctx, held["source-connection"], str(held["statement"]))
+            return self._query(ctx, held["source-connection"], self.resolved_statement())
         if kind == "sql_file":
             return self._query(
                 ctx, held["source-connection"], _statement_in(held["sql-file"]),

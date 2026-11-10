@@ -366,14 +366,31 @@ class TestTheSourceIsAnOrdinaryDatabaseSource:
 
 class TestChoosingAMutation:
 
-    def test_it_brings_that_mutations_path_and_sql(self) -> None:
+    def test_it_brings_that_mutations_path_and_the_statement_stays_as_written(self) -> None:
         source = _chosen_from()
+        written = source.value("statement")
 
         source.update("file-mutation-id", "31")
 
         assert source.value("file-mutation-id") == "31"
         assert source.value("file") == "/data/b/asset.txt"
-        assert source.value("statement") == _CHOICES[1]["resolved_query_sql"]
+        assert source.value("statement") == written
+
+    def test_the_template_names_the_selected_mutation_and_resolves_when_run(self) -> None:
+        """The statement says {file_path}; the Source resolves it from its own file."""
+        template = "read_csv('{file_path}')"
+        source = _chosen_from(query_sql=template)
+        assert source.value("statement") == template
+
+        source.update("file-mutation-id", "31")
+
+        assert source.value("statement") == template
+        assert source.resolved_statement() == "read_csv('/data/b/asset.txt')"
+
+    def test_other_braces_are_left_alone(self) -> None:
+        source = _chosen_from(query_sql="'{}', read_csv('{file_path}')")
+
+        assert source.resolved_statement() == "'{}', read_csv('/data/incoming/asset.txt')"
 
     def test_an_id_that_is_no_choice_changes_only_the_id(self) -> None:
         source = _chosen_from()

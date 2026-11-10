@@ -115,3 +115,48 @@ def test_a_transform_never_reads_its_held_source_or_target() -> None:
 
     assert definition == {"kind": "identity", "configuration": {}, "declaration": None}
     assert "missing" not in definition
+
+
+def test_given_the_runtime_a_source_states_its_connections_provider(monkeypatch: Any) -> None:
+    """#1334: the provider is the configured connection's own answer."""
+    from types import SimpleNamespace
+
+    import rey_lib.load.source as source_module
+
+    asked: list[str] = []
+
+    def configured(ctx: Any, name: str) -> Any:
+        asked.append(name)
+        return SimpleNamespace(provider="duckdb")
+
+    monkeypatch.setattr(source_module, "shared_connection", configured)
+    source = Source.from_declaration({
+        "values": {"source-connection": "file_reader", "statement": "select 1"},
+        "selected": "database",
+    })
+
+    stated = source.definition(SimpleNamespace())
+
+    assert asked == ["file_reader"]
+    assert (stated["connection"], stated["provider"]) == ("file_reader", "duckdb")
+    # Without the runtime, nothing is read and nothing more is stated.
+    assert "provider" not in source.definition()
+
+
+def test_an_unconfigured_connection_states_no_provider(monkeypatch: Any) -> None:
+    from types import SimpleNamespace
+
+    import rey_lib.load.source as source_module
+    from rey_lib.errors.error_utils import ConfigError
+
+    def unconfigured(ctx: Any, name: str) -> Any:
+        raise ConfigError(f"no connection {name}")
+
+    monkeypatch.setattr(source_module, "shared_connection", unconfigured)
+    source = Source.from_declaration({
+        "values": {"source-connection": "nowhere"}, "selected": "database",
+    })
+
+    stated = source.definition(SimpleNamespace())
+
+    assert "provider" not in stated and "connection" not in stated
