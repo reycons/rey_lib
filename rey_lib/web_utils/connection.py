@@ -95,9 +95,21 @@ def _refusing_jar() -> http.cookiejar.CookieJar:
     )
 
 
+class _WireClient(httpx.Client):
+    """Adapt corehttp b7's raw-body argument to HTTPX's public content API."""
+
+    def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        data = kwargs.get("data")
+        if data is not None and not isinstance(data, Mapping):
+            # corehttp has already encoded JSON/text/bytes. Preserve those bytes;
+            # mappings stay data= for HTTPX's form and multipart encoders.
+            kwargs["content"] = kwargs.pop("data")
+        return super().build_request(*args, **kwargs)
+
+
 def _new_wire_client(**options: Any) -> httpx.Client:
     """Build the HTTPX client. The one place this module constructs it."""
-    return httpx.Client(**options)
+    return _WireClient(**options)
 
 
 def _new_transport(*, timeout_seconds: float, verify: Any) -> HttpXTransport:

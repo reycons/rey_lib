@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from rey_lib.messaging.approvals import approve_message as approve_message_state
 from rey_lib.messaging.approvals import mark_approval_required
@@ -14,7 +14,7 @@ from rey_lib.messaging.config import message_archive_path, message_provider, res
 from rey_lib.messaging.errors import MessageApprovalError
 from rey_lib.messaging.generation import generate_message as generate_message_draft
 from rey_lib.messaging.generation import validate_message as validate_generated_message
-from rey_lib.messaging.models import DeliveryResult, Message, MessageContent, MessageEvent, MessageRequest, utc_now
+from rey_lib.messaging.models import DeliveryResult, Message, MessageEvent, MessageRequest, utc_now
 from rey_lib.messaging.policy import approval_required as policy_approval_required
 from rey_lib.messaging.rendering import render_message as render_generated_message
 from rey_lib.messaging.repository import FileMessageRepository
@@ -52,7 +52,6 @@ def create_message(
     dry_run: bool = False,
     provider: str = "",
     metadata: dict[str, Any] | None = None,
-    llm_drafter: Callable[[MessageRequest], MessageContent] | None = None,
 ) -> Message:
     """Create, generate, validate, apply approval policy, and render a message."""
     resolved = resolve_recipient_group(ctx, recipient_group, channel) if recipient_group else {}
@@ -78,7 +77,7 @@ def create_message(
         provider=provider,
         metadata=metadata or {},
     )
-    message = generate_message_draft(ctx, request, llm_drafter=llm_drafter)
+    message = generate_message_draft(ctx, request)
     message.provider = message_provider(ctx, channel, provider)
     _persist(ctx, message, "message_requested")
     validate_message(ctx, message)

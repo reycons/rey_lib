@@ -24,7 +24,8 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from corehttp.transport.httpx import HttpXTransport
+from rey_lib.web_utils.connection import _new_wire_client
+from rey_lib.web_utils import connection as connection_module
 
 from rey_lib import web_utils
 from rey_lib.data.http_transform import HTTPTransform
@@ -88,9 +89,8 @@ def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _transport(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
     """The job's connection is built as HttpOperation builds it, over a mocked transport."""
-    monkeypatch.setattr(web_utils, "HttpConnection", lambda config, ctx: HttpConnection(
-        config, ctx, transport=HttpXTransport(client=httpx.Client(transport=httpx.MockTransport(handler))),
-    ))
+    monkeypatch.setattr(connection_module, "_new_wire_client", lambda **options:
+        _new_wire_client(transport=httpx.MockTransport(handler), **options))
 
 
 @pytest.fixture

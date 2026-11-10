@@ -724,6 +724,7 @@ class AI:
             AIConfigurationError, AIExecutionError, AIOutputError,
             AIProviderError: as :meth:`execute_task` states them.
         """
+        import asyncio
         import pydantic_ai
         from pydantic_ai import (
             Agent,
@@ -794,12 +795,16 @@ class AI:
                 key, task.model_identifier,
                 task.instruction_key or "(none)", type(output_type).__name__,
             )
-            run = agent.run_sync(
-                prompt, model_settings=settings or None,
-                usage_limits=UsageLimits(request_limit=task.max_turns),
-                event_stream_handler=relay if tell is not None else None,
-                cancellation_token=token,
-            )
+            # The synchronous SDK entry uses the current loop. Own that loop
+            # explicitly instead of relying on deprecated implicit creation.
+            with asyncio.Runner() as runtime:
+                runtime.get_loop()
+                run = agent.run_sync(
+                    prompt, model_settings=settings or None,
+                    usage_limits=UsageLimits(request_limit=task.max_turns),
+                    event_stream_handler=relay if tell is not None else None,
+                    cancellation_token=token,
+                )
             output = self._parse_task_output(task, schema, run.output)
             # The run's tool exchange, from its own messages in their order --
             # as _translated states it for an observer: a result is failed where

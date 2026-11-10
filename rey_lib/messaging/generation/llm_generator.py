@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from string import Template
-from typing import Any, Callable
+from typing import Any
 
 from rey_lib.messaging.generation.contracts import ALLOWED_GENERATION_MODES
 from rey_lib.messaging.models import Message, MessageContent, MessageRequest, utc_now
@@ -15,17 +15,12 @@ __all__ = ["generate_message"]
 def generate_message(
     ctx: Any,
     request: MessageRequest,
-    *,
-    llm_drafter: Callable[[MessageRequest], MessageContent] | None = None,
 ) -> Message:
-    """Create a draft message from templates, static text, or a supplied LLM drafter."""
+    """Create a deterministic draft from templates or static text."""
     if request.generation_mode not in ALLOWED_GENERATION_MODES:
         raise MessageValidationError(f"Unsupported generation mode: {request.generation_mode}")
 
-    if request.generation_mode == "llm" and llm_drafter is not None:
-        content = llm_drafter(request)
-    else:
-        content = _template_content(request)
+    content = _template_content(request)
 
     message = Message(request=request, status="generated", content=content)
     message.updated_at = utc_now()

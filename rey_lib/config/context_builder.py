@@ -217,7 +217,6 @@ class ContextBuilder:
         # does not reach a database.
         object.__setattr__(ctx, "installation", Installation(
             name=getattr(declared, "name", None),
-            type=getattr(declared, "type", None),
             installation_id=getattr(declared, "installation_id", None),
         ))
 

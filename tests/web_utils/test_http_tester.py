@@ -1,7 +1,7 @@
 """The HTTP tester sends one request through the public HTTP layer (backlog 672).
 
 Manual tooling, not a client surface. Synthetic only: connections are answered
-through the public ``transport=`` boundary by ``httpx.MockTransport``.
+by ``httpx.MockTransport`` beneath the real owned HTTPX client.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 import pytest
 from corehttp.transport.httpx import HttpXTransport
+from rey_lib.web_utils.connection import _new_wire_client
+from rey_lib.web_utils import connection as connection_module
 
 import rey_lib.web_utils as web_utils
 from rey_lib.errors.error_utils import ConfigError, HttpTransportError
@@ -58,12 +60,13 @@ def _key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def connect() -> Any:
+def connect(monkeypatch: pytest.MonkeyPatch) -> Any:
     seen: list[httpx.Request] = []
+    monkeypatch.setattr(connection_module, "_new_wire_client", lambda **options:
+        _new_wire_client(transport=httpx.MockTransport(_answer(seen)), **options))
 
     def make(**overrides: Any) -> HttpConnection:
-        transport = HttpXTransport(client=httpx.Client(transport=httpx.MockTransport(_answer(seen))))
-        return HttpConnection(_record(**overrides), ctx=_ctx(), transport=transport)
+        return HttpConnection(_record(**overrides), ctx=_ctx())
 
     make.seen = seen  # type: ignore[attr-defined]
     return make

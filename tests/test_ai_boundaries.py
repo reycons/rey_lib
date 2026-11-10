@@ -52,8 +52,12 @@ def test_nothing_here_is_presentation_aware() -> None:
 
 
 def test_no_application_semantics_leaked_in() -> None:
-    """Analyzer, autocomplete and Workbench semantics live in their own owners."""
-    for word in ("autocomplete", "supersession", "caret", "debounce", "workbench", "analyzer"):
+    """Application-specific analysis and editor semantics live in their own owners.
+
+    AI owns its selected/retained AITasks, including the selection exposed to
+    Workbench. The word is not a UI dependency; the guards below check those.
+    """
+    for word in ("autocomplete", "supersession", "caret", "debounce", "analyzer"):
         for path in sources():
             assert word not in code_of(path).lower(), f"{path.name} names {word}"
 
@@ -261,3 +265,39 @@ class TestAConnectionIsAName:
 
         with pytest.raises(AISelectionError, match="for task 'search'"):
             self._ai(("code_index",)).projection(self._control("", "rey_apps"), "local")
+
+
+def _presentation_dependencies(source: str) -> list[str]:
+    """UI imports or presentation calls are a dependency; task-selection names are not."""
+    forbidden = ("rey_console", "rey_bff", "ai_app", "rey_lib.presentation", "rey_lib.tree")
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        names = ([alias.name for alias in node.names] if isinstance(node, ast.Import) else
+                 [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
+        found.extend(name for name in names if any(name == root or name.startswith(root + ".")
+                                                   for root in forbidden))
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                node.func.id if isinstance(node.func, ast.Name) else "")
+            if name in {"mount", "render", "present", "presentViewerRequest", "open_panel"}:
+                found.append(name)
+    return found
+
+
+def test_task_selection_does_not_depend_on_ui_or_present_objects():
+    for path in sources():
+        assert _presentation_dependencies(path.read_text()) == [], path.name
+
+
+@pytest.mark.parametrize("source", [
+    "from rey_console.ai_task_workbench import AITaskWorkbenchPanel",
+    "from rey_lib.presentation import Projection",
+    "presenter.present(request)",
+    "workbench.mount(host)",
+])
+def test_task_selection_guard_rejects_presentation_dependencies(source):
+    assert _presentation_dependencies(source)
+
+
+def test_task_selection_guard_accepts_domain_task_retention():
+    assert _presentation_dependencies("self._workbench_tasks[key] = task.id") == []

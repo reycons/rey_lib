@@ -19,7 +19,8 @@ from typing import Any, Callable
 
 import httpx
 import pytest
-from corehttp.transport.httpx import HttpXTransport
+from rey_lib.web_utils.connection import _new_wire_client
+from rey_lib.web_utils import connection as connection_module
 
 from rey_lib import web_utils
 from rey_lib.control.control import Control
@@ -79,9 +80,11 @@ def _wire(monkeypatch: pytest.MonkeyPatch,
         seen.append(request)
         return handler(request)
 
+    monkeypatch.setattr(connection_module, "_new_wire_client", lambda **options:
+        _new_wire_client(transport=httpx.MockTransport(answer), **options))
+
     def connection(config: Any, ctx: Any) -> HttpConnection:
-        one = HttpConnection(config, ctx, transport=HttpXTransport(
-            client=httpx.Client(transport=httpx.MockTransport(answer))))
+        one = HttpConnection(config, ctx)
         built.append(one)
         return one
 

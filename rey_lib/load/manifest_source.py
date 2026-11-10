@@ -298,18 +298,19 @@ class ManifestSource:
         """Delete the selected transform, resolve the selection, and hydrate both objects.
 
         ``delete`` removes it with its query and columns (the database's FK
-        cascade) and chooses no other default. No read: the retained rows hold
-        every transform of the type, so dropping the deleted one's rows is the
-        persisted state. The selection then resolves as it always does -- the
-        default, else unresolved -- and ``populate`` hydrates from it.
+        cascade) and chooses no other default. Reread through the governed
+        file getter: even without transforms it returns the file/profile rows.
+        Rehydrate this same object so file facts and retained rows agree. The
+        selection resolves as usual -- default, else unresolved.
 
         Args:
-            control: What answers ``maintain_transform``.
+            control: What answers ``maintain_transform`` and the governed file getter.
             source: The canonical Source to hydrate.
             transform: The canonical Transform to hydrate.
 
         Raises:
-            ValueError: If no transform is selected.
+            StateError: If no transform is selected.
+            DataStructureError: If the governed reread returns no file rows.
         """
         deleted = self.selected_transform_id
         if deleted is None:
@@ -317,9 +318,14 @@ class ManifestSource:
         control.maintain_transform(
             self.persisted_file_type_id, action="delete", transform_id=deleted,
         )
-        self._rows = [row for row in self._rows if _as_int(row.get("transform_id")) != deleted]
-        self.transform_choices = _transform_choices(self._rows)
-        self.select_transform(None)
+        rows = _read_governed_file(
+            control,
+            file_manifest_id=self.file_manifest_id,
+            file_mutation_id=self.file_mutation_id if self.opened_by == "mutation" else None,
+        )
+        self.__init__(
+            rows, opened_by=self.opened_by, requested_file_type_id=self.requested_file_type_id,
+        )
         self.populate(source, transform)
 
     def select_transform(self, transform_id: Optional[int]) -> None:

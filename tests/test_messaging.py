@@ -13,7 +13,7 @@ import pytest
 from rey_lib.config.config_utils import Namespace
 from rey_lib.messaging import approve_message, create_message, execute_message_set, send_message
 from rey_lib.messaging.errors import MessageApprovalError, MessageValidationError
-from rey_lib.messaging.models import Attachment, MessageContent, MessageRequest
+from rey_lib.messaging.models import Attachment
 from rey_lib.messaging.repository import FileMessageRepository
 
 
@@ -355,26 +355,26 @@ def test_validation_rejects_missing_body(tmp_path: Path) -> None:
         )
 
 
-def test_llm_drafter_is_constrained_to_content_only(tmp_path: Path) -> None:
-    """LLM drafting can provide content but routing remains request controlled."""
-    ctx = _ctx(tmp_path)
-
-    def drafter(_request: MessageRequest) -> MessageContent:
-        return MessageContent(subject="Drafted", body_text="Generated body")
-
+@pytest.mark.parametrize("mode", ["template", "static"])
+def test_supported_drafting_modes_keep_content_and_recipient_routing(tmp_path: Path, mode: str) -> None:
     message = create_message(
-        ctx,
-        message_type="llm_summary",
-        audience="internal",
-        channel="email",
-        recipients=["ops@example.com"],
-        generation_mode="llm",
-        dry_run=True,
-        llm_drafter=drafter,
+        _ctx(tmp_path), message_type="summary", audience="internal", channel="email",
+        recipients=["ops@example.com"], subject="Summary", body="Prepared content",
+        generation_mode=mode, dry_run=True,
     )
-
     assert message.request.recipients == ["ops@example.com"]
-    assert message.content.subject == "Drafted"
+    assert message.content.subject == "Summary"
+    assert message.content.body_text == "Prepared content"
+
+
+def test_unconnected_llm_mode_refuses_instead_of_silently_templating(tmp_path: Path) -> None:
+    """Messaging has no AI execution path; a requested one must not pretend success."""
+    with pytest.raises(MessageValidationError, match="Unsupported generation mode: llm"):
+        create_message(
+            _ctx(tmp_path), message_type="llm_summary", audience="internal", channel="email",
+            recipients=["ops@example.com"], generation_mode="llm",
+            subject="Static text", body="Must not silently become an AI draft", dry_run=True,
+        )
 
 
 def test_attachment_validation_uses_metadata_only(tmp_path: Path) -> None:

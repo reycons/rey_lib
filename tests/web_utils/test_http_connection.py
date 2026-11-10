@@ -650,11 +650,10 @@ class TestFailures:
 
 class TestLogging:
     def test_intent_is_logged_as_metadata_only(
-        self, app: Any, caplog: pytest.LogCaptureFixture,
+        self, wire: dict[str, Any], caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _seen, connect = app
         caplog.set_level(logging.DEBUG, logger=_LOGGER)
-        connection = connect()
+        connection = HttpConnection(_record(), ctx=_ctx())
 
         connection.send_request(HttpRequest(
             "POST", "https://user:pw@api.example.test/v3/mapping?token=q-secret#frag",
@@ -665,12 +664,11 @@ class TestLogging:
         assert lines == ["http connection example: POST https://api.example.test/v3/mapping"]
 
     def test_nothing_sensitive_reaches_any_record(
-        self, app: Any, caplog: pytest.LogCaptureFixture,
+        self, wire: dict[str, Any], caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _seen, connect = app
         caplog.set_level(logging.DEBUG)
 
-        connect().send_request(HttpRequest(
+        HttpConnection(_record(), ctx=_ctx()).send_request(HttpRequest(
             "POST", "https://api.example.test/v3/mapping?token=q-secret",
             headers={"X-Extra": "h-secret"}, json={"body": "b-secret"},
         ))
@@ -734,3 +732,50 @@ class TestThePublicSurface:
                 continue
             assert not type(value).__module__.startswith(("httpx", "corehttp"))
             assert not isinstance(value, PipelineClient)
+
+
+@pytest.mark.filterwarnings("error:Use 'content=<.*:DeprecationWarning")
+class TestOwnedRequestBodies:
+    @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+    @pytest.mark.parametrize("body,content_type", [
+        ({"json": {"label": "caf\u00e9", "jobs": [1, 2]}}, "application/json"),
+        ({"content": b"raw\x00bytes"}, None),
+        ({"content": "plain text"}, None),
+        ({"data": {"name": "a b", "value": "x&y"}}, "application/x-www-form-urlencoded"),
+    ], ids=["json", "bytes", "text", "form"])
+    def test_owned_transport_preserves_body_and_headers_without_deprecation(
+        self, wire, stream, body, content_type,
+    ):
+        import json
+        from urllib.parse import parse_qs
+        connection = HttpConnection(_record(), ctx=_ctx())
+        request = HttpRequest("POST", connection.format_url("mapping"), **body)
+        response = connection.send_request(request, stream=stream)
+        try:
+            [sent] = wire["requests"]
+            if "json" in body:
+                assert json.loads(sent.content) == body["json"]
+            elif "content" in body:
+                value = body["content"]
+                assert sent.content == (value.encode() if isinstance(value, str) else value)
+            else:
+                assert parse_qs(sent.content.decode()) == {k: [v] for k, v in body["data"].items()}
+            if content_type:
+                assert sent.headers["Content-Type"].startswith(content_type)
+            assert sent.headers["X-API-KEY"] == _SECRET
+        finally:
+            response.close()
+            connection.close()
+
+    def test_multipart_fields_and_file_content_are_preserved(self, wire):
+        connection = HttpConnection(_record(), ctx=_ctx())
+        response = connection.send_request(HttpRequest("POST", connection.format_url("upload"),
+            data={"description": "a file"}, files={"upload": ("sample.txt", b"file bytes", "text/plain")}))
+        try:
+            [sent] = wire["requests"]
+            assert sent.headers["Content-Type"].startswith("multipart/form-data; boundary=")
+            assert b'name="description"' in sent.content and b"a file" in sent.content
+            assert b'filename="sample.txt"' in sent.content and b"file bytes" in sent.content
+        finally:
+            response.close()
+            connection.close()

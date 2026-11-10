@@ -5,7 +5,7 @@ Implements P1 of SGC_Postgres_DDL_Comment_Enrichment_Prerequisites: select which
 already-enumerated database objects to export, by schema / object type / object
 name, with optional exclude rules and object-scoped ``force``.
 
-Pure and dependency-free — no I/O and no database access. Operates on the
+Pure — no I/O and no database access. Operates on the
 normalised object dicts produced by the exporter (each has ``schema``,
 ``object_type``, ``name``, ``key``). When no filter is supplied the exporter
 keeps its current whole-database behaviour; this module is only invoked when a
@@ -22,10 +22,16 @@ from __future__ import annotations
 from fnmatch import fnmatch
 from typing import Any
 
+from rey_lib.db.database_objects import (
+    DatabaseFunction, DatabaseProcedure, DatabaseTrigger, DatabaseView,
+)
+
 __all__ = ["validate_object_filter", "apply_object_filter"]
 
 # Programmable object types this SGC applies to.
-_VALID_OBJECT_TYPES = frozenset({"procedure", "function", "view", "trigger"})
+_VALID_OBJECT_TYPES = frozenset(
+    owner.KIND for owner in (DatabaseProcedure, DatabaseFunction, DatabaseView, DatabaseTrigger)
+)
 
 # A rule field value meaning "match any".
 _ANY = (None, "", "*")

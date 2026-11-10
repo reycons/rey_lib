@@ -103,6 +103,16 @@ def test_the_projection_equals_the_one_captured_before_the_cutover() -> None:
         # #1063 adds a governed turn budget; this older fixture states none.
         assert scope["settings"].pop("max_turns") is None
         assert scope["effective"].pop("max_turns") is None
+    # AI now declares task selection/opening for the existing Workbench (#1320).
+    # Account for that accepted addition explicitly; keep the historical golden
+    # intact so unrelated settings/inventory drift still fails this comparison.
+    assert projection.pop("workbench") == {
+        "scope": "default",
+        "select": {"role": {"act": "select", "on": "task"},
+                   "command": {"command": "select_task"}, "inputs": {"scope": ["scope"]}},
+        "open": {"role": {"act": "open", "on": "workbench"},
+                 "command": {"command": "open_workbench"}},
+    }
     golden = json.loads(_GOLDEN.read_text())
     assert golden["settings"].pop("read_only") is True
 

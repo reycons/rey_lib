@@ -33,7 +33,6 @@ class Installation:
         self,
         *,
         name: Any,
-        type: Any = None,
         installation_id: int | None = None,
     ) -> None:
         """Normalize the declared identity, once.
@@ -42,10 +41,6 @@ class Installation:
             name: The declared installation name. Required and non-blank -- an
                 installation that cannot say which one it is has no identity,
                 and every consumer downstream would have to guess.
-            type: The declared installation type, or None where the
-                configuration declares none. Neither defaulted nor validated
-                here: what a type *means* is the consuming application's
-                vocabulary, not this object's.
             installation_id: The registry id, where it is already known --
                 a child process receives its parent's rather than resolving a
                 second time. None where it has not been resolved yet, which is
@@ -63,12 +58,6 @@ class Installation:
                 "context that cannot name its own has nothing to attribute to."
             )
         self._name = resolved_name
-
-        # A declared-but-blank type is the same as no type: the configuration
-        # said nothing. Preserved as None rather than "" so one absent value has
-        # one spelling.
-        declared_type = str(type or "").strip()
-        self._type: str | None = declared_type or None
 
         self._installation_id: int | None = (
             int(installation_id) if installation_id is not None else None
@@ -124,15 +113,6 @@ class Installation:
             )
         self._installation_id = resolved
 
-    @property
-    def type(self) -> str | None:
-        """Return the declared installation type, or None where none was declared.
-
-        Deliberately undefaulted. The Console decides what an absent type means
-        for what it shows, and rey_lib does not carry application vocabulary.
-        """
-        return self._type
-
     def to_dict(self) -> dict[str, Any]:
         """Return the identity surface as plain data.
 
@@ -152,12 +132,10 @@ class Installation:
         is the defect; the lookup is not.
 
         Returns:
-            ``name``, ``type`` and ``installation_id``, each None where not
-            declared or not yet resolved.
+            ``name`` and ``installation_id``; the latter is None until resolved.
         """
         return {
             "name": self._name,
-            "type": self._type,
             "installation_id": self._installation_id,
         }
 
@@ -174,7 +152,7 @@ class Installation:
     def __repr__(self) -> str:
         """Return an unambiguous form, for a log line or a traceback."""
         return (
-            f"Installation(name={self._name!r}, type={self._type!r}, "
+            f"Installation(name={self._name!r}, "
             f"installation_id={self._installation_id!r})"
         )
 
@@ -188,7 +166,7 @@ class Installation:
         """
         if not isinstance(other, Installation):
             return NotImplemented
-        return self._name == other._name and self._type == other._type
+        return self._name == other._name
 
     def __hash__(self) -> int:
         """Hash by declared identity, so the object may key a mapping.
@@ -196,4 +174,4 @@ class Installation:
         Excluding the resolved id is what keeps this stable: attaching one
         must not move an object already used as a key.
         """
-        return hash((self._name, self._type))
+        return hash(self._name)

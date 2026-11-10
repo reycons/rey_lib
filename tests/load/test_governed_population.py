@@ -787,6 +787,20 @@ class TestANewSavedSetting:
         assert transform.value("persistence")["transform_id"] == 22
 
 
+class _AfterDelete(_Maintaining, _Reader):
+    """The governed post-delete result, supplied independently of local retained rows."""
+
+    def __init__(self, rows):
+        _Maintaining.__init__(self)
+        _Reader.__init__(self, rows)
+        self.reads = []
+
+    def get_file_manifests(self, **filters):
+        assert self.calls and self.calls[-1]["action"] == "delete"
+        self.reads.append(filters)
+        return self.rows
+
+
 class TestDeletingTheSelectedSavedSetting:
     """Delete: the routine removes it; ManifestSource resolves the selection and hydrates."""
 
@@ -796,7 +810,7 @@ class TestDeletingTheSelectedSavedSetting:
         governed = _manifest(self._two())
         governed.select_transform(21)
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
-        control = _Maintaining()
+        control = _AfterDelete([row for row in self._two() if row["transform_id"] == 20])
 
         governed.delete_transform(control, source, transform)
 
@@ -807,7 +821,7 @@ class TestDeletingTheSelectedSavedSetting:
         governed.select_transform(21)
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
 
-        governed.delete_transform(_Maintaining(), source, transform)
+        governed.delete_transform(_AfterDelete([row for row in self._two() if row["transform_id"] == 20]), source, transform)
 
         assert [one["transform_id"] for one in governed.transform_choices] == [20]
         assert governed.selected_transform_id == 20
@@ -818,7 +832,7 @@ class TestDeletingTheSelectedSavedSetting:
         governed = _manifest(self._two())
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
 
-        governed.delete_transform(_Maintaining(), source, transform)
+        governed.delete_transform(_AfterDelete([row for row in self._two() if row["transform_id"] == 21]), source, transform)
 
         assert [one["is_default"] for one in governed.transform_choices] == [False]
         assert governed.selected_transform_id is None
@@ -832,22 +846,59 @@ class TestDeletingTheSelectedSavedSetting:
             governed.delete_transform(control, source, transform)
         assert control.calls == []
 
-    def test_nothing_is_read(self) -> None:
-        reads: list[int] = []
-
-        class _Counting(_Reader):
-            def get_file_manifests(self, *args: Any, **kwargs: Any):
-                reads.append(1)
-                return super().get_file_manifests(*args, **kwargs)
-
-        governed = ManifestSource.create(
-            _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
-        )
+    def test_the_governed_file_is_read_once_after_deletion(self) -> None:
+        governed = _manifest(self._two())
+        governed.select_transform(21)
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        control = _AfterDelete([row for row in self._two() if row["transform_id"] == 20])
 
-        governed.delete_transform(_Maintaining(), source, transform)
+        governed.delete_transform(control, source, transform)
 
-        assert len(reads) == 1
+        assert control.reads == [{"file_manifest_id": 10, "file_mutation_id": None,
+                                  "effective_mutation": True}]
+
+    @pytest.mark.parametrize("opened_by", ["manifest", "mutation"])
+    def test_deleting_the_last_transform_preserves_real_file_rows_and_object_identity(self, opened_by):
+        initial = _row(resolved_query_sql="select 'old'")
+        governed = ManifestSource([initial], opened_by=opened_by, requested_file_type_id=4)
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        identities = tuple(map(id, (governed, source, transform)))
+        # The getter's left-joined row still holds the file/profile after its
+        # last transform is gone. Fresh file facts must replace stale ones.
+        persisted = _row(transform_id=None, transform_column_id=None,
+                         transform_is_default=None, transform_row_filter=None,
+                         column_name=None, source_column=None, column_ordinal=None,
+                         column_datatype=None, transform_type=None, transform_config=None,
+                         column_is_exported=None, path="/data/incoming/current.txt",
+                         file_name="current.txt", resolved_query_sql=None)
+        control = _AfterDelete([persisted])
+
+        governed.delete_transform(control, source, transform)
+
+        assert tuple(map(id, (governed, source, transform))) == identities
+        assert governed._rows == [persisted]
+        assert governed.transform_choices == [] and governed.selected_transform_id is None
+        assert governed.path == "/data/incoming/current.txt"
+        assert governed.file_facts["file_name"] == "current.txt"
+        assert governed.layout == "DELIMITED_HEADER"
+        assert str(governed.file().path) == governed.path
+        assert str(governed.data_file().path) == governed.path
+        assert governed.working_file_name == "current.txt"
+        assert governed.working_base_name == "current"
+        assert source.value("file") == governed.path
+        assert source.value("statement") == ""
+        assert (governed.file_manifest_id, governed.file_mutation_id, governed.persisted_file_type_id) == (10, 25, 4)
+        assert control.reads == [{"file_manifest_id": 10,
+                                  "file_mutation_id": 25 if opened_by == "mutation" else None,
+                                  "effective_mutation": opened_by == "manifest"}]
+
+    def test_empty_reread_is_refused_without_emptied_or_fabricated_local_rows(self):
+        governed = _manifest([_row()])
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        before = list(governed._rows)
+        with pytest.raises(DataStructureError, match="returned no rows"):
+            governed.delete_transform(_AfterDelete([]), source, transform)
+        assert governed._rows == before
 
 
 def _transform_choices_after_reread(governed: ManifestSource) -> list[dict[str, Any]]:

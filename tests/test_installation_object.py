@@ -46,11 +46,10 @@ def _write_config(root: Path, body: str) -> Path:
 
 @pytest.fixture()
 def installation_config(tmp_path: Path) -> Path:
-    """An installation declaring a name and a type."""
+    """An installation declaring its identity."""
     return _write_config(tmp_path, f"""\
 installation:
   name: ccc
-  type: explorer_only
 
 paths:
   - name: root
@@ -80,31 +79,13 @@ paths:
 class TestTheSurfaceIsIdentityOnly:
     """Identity, and deliberately nothing else."""
 
-    def test_it_carries_name_and_type(self, installation_config: Path) -> None:
+    def test_it_carries_name(self, installation_config: Path) -> None:
         """The declared identity reaches the object."""
         ctx = build_ctx_from_path(installation_config)
 
         assert type(ctx.installation) is Installation
         assert ctx.installation.name == "ccc"
-        assert ctx.installation.type == "explorer_only"
-
-    def test_an_undeclared_type_is_none_not_defaulted(self, tmp_path: Path) -> None:
-        """Undeclared stays undeclared.
-
-        What an absent type *means* is the consuming application's decision --
-        the Console defaults it to standard -- so defaulting it here would put
-        application vocabulary in rey_lib and give two answers.
-        """
-        config = _write_config(tmp_path, f"""\
-installation:
-  name: ccc
-
-paths:
-  - name: root
-    path: {tmp_path}
-""")
-
-        assert build_ctx_from_path(config).installation.type is None
+        assert not hasattr(ctx.installation, "type")
 
     def test_it_has_no_paths(self, installation_config: Path) -> None:
         """There is no second way to reach the path authority.
@@ -157,8 +138,7 @@ class TestDeclaredOrAbsent:
         second is an installation whose configuration forgot to say which.
         """
         config = _write_config(tmp_path, f"""\
-installation:
-  type: explorer_only
+installation: {{}}
 
 paths:
   - name: root
@@ -191,15 +171,13 @@ class TestTheMistakeIsNoLongerExpressible:
     def test_to_dict_is_the_identity_surface(self) -> None:
         """to_dict states what the object models, not what the YAML held."""
         assert Installation(
-            name="ccc", type="explorer_only", installation_id=2,
+            name="ccc", installation_id=2,
         ).to_dict() == {
             "name": "ccc",
-            "type": "explorer_only",
             "installation_id": 2,
         }
         assert Installation(name="ccc").to_dict() == {
             "name": "ccc",
-            "type": None,
             "installation_id": None,
         }
 
