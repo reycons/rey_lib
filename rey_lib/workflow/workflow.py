@@ -638,25 +638,14 @@ class Workflow:
 
     # -- saving its definition (#1325) ---------------------------------------
 
-    def save(self) -> None:
-        """Save the complete working definition to the governed workflow it came from.
+    def configured_definition(self) -> dict[str, Any]:
+        """The complete working definition, as configured: what :meth:`save` sends.
 
-        THE WORKFLOW SAVES ITSELF, as the Loader's Transform does: its config
-        (each step's apply_only and always_run as ``execution.steps``), every
-        process and every step in order, as configured -- {} expressions intact --
-        each with the governed id it holds (None for one added while editing),
-        through its own Control. The database owns how they become rows: updated,
-        inserted, or deleted when not sent. The ids it answers with, in order,
-        become the processes' and steps' governed ids.
-
-        Raises:
-            AppError: While a direction runs, or when the answer does not account
-                for every process and step.
-            ConfigError: When this Workflow holds no Control to save through.
+        Its config (each step's apply_only and always_run as ``execution.steps``),
+        every process and every step in order, {} expressions intact, each with the
+        governed id it holds (None for one added while editing). A copy: nothing
+        held is shared. Equal definitions are the same working state.
         """
-        self.refuse_edit_while_directing()
-        if self.control is None:
-            raise ConfigError(f"workflow '{self.name}' has no control database to save to.")
         config = deepcopy(self.configured_config or {})
         execution = dict(config.get("execution") or {})
         execution["steps"] = {
@@ -664,7 +653,7 @@ class Workflow:
             for step in self.steps.values()
         }
         config["execution"] = execution
-        definition = {"config": config, "processes": [
+        return {"config": config, "processes": [
             {
                 "workflow_process_id": process.governed_id,
                 "name": process.name,
@@ -684,6 +673,29 @@ class Workflow:
             }
             for process in self.processes
         ]}
+
+    def save(self) -> None:
+        """Save the complete working definition to the governed workflow it came from.
+
+        THE WORKFLOW SAVES ITSELF, as the Loader's Transform does: its config
+        (each step's apply_only and always_run as ``execution.steps``), every
+        process and every step in order, as configured -- {} expressions intact --
+        each with the governed id it holds (None for one added while editing),
+        through its own Control. The database owns how they become rows: updated,
+        inserted, or deleted when not sent. The ids it answers with, in order,
+        become the processes' and steps' governed ids.
+
+        Raises:
+            AppError: While a direction runs, or when the answer does not account
+                for every process and step.
+            ConfigError: When this Workflow holds no Control to save through.
+        """
+        self.refuse_edit_while_directing()
+        if self.control is None:
+            raise ConfigError(f"workflow '{self.name}' has no control database to save to.")
+        definition = self.configured_definition()
+        config = definition["config"]
+        execution = config["execution"]
         saved = self.control.update_workflow(self.workflow_id, definition)
         steps = list(self.steps.values())
         if (len(saved["processes"]) != len(self.processes)

@@ -182,3 +182,38 @@ class TestTheContextOffered:
 def test_the_roles_and_statuses_are_the_tables_own() -> None:
     assert supported_conversation_roles() == ["user", "assistant"]
     assert supported_conversation_statuses() == ["active", "archived"]
+
+
+class TestAnOutcomeIsRecordedAfterTheExchange:
+    """#1325: what became of a run's answer -- applied, refused, discarded -- is one
+    more message under that run, stated by the application that owns the answer."""
+
+    def test_the_outcome_follows_its_runs_exchange(self) -> None:
+        control = _Control(run_statuses={5: "SUCCEEDED"})
+        conversation = _restored(control)
+        conversation.record_exchange(prompt="Add a step", run_id=5, answer='{"operations": []}')
+
+        conversation.record_outcome(run_id=5, content="applied: workflow.add_step")
+
+        recorded = [(one["role"], one["run_id"], one["content"])
+                    for one in conversation.messages()]
+        assert recorded == [
+            ("user", 5, "Add a step"), ("assistant", 5, '{"operations": []}'),
+            ("assistant", 5, "applied: workflow.add_step")]
+
+    def test_a_restored_runs_outcome_is_recorded(self) -> None:
+        control = _Control(run_statuses={5: "SUCCEEDED"})
+        _restored(control).record_exchange(prompt="Add a step", run_id=5, answer="{}")
+
+        again = _restored(control)
+        again.record_outcome(run_id=5, content="discarded")
+
+        assert again.messages()[-1]["content"] == "discarded"
+
+    def test_a_run_with_no_exchange_has_no_outcome(self) -> None:
+        control = _Control()
+        conversation = _restored(control)
+
+        with pytest.raises(AIRequestError, match="no exchange in this conversation"):
+            conversation.record_outcome(run_id=9, content="applied")
+        assert control.messages == []

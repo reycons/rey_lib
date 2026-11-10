@@ -874,6 +874,16 @@ class TestTheWorkflowSavesItsCompleteDefinition:
         assert workflow.config["execution"]["steps"]["tidy"] == {
             "apply_only": False, "always_run": False}
 
+    def test_the_configured_definition_is_what_save_sends_and_follows_each_edit(self) -> None:
+        workflow, control = _saving()
+        before = workflow.configured_definition()
+
+        assert workflow.configured_definition() == before
+        _process(workflow, "second").move_step("s", 0)
+        assert workflow.configured_definition() != before
+        workflow.save()
+        assert control.saved[0][1] == workflow.configured_definition()
+
     def test_a_short_answer_is_refused(self) -> None:
         workflow, control = _saving()
         control.update_workflow = lambda _id, _definition: {"processes": [10], "steps": []}
