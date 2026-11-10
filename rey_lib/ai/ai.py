@@ -308,6 +308,11 @@ class AI:
             raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
         self._workbench_selection[installation] = scope
 
+    def workbench_scope(self, installation: str) -> str:
+        """The scope this AI's Workbench is selected on: a task_key, or "" for Default."""
+        scope = self._workbench_selection.get(installation, _DEFAULT_SCOPE)
+        return "" if scope == _DEFAULT_SCOPE else scope
+
     def workbench_task(self, control: Any, installation: str) -> AITask:
         """The selected live task, with the working settings, never implicitly saved.
 
