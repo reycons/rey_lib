@@ -303,3 +303,63 @@ def test_the_application_answers_what_its_ai_app_asks_through_its_own_transports
     assert ai.answer_requests(answer) == "holder-ref"
     assert transports.answerers == [answer]
     assert transports.launched == []
+
+
+# -- the reader chooses the engine; ai_app chooses the task (#1341) -------------------
+
+def _with_engines(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Installation rows as ai.ai_installation_vw carries them: its engines on each."""
+    engines = [{"profile_key": "qwen3-coder-next:latest", "is_enabled": True},
+               {"profile_key": "claude_subscription", "is_enabled": True},
+               {"profile_key": "local_reasoning", "is_enabled": False},
+               {"profile_key": "local_precision", "is_enabled": True}]
+    return [{**row, "engines": engines, "default_profile_key": "qwen3-coder-next:latest"}
+            for row in rows]
+
+
+def test_the_installations_enabled_engines_are_offered_default_first() -> None:
+    control = _Control(_declaration("comment_code"), _with_engines(_installation("comment_code")))
+
+    ai = ApplicationAI.at_load(control, "local", 3, "rey_db_admin")
+
+    assert ai.engines() == ("qwen3-coder-next:latest", "claude_subscription", "local_precision")
+
+
+def test_with_no_task_named_ai_app_is_given_the_applications_tasks_to_choose_from() -> None:
+    transports = _Transports()
+    ai = ApplicationAI(("comment_code", "generate_sql"), transports,
+                       engines=("qwen3-coder-next:latest", "claude_subscription"))
+
+    ai.call(object(), "", "add comments", lambda message: None, engine="claude_subscription")
+    ai.call(object(), "", "add comments", lambda message: None)
+
+    assert transports.transport.requested == [
+        {"command": "task", "candidates": ["comment_code", "generate_sql"], "object": "ai",
+         "profile_key": "claude_subscription"},
+        {"command": "task", "candidates": ["comment_code", "generate_sql"], "object": "ai"},
+    ]
+
+
+def test_a_named_task_runs_on_the_engine_chosen_for_the_session() -> None:
+    transports = _Transports()
+    ai = ApplicationAI(("generate_sql",), transports, engines=("local_precision",))
+
+    ai.call(object(), "generate_sql", "count", lambda message: None, engine="local_precision")
+
+    assert transports.transport.requested == [
+        {"command": "task", "task_key": "generate_sql", "object": "ai",
+         "profile_key": "local_precision"}]
+
+
+@pytest.mark.parametrize("task_keys, engine, refusal", [
+    (("generate_sql",), "gpt-anything", "is not one of this installation's"),
+    ((), None, "has no AI tasks available"),
+], ids=["unknown-engine", "no-tasks"])
+def test_a_choice_outside_the_installation_is_refused_before_ai_app_launches(
+        task_keys: tuple[str, ...], engine: Any, refusal: str) -> None:
+    transports = _Transports()
+    ai = ApplicationAI(task_keys, transports, engines=("local_precision",))
+
+    with pytest.raises(AIRequestError, match=refusal):
+        ai.call(object(), "", "count", lambda message: None, engine=engine)
+    assert transports.launched == []

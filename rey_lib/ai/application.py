@@ -53,6 +53,22 @@ _AI_OPERATION = "serve"
 _AI_SUBJECT = "ai.settings"
 
 
+def _engines(configured: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """The installation's enabled engines by profile_key, its default first (#1341).
+
+    As its AI configuration states them: every row carries the installation's
+    engines and its default profile.
+    """
+    first = configured[0] if configured else {}
+    keys = sorted(
+        str(one.get("profile_key") or "") for one in (first.get("engines") or [])
+        if isinstance(one, Mapping) and one.get("is_enabled") is not False
+        and str(one.get("profile_key") or "")
+    )
+    default = str(first.get("default_profile_key") or "")
+    return tuple(([default] if default in keys else []) + [one for one in keys if one != default])
+
+
 class ApplicationAI:
     """The AI tasks one application may run, and its own transport to ai_app.
 
@@ -64,8 +80,11 @@ class ApplicationAI:
     """
 
     def __init__(self, task_keys: Sequence[str], transports: AppTransports,
-                 application_id: int | None = None) -> None:
+                 application_id: int | None = None, engines: Sequence[str] = ()) -> None:
         self._task_keys = tuple(str(key) for key in task_keys)
+        #: The installation's enabled engines by profile_key, its default first (#1341):
+        #: what the reader may choose to run a session's AI on.
+        self._engines = tuple(str(key) for key in engines)
         #: The application's own id (code.application), as its declaration row
         #: carries it: what an AI conversation it owns is recorded under (#1338).
         #: None where no declaration was read.
@@ -111,9 +130,10 @@ class ApplicationAI:
         if declared.get("is_enabled") is False:
             return cls((), transports if transports is not None else AppTransports(),
                        application_id)
+        configured = control.ai_configuration(installation)
         enabled = {
             str(row.get("task_key") or "")
-            for row in control.ai_configuration(installation)
+            for row in configured
             if row.get("is_enabled") is not False
         }
         keys = [
@@ -124,17 +144,22 @@ class ApplicationAI:
         logger.debug("application %s has AI tasks %s in installation %s",
                      application, keys, installation)
         return cls(keys, transports if transports is not None else AppTransports(),
-                   application_id)
+                   application_id, _engines(configured))
 
     def task_keys(self) -> tuple[str, ...]:
         """The governed tasks this application may run, in declared order."""
         return self._task_keys
 
+    def engines(self) -> tuple[str, ...]:
+        """The engines a session's AI may run on, by profile_key, the default first."""
+        return self._engines
+
     def call(self, runtime: Any, task_key: str, text: str, relay: Relay,
              context: Mapping[str, Any] | None = None,
              origin: Mapping[str, Any] | None = None, *,
              subject_reference: Mapping[str, Any] | None = None,
-             coordinates: Mapping[str, Any] | None = None) -> None:
+             coordinates: Mapping[str, Any] | None = None,
+             engine: str | None = None) -> None:
         """Run one available task on ai_app's live AI with ``text`` as its input.
 
         The AI's own sequence over its hosted commands: ``task`` opens the governed
@@ -165,16 +190,31 @@ class ApplicationAI:
             AIUnavailableError: When ai_app cannot be launched or does not attach.
         """
         key = str(task_key or "")
-        if key not in self._task_keys:
+        if key and key not in self._task_keys:
             raise AIRequestError(
                 f"AI task {key!r} is not available to this application; available: "
                 f"{', '.join(self._task_keys) or 'none'}."
             )
+        if not key and not self._task_keys:
+            raise AIRequestError("This application has no AI tasks available.")
+        chosen = str(engine or "")
+        if chosen and chosen not in self._engines:
+            raise AIRequestError(
+                f"AI engine {chosen!r} is not one of this installation's: "
+                f"{', '.join(self._engines) or 'none'}."
+            )
         if coordinates is not None and not subject_reference:
             raise AIRequestError("Hosted coordinates require a governed subject reference.")
         transport = self._ai_app(runtime)
-        request: dict[str, Any] = {"command": "task", "task_key": key,
-                                   "object": self._ai_object}
+        # A task named runs as named; with none, ai_app chooses among this
+        # application's available tasks (#1341). The engine chosen for the session,
+        # where one is, runs both the choice and the task.
+        request: dict[str, Any] = (
+            {"command": "task", "task_key": key, "object": self._ai_object} if key
+            else {"command": "task", "candidates": list(self._task_keys),
+                  "object": self._ai_object})
+        if chosen:
+            request["profile_key"] = chosen
         if subject_reference is not None:
             request["subject_reference"] = dict(subject_reference)
         if origin is not None:
