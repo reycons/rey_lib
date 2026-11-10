@@ -49,7 +49,7 @@ from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 from rey_lib.errors.error_utils import StateError
 from rey_lib.logs import AppLogger
 
-__all__ = ["Source", "SOURCE_FIELD_METADATA", "SOURCE_FIELDS", "SOURCE_KINDS"]
+__all__ = ["Source", "SOURCE_FIELD_METADATA", "SOURCE_FIELDS", "SOURCE_PARAMETERS", "SOURCE_KINDS"]
 
 _logger = AppLogger(__name__)
 
@@ -67,7 +67,7 @@ class _Kind:
 SOURCE_KINDS: tuple[_Kind, ...] = (
     # `file-mutation-id` names WHICH governed mutation `file` is the path of,
     # where the source was populated from a governed file. Never required.
-    _Kind("file", ("file", "file-type", "file-mutation-id"), ("file",)),
+    _Kind("file", ("file", "file-type", "encoding", "file-mutation-id"), ("file",)),
     _Kind("database", ("source-connection", "statement"),
           ("source-connection", "statement")),
     _Kind("sql_file", ("source-connection", "sql-file"),
@@ -83,6 +83,9 @@ SOURCE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     name for kind in SOURCE_KINDS for name in kind.fields
 ))
 
+#: Invocation fields; encoding remains an optional library/configuration setting.
+SOURCE_PARAMETERS: tuple[str, ...] = tuple(name for name in SOURCE_FIELDS if name != "encoding")
+
 #: What each Source field is: the type of value it holds, what it means, and --
 #: only where one helps -- an example of its form. The one statement of these
 #: facts: the projection carries them and the loader's CLI declaration reads
@@ -92,6 +95,7 @@ SOURCE_FIELD_METADATA: dict[str, dict[str, str]] = {
         "value_type": "path", "placeholder": "/path/to/file.csv",
         "description": "The one file to load.",
     },
+    "encoding": {"value_type": "string", "description": "The file's text encoding; omitted uses the format default."},
     "file-type": {
         "value_type": "choice", "placeholder": "Auto detect",
         "description": "The file's format, where its suffix does not name one.",
@@ -632,6 +636,7 @@ class Source:
         if kind == "file":
             return DataFile.for_path(
                 str(held["file"]), file_type=str(held.get("file-type") or ""),
+                **({"encoding": str(held["encoding"])} if held.get("encoding") else {}),
             )
         if kind == "database":
             return self._query(ctx, held["source-connection"], self.resolved_statement())

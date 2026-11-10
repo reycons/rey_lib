@@ -45,8 +45,10 @@ def engine():
 
 @pytest.fixture()
 def named(engine, monkeypatch):
+    from rey_lib.load import source as source_module
+
     monkeypatch.setattr(
-        load_operation, "shared_connection",
+        source_module, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(handle=lambda: engine),
     )
     return SimpleNamespace()

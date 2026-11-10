@@ -148,14 +148,14 @@ class TestNewAndDelete:
         assert control.maintained == [(4, {"action": "new", "transform_id": 20})]
         assert control.reads == 2
 
-    def test_delete_drops_the_selected_and_rehydrates_without_a_read(self) -> None:
+    def test_delete_rereads_the_governed_file_before_rehydrating(self) -> None:
         runtime, source, transform, control = _opened()
         transform.select_saved_setting(runtime, 21)
 
         transform.delete_saved_setting(runtime)
 
         assert [given["action"] for _, given in control.maintained] == ["delete"]
-        assert control.reads == 1
+        assert control.reads == 2
         assert source.governed_context()["selected_transform_id"] == 20
 
     def test_a_released_source_has_no_saved_settings(self) -> None:

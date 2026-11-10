@@ -23,7 +23,8 @@ import pytest
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.load.configured_load import ConfiguredLoad
-from rey_lib.data.data_transform import IdentityTransform
+from rey_lib.load.transform import Transform
+from rey_lib.load.target import Target
 
 
 def _files(tmp_path: Path, *names: str) -> Path:
@@ -34,9 +35,7 @@ def _files(tmp_path: Path, *names: str) -> Path:
 
 #: Where this definition writes. Held by the definition now, so every file in
 #: the feed is written to one object rather than each resolving its own.
-_TARGET = DatabaseObjectIdentity(
-    connection="c", catalog="", schema="s", name="t",
-)
+_TARGET = Target({"connection": "c", "table": "s.t"}, selected="database")
 
 
 def _configured(tmp_path: Path, load_one, **kwargs) -> ConfiguredLoad:
@@ -44,8 +43,7 @@ def _configured(tmp_path: Path, load_one, **kwargs) -> ConfiguredLoad:
         source_dir=tmp_path,
         pattern="*.csv",
         load_one_file=load_one,
-        transform=IdentityTransform(),
-        loader=SimpleNamespace(),          # not reached: load_one is injected
+        transform=Transform(),
         target=_TARGET,
         name="a_feed.a_load",
         **kwargs,
@@ -102,7 +100,7 @@ class TestTheBatchIsAnAggregate:
 
         total = _configured(
             tmp_path,
-            lambda source, *_a, **_k: (loaded.append(source.path.name), 10)[1],
+            lambda source, *_a, **_k: (loaded.append(Path(source.value("file")).name), 10)[1],
         ).load(object())
 
         assert total == 30
@@ -120,8 +118,8 @@ class TestTheBatchIsAnAggregate:
         attempted: list = []
 
         def _load_one(source, *_args, **_kwargs) -> int:
-            attempted.append(source.path.name)
-            return 0 if source.path.name == "b.csv" else 5
+            attempted.append(Path(source.value("file")).name)
+            return 0 if Path(source.value("file")).name == "b.csv" else 5
 
         total = _configured(tmp_path, _load_one).load(object())
 
@@ -139,7 +137,7 @@ class TestTheBatchIsAnAggregate:
         attempted: list = []
 
         def _load_one(source, *_args, **_kwargs) -> int:
-            attempted.append(source.path.name)
+            attempted.append(Path(source.value("file")).name)
             raise ConfigError("destination s.t does not exist")
 
         with pytest.raises(ConfigError):
@@ -167,7 +165,7 @@ class TestTheBatchIsAnAggregate:
 class TestOneConstructionPath:
     """One definition means one graph, and every file executes through it."""
 
-    def test_every_file_is_handed_the_SAME_transform_and_loader(
+    def test_every_file_is_handed_the_same_canonical_transform_and_target(
         self, tmp_path: Path
     ) -> None:
         """Not rebuilt per file, and not rebuilt by the per-file step.
@@ -182,7 +180,7 @@ class TestOneConstructionPath:
         handed: list = []
 
         def _load_one(_source, transform, _target, **objects) -> int:
-            handed.append((transform, objects["loader"]))
+            handed.append((transform, _target))
             return 0
 
         configured = _configured(tmp_path, _load_one)
@@ -190,7 +188,7 @@ class TestOneConstructionPath:
 
         assert len(handed) == 3
         assert all(t is configured.transform for t, _l in handed)
-        assert all(l is configured.loader for _t, l in handed)
+        assert all(t is configured.target for _m, t in handed)
 
     def test_the_SOURCE_OBJECT_is_handed_over_built(self, tmp_path: Path) -> None:
         """Built here, from the definition's rule -- not the rule itself.
@@ -211,11 +209,11 @@ class TestOneConstructionPath:
         )
         configured.load(object())
 
-        assert handed[0].path.name == "a.csv"
-        assert handed[0].file_type == "JSONL"
+        assert Path(handed[0].value("file")).name == "a.csv"
+        assert handed[0].value("file-type") == "JSONL"
         # The definition's setting, not the suffix's -- a .csv read as JSONL
         # proves the rule that built it was this definition's.
-        assert handed[0].encoding == "utf-8"
+        assert handed[0].value("encoding") == "utf-8"
 
     def test_the_TARGET_is_the_definition_s_and_the_same_for_every_file(
         self, tmp_path: Path
@@ -241,7 +239,7 @@ class TestOneConstructionPath:
 class TestTheBoundary:
     """What this object interprets, and what it refuses to."""
 
-    def test_it_builds_data_files_from_the_definitions_settings(
+    def test_it_builds_canonical_sources_from_the_definitions_settings(
         self, tmp_path: Path
     ) -> None:
         """Every file in a feed is read the same way.
@@ -254,10 +252,10 @@ class TestTheBoundary:
         configured = _configured(tmp_path, lambda *_a, **_k: 0,
                                  file_type="JSONL", encoding="utf-8")
 
-        built = configured.data_file_for(tmp_path / "a.csv")
+        built = configured.source_for(tmp_path / "a.csv")
 
-        assert built.file_type == "JSONL"
-        assert built.encoding == "utf-8"
+        assert built.value("file-type") == "JSONL"
+        assert built.value("encoding") == "utf-8"
 
     def test_it_interprets_no_configuration_itself(self) -> None:
         """It RECEIVES resolved values; it does not read ctx or parse one.

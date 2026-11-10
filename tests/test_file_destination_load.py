@@ -34,6 +34,7 @@ import pytest
 from rey_lib.db.query_source import QuerySource
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
+from rey_lib.load import source as source_module
 from rey_lib.errors.error_utils import ConfigError
 from tests.support.connector_double import ConnectorPrimitives
 from tests.support.table_primitive import stand_beneath_the_table
@@ -334,7 +335,7 @@ class TestTheWayIn:
     ) -> None:
         out = tmp_path / "rows.csv"
         monkeypatch.setattr(
-            load_operation, "shared_connection",
+            source_module, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(handle=lambda: engine),
         )
 
@@ -365,7 +366,7 @@ class TestTheWayIn:
     ) -> None:
         """Refused BY NAME, before anything is read or written."""
         monkeypatch.setattr(
-            load_operation, "shared_connection",
+            source_module, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(handle=lambda: engine),
         )
 

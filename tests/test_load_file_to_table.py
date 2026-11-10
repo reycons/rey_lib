@@ -21,7 +21,7 @@ import pytest
 
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import load_operation
-from rey_lib.load import configured_load
+from rey_lib.load import source as source_module
 from tests.support.connector_double import ConnectorPrimitives
 from tests.support.table_primitive import stand_beneath_the_table
 
@@ -233,14 +233,14 @@ class TestEncodingIsALibraryParameter:
         `jsonl_read_ignores_the_declared_encoding` on the backlog.
         """
         seen: list[str] = []
-        real = configured_load.DataFile.for_path
+        real = source_module.DataFile.for_path
 
         def _record(path, **kwargs):
             source = real(path, **kwargs)
             seen.append(source.encoding)
             return source
 
-        monkeypatch.setattr(configured_load.DataFile, "for_path", _record)
+        monkeypatch.setattr(source_module.DataFile, "for_path", _record)
 
         _load(tmp_path, monkeypatch, run_log, _Adapter(exists=True),
               encoding="latin-1")

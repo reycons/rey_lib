@@ -907,7 +907,7 @@ class TestFormFields:
 
     def test_each_kind_less_its_authored_field(self) -> None:
         assert Transform.form_fields() == {
-            "identity": [],
+            "identity": ["declaration"],
             "declaration": [],
             "yaml": ["transform-file"],
             "http": [],

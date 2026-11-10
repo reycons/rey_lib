@@ -37,12 +37,15 @@ class _FailingLoader:
 def database(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """A connection that can be rolled back, and a loader that fails."""
     rolled_back: list[str] = []
+    from rey_lib.load import source as source_module
+
     monkeypatch.setattr(
-        load_operation, "shared_connection",
+        source_module, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(handle=lambda: SimpleNamespace(
             commit=lambda: None, rollback=lambda: rolled_back.append("rollback"),
         )),
     )
+    monkeypatch.setattr(load_operation, "shared_connection", source_module.shared_connection)
     monkeypatch.setattr(load_operation, "_build_data_loader",
                         lambda *_a, **_k: _FailingLoader())
     return rolled_back

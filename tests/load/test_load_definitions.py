@@ -55,7 +55,7 @@ def test_a_file_source_that_does_not_exist_still_answers_unread() -> None:
 
     assert source.definition() == {
         "kind": "file",
-        "configuration": {"file": "/no/such/file.csv", "file-type": None,
+        "configuration": {"file": "/no/such/file.csv", "file-type": None, "encoding": None,
                           "file-mutation-id": None},
         "missing": [],
     }
@@ -113,7 +113,7 @@ def test_a_transform_never_reads_its_held_source_or_target() -> None:
 
     definition = transform.definition()
 
-    assert definition == {"kind": "identity", "configuration": {}, "declaration": None}
+    assert definition == {"kind": "identity", "configuration": {"declaration": None}, "declaration": None}
     assert "missing" not in definition
 
 

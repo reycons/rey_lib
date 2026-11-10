@@ -65,7 +65,6 @@ from rey_lib.db.database_objects import (
     schema_and_table,
 )
 from rey_lib.db.procedure_map import execute_sql_text
-from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files.data_file import DataFile
 from rey_lib.files.file import File
@@ -127,8 +126,6 @@ def load_files(
     ----------
     ctx : Any
 
-    conn : Any
-        Open backend connection. Caller manages the connection lifecycle.
     data_source : Any
         Namespace for one data_sources entry from ctx. Provides paths and
         transforms list.
@@ -145,9 +142,7 @@ def load_files(
     total_rows = 0
 
     try:
-        total_rows = _configured_load(ctx, run_log, data_source, load_cfg).load(
-            conn, run_log
-        )
+        total_rows = _configured_load(ctx, run_log, data_source, load_cfg).load(run_log)
 
     finally:
         _logger.exit(f"load_files done: {total_rows} total row(s) loaded")
@@ -342,9 +337,8 @@ def _http_mapping(ctx: Any, declared: Mapping[str, Any]) -> Any:
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
     """Build the transform for one load definition.
 
-    **The single place an IdentityTransform is constructed.** Both callers
-    are ``ConfiguredLoad`` construction sites, so what they produce cannot
-    drift.
+    The canonical Transform resolves identity schema metadata through this
+    builder. A configured feed never builds a resolved transform around it.
 
     ``transform_cfg`` may be None -- a DIRECT load has no configuration at
     all. Every read below is a ``getattr``, so absent configuration yields no
@@ -455,17 +449,15 @@ def _configured_load(
     per-file step, which needs it for run logging and file movements; those
     are not configuration.
     """
-    transform_cfg = _find_transform(
-        data_source.transforms, load_cfg.name, load_cfg.version,
-    )
-    # THE TARGET DATA OBJECT, resolved once where configuration is read. The
-    # connection it names comes from the same load block that has always
-    # named it, so nothing downstream reads that name again.
-    target = _destination_identity(
-        load_cfg.load.destination_table,
-        getattr(getattr(load_cfg, "load", None), "connection", "") or "",
-    )
-    create_declared = _create_destination_declared(load_cfg)
+    from rey_lib.load.source import Source
+    from rey_lib.load.transform import Transform
+    from rey_lib.load.target import Target
+    from rey_lib.load.execution import run_selected_load
+
+    transform_cfg = _find_transform(data_source.transforms, load_cfg.name, load_cfg.version)
+    target = Target({"connection": load_cfg.load.connection,
+                     "table": load_cfg.load.destination_table,
+                     "create": _create_destination_declared(load_cfg)}, selected="database")
     source_config = f"{data_source.name}.{load_cfg.name}"
 
     def _record_discovered(file_path: Path) -> None:
@@ -480,18 +472,12 @@ def _configured_load(
             size_bytes=file_path.stat().st_size if file_path.exists() else None,
         )
 
-    def _load_one(source: Any, transform: Any, target: Any,
+    def _load_one(source: Source, transform: Transform, target: Target,
                   **context: Any) -> int:
-        # The definition's own source, transform and target arrive here; this
-        # step wraps them in movements and evidence and builds nothing of its
-        # own.
-        return _load_one_file(
-            source, transform, target,
-            ctx=ctx,
-            transform_cfg=transform_cfg,
-            load_cfg=load_cfg,
-            paths=data_source.paths,
-            **context,
+        return run_selected_load(
+            ctx, context["run_log"], source, transform, target,
+            movements=getattr(load_cfg, "movements", None), paths=data_source.paths,
+            load_name=source_config,
         )
 
     return _ConfiguredLoad(
@@ -499,8 +485,7 @@ def _configured_load(
         pattern=resolve_pattern(load_cfg.pickup_pattern, load_cfg.version,
                                  ctx=ctx),
         load_one_file=_load_one,
-        transform=_build_identity_transform(transform_cfg),
-        loader=_build_data_loader(create_declared),
+        transform=Transform({"declaration": namespace_to_plain(transform_cfg)}, selected="identity"),
         target=target,
         file_type=getattr(transform_cfg, "file_type", "CSV"),
         encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
@@ -570,195 +555,54 @@ def load_file_to_table(
     Returns:
         Rows loaded.
     """
-    target = _destination_identity(destination, connection)
-    load_name = ".".join(
-        part for part in (target.catalog, target.schema, target.name) if part
-    )
+    from rey_lib.load.source import Source
+    from rey_lib.load.transform import Transform
+    from rey_lib.load.target import Target
+    from rey_lib.load.execution import run_selected_load
 
-    def _load_one(source: Any, transform: Any, target_: Any,
-                  **context: Any) -> int:
-        # movements=None: a direct load has no movement policy, which is not
-        # the same as one that moves nothing.
-        return _load_one_file(
-            source, transform, target_,
-            ctx=ctx, movements=None, load_name=load_name, **context,
-        )
-
-    return _ConfiguredLoad(
-        load_one_file=_load_one,
-        target=target,
-        explicit_files=[Path(file_path)],
-        # Through the builder, which is the ONE place a load's transform is
-        # chosen. No declaration means identity: a direct load has no
-        # configuration, and absent configuration produces no transform map
-        # and no declared columns -- exactly what such a load means.
-        transform=_build_transform(ctx, None, transform),
-        loader=_build_data_loader(
-            create_destination, replace_destination, recreate_destination,
-        ),
-        file_type=file_type,
-        encoding=encoding,
-        name=f"direct:{load_name}",
-    ).load(run_log)
+    source = Source({"file": str(file_path), "file-type": file_type,
+                     "encoding": encoding}, selected="file")
+    mapping = Transform({"transform": transform}, selected="declaration") if transform else Transform()
+    target = Target({"connection": connection, "table": destination,
+                     "create": create_destination, "replace": replace_destination,
+                     "recreate": recreate_destination}, selected="database")
+    return run_selected_load(ctx, run_log, source, mapping, target)
 
 
 def load_query_to_table(
-    ctx: Any,
-    run_log: Any,
-    statement: str,
-    source_connection: str,
-    destination: str,
-    connection: str,
-    *,
-    create_destination: bool = False,
-    replace_destination: bool = False,
-    recreate_destination: bool = False,
+    ctx: Any, run_log: Any, statement: str, source_connection: str,
+    destination: str, connection: str, *, create_destination: bool = False,
+    replace_destination: bool = False, recreate_destination: bool = False,
     transform: Any = None,
 ) -> int:
-    """Load what one statement returns into one named table.
+    """Construct canonical load objects from query/table arguments and execute them."""
+    from rey_lib.load.source import Source
+    from rey_lib.load.transform import Transform
+    from rey_lib.load.target import Target
+    from rey_lib.load.execution import run_selected_load
 
-    The database sibling of ``load_file_to_table``, and the construction site
-    for a load that begins at a database rather than a file:
-
-        QuerySource -> IdentityTransform -> DatabaseObjectIdentity
-
-    **It does not go through ``ConfiguredLoad``.** That object is a load
-    DEFINITION built around picking files up -- ``select_files``,
-    ``data_file_for``, ``input_files`` -- and a query is one source with
-    nothing to discover. Passing a statement through it would mean calling a
-    query a one-element file list, which is the flattening the boundary just
-    stopped doing. So this reaches the transfer boundary directly, which is
-    the same boundary every file load crosses.
-
-    **BOTH ENDS NAME THEIR OWN CONNECTION, and they may differ.** The target's
-    is resolved inside the boundary from ``target.connection``, where a
-    database is first needed; the source's is resolved here, because a source
-    must be readable before there is anything to transfer. Each is a
-    CONFIGURED NAME rather than a handle, and ``shared_connection`` answers
-    both from the one registry -- so naming the same connection twice yields
-    the same object rather than a second one.
-
-    What a direct query load does not have, and does not pretend to:
-
-    - **no movements**, because nothing was picked up from anywhere and there
-      is no file to route;
-    - **no configured columns**, so the destination schema is inferred from
-      the records;
-    - **no transform**, because there is no conversion step ahead of it.
-
-    Args:
-        ctx: Application context, for logging and any configured widening.
-        run_log: The run's evidence recorder.
-        statement: The query to read. Held as written -- nothing here parses
-            it, rewrites it, or decides what it means.
-        source_connection: The CONFIGURED CONNECTION NAME the statement runs
-            on.
-        destination: ``schema.table``, or ``database.schema.table`` where the
-            backend qualifies that way.
-        connection: The CONFIGURED CONNECTION NAME the destination lives on.
-        recreate_destination: Whether the destination is dropped and built
-            again from these records. Destructive at schema level: what the
-            table owns goes with it, and nothing rebuilds it.
-        replace_destination: Whether the destination's existing contents are
-            removed before these records are written. False adds to them,
-            which is what a load has always done.
-        create_destination: Whether an absent table may be created from the
-            records. False means it must already exist.
-        transform: A transform declaration. Absent means identity -- the rows
-            are loaded as the query returned them.
-
-    Returns:
-        Rows loaded.
-    """
-    target = _destination_identity(destination, connection)
-    load_name = ".".join(
-        part for part in (target.catalog, target.schema, target.name) if part
-    )
-    source = QuerySource(
-        shared_connection(ctx, source_connection).handle(),
-        statement,
-    )
-
-    return _load_one_file(
-        source,
-        # Through the builder rather than around it: ONE place a load's
-        # transform is chosen. No declaration means identity, which is what a
-        # load asking for its records as they are means.
-        _build_transform(ctx, None, transform),
-        target,
-        ctx=ctx,
-        run_log=run_log,
-        loader=_build_data_loader(
-            create_destination, replace_destination, recreate_destination,
-        ),
-        # None, not an empty policy. A load with no file has nothing to route,
-        # which is not the same as a policy that routes nothing.
-        movements=None,
-        load_name=f"query:{load_name}",
-    )
+    source = Source({"statement": statement, "source-connection": source_connection}, selected="database")
+    mapping = Transform({"transform": transform}, selected="declaration") if transform else Transform()
+    target = Target({"connection": connection, "table": destination,
+                     "create": create_destination, "replace": replace_destination,
+                     "recreate": recreate_destination}, selected="database")
+    return run_selected_load(ctx, run_log, source, mapping, target)
 
 
 def load_query_to_file(
-    ctx: Any,
-    run_log: Any,
-    statement: str,
-    source_connection: str,
-    out_file: str,
-    *,
-    transform: Any = None,
+    ctx: Any, run_log: Any, statement: str, source_connection: str,
+    out_file: Path, *, transform: Any = None,
 ) -> int:
-    """Load what one statement returns into one file.
+    """Construct canonical load objects from query/file arguments and execute them."""
+    from rey_lib.load.source import Source
+    from rey_lib.load.transform import Transform
+    from rey_lib.load.target import Target
+    from rey_lib.load.execution import run_selected_load
 
-    The same construction as ``load_query_to_table`` with the other end
-    swapped, which is the whole point of the target being a role:
-
-        QuerySource -> IdentityTransform -> DataFile
-
-    **ONE CONNECTION, and it is the SOURCE's.** A file destination has none,
-    so this takes none -- rather than accepting one and ignoring it, which
-    would leave a reader believing the file was written somewhere.
-
-    **THE FORMAT COMES FROM THE PATH, and there is no second way to say it.**
-    ``data_file_for`` reads the suffix and refuses by name when it names no
-    known format, which is the same resolver every file source goes through.
-    Nothing here lists a suffix, and no declared type is accepted: the one
-    the estate has -- ``file_type`` -- describes a data file being READ, and
-    giving a second meaning to a name that already has one is how a parameter
-    comes to mean "roughly format".
-
-    What a query-to-file load does not have, for the same reasons the
-    query-to-table one does not: no movements, no configured columns, no
-    transform.
-
-    Args:
-        ctx: Application context, for logging.
-        run_log: The run's evidence recorder.
-        statement: The query to read, held as written.
-        source_connection: The CONFIGURED CONNECTION NAME it runs on.
-        out_file: Where the rows go. Its suffix names the format.
-        transform: A transform declaration. Absent means identity -- the rows
-            are written as the query returned them.
-
-    Returns:
-        Rows written.
-    """
-    target = DataFile.for_path(out_file)
-    source = QuerySource(
-        shared_connection(ctx, source_connection).handle(),
-        statement,
-    )
-
-    return _load_one_file(
-        source,
-        _build_transform(ctx, None, transform),
-        target,
-        ctx=ctx,
-        run_log=run_log,
-        # NO LOADER. That is the database's destination mechanic, and this
-        # destination is its own; the boundary asks the target which it is.
-        movements=None,
-        load_name=f"query:{target.path.name}",
-    )
+    source = Source({"statement": statement, "source-connection": source_connection}, selected="database")
+    mapping = Transform({"transform": transform}, selected="declaration") if transform else Transform()
+    target = Target({"out-file": str(out_file)}, selected="file")
+    return run_selected_load(ctx, run_log, source, mapping, target)
 
 
 @dataclass(frozen=True)
@@ -929,7 +773,7 @@ def run_load(
 
                 conn = open_conns[conn_name]
                 last_conn = conn
-                rows = load_files(ctx, run_log, conn, data_source, load_cfg)
+                rows = load_files(ctx, run_log, data_source, load_cfg)
                 total += rows
 
             # post_load_sql runs on the last connection used for this source

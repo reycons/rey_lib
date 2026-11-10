@@ -43,6 +43,9 @@ def run_selected_load(
     target: Target,
     *,
     reader: Optional[SourceContextReader] = None,
+    movements: Any = None,
+    paths: Any = None,
+    load_name: str = "",
 ) -> int:
     """Validate, resolve and execute one load from its three canonical objects.
 
@@ -52,6 +55,9 @@ def run_selected_load(
         source, transform, target: The load's three canonical objects.
         reader: Whatever answers the source-context contract. Needed only for
             a manifest source.
+        movements, paths: File routing policy and its path scope for configured
+            feed execution; passed unchanged to the existing transfer boundary.
+        load_name: The configured load's evidence name, where one was given.
 
     Returns:
         Rows loaded.
@@ -129,16 +135,18 @@ def run_selected_load(
     if isinstance(resolved_target, DataFile):
         return load_operation._load_one_file(
             resolved_source, resolved_transform, resolved_target,
-            ctx=ctx, run_log=run_log, movements=None,
-            load_name=f"query:{resolved_target.path.name}",
+            ctx=ctx, run_log=run_log, movements=movements,
+            **({"paths": paths} if paths is not None else {}),
+            load_name=load_name or f"query:{resolved_target.path.name}",
             **governed,
         )
     identity, loader = resolved_target
     name = ".".join(part for part in (identity.catalog, identity.schema, identity.name) if part)
     return load_operation._load_one_file(
         resolved_source, resolved_transform, identity,
-        ctx=ctx, run_log=run_log, loader=loader, movements=None,
-        load_name=name if shape in ("direct", "manifest") else f"query:{name}",
+        ctx=ctx, run_log=run_log, loader=loader, movements=movements,
+        **({"paths": paths} if paths is not None else {}),
+        load_name=load_name or (name if shape in ("direct", "manifest") else f"query:{name}"),
         **governed,
     )
 

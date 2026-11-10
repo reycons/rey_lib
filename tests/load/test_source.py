@@ -69,6 +69,7 @@ class TestTheKindsAndTheSelection:
 
     def test_the_fields_are_the_loaders_source_parameters(self) -> None:
         assert set(SOURCE_FIELDS) == {
+            "encoding",
             "file", "file-type", "source-connection", "statement", "sql-file",
             "file-manifest-id", "file-mutation-id", "file-type-id",
         }
@@ -81,7 +82,7 @@ class TestTheKindsAndTheSelection:
         source.select("file")
 
         assert source.configuration() == {
-            "file": "/data/a.csv", "file-type": None, "file-mutation-id": None,
+            "file": "/data/a.csv", "file-type": None, "encoding": None, "file-mutation-id": None,
         }
         assert source.value("statement") == "select 1"
 
@@ -272,7 +273,7 @@ class TestItsSnapshot:
         assert shown == {
             "kinds": list(source.kinds()),
             "fields": {
-                "file": ["file", "file-type", "file-mutation-id"],
+                "file": ["file", "file-type", "encoding", "file-mutation-id"],
                 "database": ["source-connection", "statement"],
                 "sql_file": ["source-connection", "sql-file"],
                 "manifest": ["file-manifest-id", "file-mutation-id", "file-type-id"],

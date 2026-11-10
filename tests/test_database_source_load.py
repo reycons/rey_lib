@@ -273,6 +273,8 @@ class TestTheConstructionSite:
         # which role each is playing.
         stand_beneath_the_table(monkeypatch, destination)
         monkeypatch.setattr(load_operation, "shared_connection", _shared)
+        from rey_lib.load import source as source_module
+        monkeypatch.setattr(source_module, "shared_connection", _shared)
         monkeypatch.setattr(
             load_operation, "execute_movements",
             lambda *_a, **_k: pytest.fail("a query load has nothing to route"),

@@ -95,7 +95,7 @@ class _Kind:
 
 #: The kinds a Transform can be, in the order a reader is offered them.
 TRANSFORM_KINDS: tuple[_Kind, ...] = (
-    _Kind("identity", (), ()),
+    _Kind("identity", ("declaration",), ()),
     _Kind("declaration", ("transform",), ("transform",)),
     _Kind("yaml", ("transform-file",), ("transform-file",)),
     # Records sent through a governed HTTP operation (backlogs 671, 813): the
@@ -117,7 +117,7 @@ TRANSFORM_KINDS: tuple[_Kind, ...] = (
 
 #: Every field a Transform holds, across its kinds.
 TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
-    name for kind in TRANSFORM_KINDS for name in kind.fields
+    name for kind in TRANSFORM_KINDS if kind.id != "identity" for name in kind.fields
 ))
 
 #: What each externally typed Transform field is: the type of value it holds,
@@ -365,6 +365,8 @@ class Transform:
         if self._selected is not None:
             return self._selected
         for kind in TRANSFORM_KINDS:
+            if kind.id == "identity":
+                continue
             if any(_held(self._values.get(name)) for name in kind.fields):
                 return kind.id
         return TRANSFORM_KINDS[0].id
@@ -1344,7 +1346,8 @@ class Transform:
         held = self.configuration()
         kind = self.selected_kind()
         if kind == "identity":
-            return None
+            declared = held.get("declaration")
+            return _plain(declared, "declaration") if _held(declared) else None
         # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): the mapping the grid
         # shows, where it shows one; otherwise the authored text as it stands.
         shown = self._shown_declaration(columns)
@@ -1409,6 +1412,13 @@ class Transform:
             ConfigError: As :meth:`executed_declaration` refuses.
         """
         kind = self.selected_kind()
+        if kind == "identity":
+            from rey_lib.config.config_utils import Namespace
+
+            declared = self._values.get("declaration")
+            if _held(declared):
+                return load_operation._build_identity_transform(Namespace(_plain(declared, "declaration")))
+            return load_operation._build_transform(ctx, None, None)
         if kind == "http":
             declared = self.executed_declaration(ctx)
             # THE HELD OPERATION EXECUTES (backlog 837): the one selected, whose

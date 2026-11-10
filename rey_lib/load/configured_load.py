@@ -1,81 +1,37 @@
-"""One load definition: which files it takes, and how they are loaded.
+"""A configured file selection executed through canonical load objects.
 
-A ``DataFile`` is ONE PHYSICAL FILE. A configured feed is many files sharing
-one transform and one destination policy, so the definition needs an object
-too -- otherwise every caller re-derives the same things per file.
-
-```
-ConfiguredLoad        this feed / load definition   long-lived
-  |- DataFile         this physical file            one per file
-  |- DataTransform    what the records contain
-  +- DataLoader       where the records go
-```
-
-This is where configuration is INTERPRETED and stops
------------------------------------------------------
-It replaces the whole ``ctx + data_source + load_cfg`` bundle that
-``load_files`` took:
-
-```
-OLD   load_files(ctx, run_log, conn, data_source, load_cfg)
-NEW   ConfiguredLoad(...).load(run_log)
-```
-
-Everything a load DEFINITION needs is resolved once, at construction. What
-varies per EXECUTION -- the run's log -- arrives at ``load``. It is not held:
-a definition can outlive any one run.
-
-The connection is neither held nor passed. The definition names its target,
-the target names its configured connection, and the per-file step resolves
-one where a database is first needed -- so a definition writing somewhere
-that is not a database never sees one.
-
-Nothing below this object interprets configuration.
+ConfiguredLoad owns discovery, caps and iteration. It holds the canonical
+Transform and Target and creates a canonical Source for each selected file.
+Its injected execution calls run_selected_load; only those objects resolve
+DataFile, DataTransform and destination mechanics. No connection or resolved
+loader is retained by this definition.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
-from rey_lib.data.data_transform import DataTransform
-from rey_lib.db.data_loader import DataLoader
-from rey_lib.files.data_file import DataFile
 from rey_lib.files.file_utils import input_files
 from rey_lib.logs import AppLogger
+
+if TYPE_CHECKING:
+    from rey_lib.load.source import Source
+    from rey_lib.load.transform import Transform
+    from rey_lib.load.target import Target
 
 __all__ = ["ConfiguredLoad", "LoadOneFile"]
 
 _logger = AppLogger(__name__)
 
-#: How one already-selected file is loaded.
-#:
-#: ``(source, transform, target, *, run_log, loader, ...) -> rows``
-#:
-#: THE THREE DOMAIN INPUTS ARE THE CONTRACT. No connection crosses it: the
-#: per-file step resolves one from ``target.connection`` where a database is
-#: first needed, so a transfer whose target is not a database demands nothing
-#: it has no use for.
-#:
-#: Injected rather than imported. The per-file step owns movements, run
-#: logging and the mapping of a database failure onto a file's routing --
-#: application concerns that live in the caller. Reaching for them from here
-#: would close an import cycle and put this object in charge of things it
-#: does not own.
-#:
-#: **It is HANDED the objects rather than building them.** One load
-#: definition means one ``DataTransform``, one ``DataLoader`` and one rule for
-#: building a ``DataFile``; a per-file step that re-read the same
-#: configuration would be a second construction path, and the two could
-#: disagree while looking identical.
-#:
-#: It must return 0 rather than raise for a FILE fault, so the batch
-#: continues; a RUN-level fault must raise, so the batch stops.
+#: Executes one canonical Source / Transform / Target through run_selected_load.
+#: The callback owns execution context, including file routing and run evidence.
+#: This definition only selects files and passes the same canonical objects.
 LoadOneFile = Callable[..., int]
 
 
 class ConfiguredLoad:
-    """One load definition, ready to run against any connection."""
+    """One file selection, holding its canonical Transform and Target."""
 
     def __init__(
         self,
@@ -83,9 +39,8 @@ class ConfiguredLoad:
         load_one_file: LoadOneFile,
         source_dir: Path | None = None,
         pattern: str = "",
-        transform: DataTransform,
-        loader: DataLoader,
-        target: Any,
+        transform: Transform,
+        target: Target,
         file_type: str = "",
         encoding: str = "utf-8-sig",
         max_files: int | None = None,
@@ -102,7 +57,6 @@ class ConfiguredLoad:
             pattern: The pickup pattern, already substituted. Unused when
                 explicit_files is given.
             transform: What the produced records contain.
-            loader: The destination mechanic and this load's policy.
             target: The data object those records go to. The definition's,
                 resolved once here -- so every file in the feed is written to
                 one object rather than each re-reading where it lives.
@@ -119,7 +73,6 @@ class ConfiguredLoad:
         self.pattern = pattern
         self.load_one_file = load_one_file
         self.transform = transform
-        self.loader = loader
         self.target = target
         self.file_type = file_type
         self.encoding = encoding
@@ -170,15 +123,16 @@ class ConfiguredLoad:
 
         return pending
 
-    def data_file_for(self, path: Path) -> DataFile:
-        """Return the DataFile for one selected path.
+    def source_for(self, path: Path) -> Source:
+        """Return the canonical Source for one selected path.
 
         The format settings come from the definition, so every file in a feed
         is read the same way and nothing re-reads configuration per file.
         """
-        return DataFile.for_path(
-            path, file_type=self.file_type, encoding=self.encoding
-        )
+        from rey_lib.load.source import Source
+
+        return Source({"file": str(path), "file-type": self.file_type,
+                       "encoding": self.encoding}, selected="file")
 
     def load(self, run_log: Any) -> int:
         """Select this load's files and load each one.
@@ -220,20 +174,14 @@ class ConfiguredLoad:
                 self.pattern,
             )
 
-        # The objects are THIS definition's, built once and handed to every
-        # file. The per-file step wraps them in movements and evidence; it
-        # does not reinterpret the configuration they came from.
-        # The SOURCE OBJECT is built here, not the rule for building one.
-        # This definition already owns how its files are read; handing the
-        # per-file step a builder made it construct the endpoint it was
-        # supposed to be given.
+        # Share the canonical Transform and Target. Each selected file has its
+        # own canonical Source; run_selected_load resolves all three per call.
         return sum(
             self.load_one_file(
-                self.data_file_for(file_path),
+                self.source_for(file_path),
                 self.transform,
                 self.target,
                 run_log=run_log,
-                loader=self.loader,
             )
             for file_path in pending
         )
