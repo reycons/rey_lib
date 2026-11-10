@@ -56,6 +56,7 @@ from rey_lib.analysis.records import (
     load_latest_record,
     reject,
     store_record,
+    store_approval,
 )
 
 __all__ = [
@@ -87,4 +88,5 @@ __all__ = [
     "prepare",
     "reject",
     "store_record",
+    "store_approval",
 ]

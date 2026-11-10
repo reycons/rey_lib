@@ -465,27 +465,29 @@ def load_all_approvals(path: Path) -> list[ApprovalRecord]:
 
 
 def load_latest_record(
-    path:        Path,
-    pipeline_id: str,
-    stage_id:    str,
+    path: Path,
+    pipeline_id: Optional[str] = None,
+    stage_id: Optional[str] = None,
+    *,
+    run_id: Optional[str] = None,
 ) -> Optional[ExecutionRecord]:
-    """Return the most recent ExecutionRecord for a pipeline/stage pair.
+    """Return the last persisted revision of a run, or latest pipeline/stage record.
 
-    Parameters
-    ----------
-    path : Path
-    pipeline_id : str
-    stage_id : str
+    Supply either an explicit ``run_id`` or both existing pipeline/stage
+    selectors. A run lookup never falls back to a different execution.
 
-    Returns
-    -------
-    Optional[ExecutionRecord]
-        Most recent matching record, or None.
+    Raises:
+        ValueError: For missing, blank, incomplete or combined selectors.
     """
-    matches = [
-        r for r in load_all_records(path)
-        if r.pipeline_id == pipeline_id and r.stage_id == stage_id
-    ]
+    if run_id is not None:
+        if not str(run_id).strip() or pipeline_id is not None or stage_id is not None:
+            raise ValueError("Select a nonblank run_id alone, or a pipeline_id/stage_id pair.")
+        matches = [record for record in load_all_records(path) if record.run_id == run_id]
+    else:
+        if not str(pipeline_id or "").strip() or not str(stage_id or "").strip():
+            raise ValueError("Select a nonblank run_id alone, or a pipeline_id/stage_id pair.")
+        matches = [record for record in load_all_records(path)
+                   if record.pipeline_id == pipeline_id and record.stage_id == stage_id]
     return matches[-1] if matches else None
 
 
