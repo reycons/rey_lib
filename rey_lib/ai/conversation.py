@@ -156,30 +156,6 @@ class AIConversation:
             ]
             return True
 
-    def record_outcome(self, *, run_id: int, content: str) -> None:
-        """Record what became of a run's answer, after its exchange (#1325).
-
-        The application that owns the answer states it -- a proposal applied,
-        refused or discarded -- as one more message under the same run. Only a run
-        whose exchange this conversation recorded has an outcome.
-
-        Raises:
-            AIRequestError: When this conversation recorded no exchange for the run.
-            AppError: As Control raises, when it cannot be written.
-        """
-        run = int(run_id)
-        with self._guard:
-            recorded = {int(one["run_id"]) for one in self._messages
-                        if one.get("run_id") is not None}
-            if self.conversation_id is None or run not in recorded | self._recorded:
-                raise AIRequestError(
-                    f"run {run} has no exchange in this conversation to record an outcome for.")
-            self._control.append_ai_conversation_message(
-                self.conversation_id, run_id=run, role=_ASSISTANT, content=str(content))
-            self._messages = [
-                dict(one) for one in self._control.ai_conversation_messages(self.conversation_id)
-            ]
-
     def archive(self) -> None:
         """Archive this conversation: kept, no longer restored or appended to."""
         with self._guard:
