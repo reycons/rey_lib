@@ -13,8 +13,35 @@ import pytest
 
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tree import composition
-from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_groups, tree_roots
+from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_group_selection, tree_groups, tree_roots
 from rey_lib.tree.persisted import TreeDataRow
+
+
+def test_group_opening_is_read_from_this_installations_exposed_groups(monkeypatch) -> None:
+    ctx = SimpleNamespace()
+    calls = []
+    identity = {"kind": "ai", "subject": "ai.workbench"}
+    monkeypatch.setattr(composition, "tree_groups", lambda current, placement: (
+        calls.append((current, placement)) or [{"tree_group_id": 41, "panel_key": "subject",
+            "panel_configuration": {"opening": identity}}]))
+    assert tree_group_selection(ctx, "41") == {"identity": identity}
+    assert calls == [(ctx, "explorer")]
+    with pytest.raises(ConfigError, match="not one this installation"):
+        tree_group_selection(ctx, "42")
+
+
+@pytest.mark.parametrize("configuration", [{}, {"opening": "ai"}, {"opening": {"subject": "ai.workbench"}}])
+def test_group_with_no_declared_opening_is_refused(monkeypatch, configuration) -> None:
+    monkeypatch.setattr(composition, "tree_groups", lambda *_: [{"tree_group_id": 41,
+        "panel_key": "subject", "panel_configuration": configuration}])
+    with pytest.raises(ConfigError, match="no governed subject"):
+        tree_group_selection(SimpleNamespace(), "41")
+
+
+@pytest.mark.parametrize("interaction,control", [("delete", ""), ("text_click", "delete")])
+def test_group_only_opens_for_its_declared_selection(interaction, control) -> None:
+    with pytest.raises(ConfigError, match="nothing for that interaction"):
+        tree_group_selection(SimpleNamespace(), "41", interaction, control)
 
 
 class _Paths:

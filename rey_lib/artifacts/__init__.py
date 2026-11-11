@@ -23,6 +23,7 @@ from rey_lib.artifacts.api import (
     validate_artifact_processing,
 )
 from rey_lib.artifacts.envelope import (
+    ARTIFACT_MEDIA_TYPES,
     ARTIFACT_TYPE_FIELD,
     CONTENT_FIELD,
     NOTES_FIELD,
@@ -37,6 +38,7 @@ from rey_lib.artifacts.errors import ArtifactEnvelopeError, ArtifactProcessingEr
 from rey_lib.artifacts.store import ArtifactStore, LocalArtifactStore
 
 __all__ = [
+    "ARTIFACT_MEDIA_TYPES",
     "ARTIFACT_TYPE_FIELD",
     "CONTENT_FIELD",
     "NOTES_FIELD",

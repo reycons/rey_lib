@@ -32,7 +32,7 @@ import rey_lib.tree as _tree
 from rey_lib.tree.persisted import TREE_CONNECTION, persisted_tree
 from rey_lib.tree.traversal import Assemble, TreeTraversal
 
-__all__ = ["RUNTIME_BINDINGS", "tree_children", "tree_groups", "tree_roots"]
+__all__ = ["RUNTIME_BINDINGS", "tree_children", "tree_group_selection", "tree_groups", "tree_roots"]
 
 #: The packaged statements this module reads (package data, like inferred_architecture/sql).
 _SQL_DIR: Final = Path(__file__).parent / "sql"
@@ -83,6 +83,26 @@ def tree_groups(ctx: Any, placement: str) -> list[dict[str, Any]]:
         {**dict(row), "panel_configuration": dict(row.get("panel_configuration") or {})}
         for row in rows
     ]
+
+
+def tree_group_selection(ctx: Any, tree_group_id: Any,
+                         interaction: str = "text_click", control: str = "") -> dict[str, Any]:
+    """The governed subject an enabled Explorer group declares it opens.
+
+    Resolve the declaration in this installation's Tree, rather than accepting
+    an opening identity from a browser. Hosting and presentation remain the
+    existing opener's and Projection.for_subject's responsibilities.
+    """
+    if interaction != "text_click" or control:
+        raise ConfigError("This group declares nothing for that interaction.")
+    group = next((row for row in tree_groups(ctx, "explorer")
+                  if str(row["tree_group_id"]) == str(tree_group_id)), None)
+    if group is None:
+        raise ConfigError("This group is not one this installation's Tree exposes.")
+    opening = group["panel_configuration"].get("opening")
+    if group.get("panel_key") != "subject" or not isinstance(opening, dict) or not opening.get("kind"):
+        raise ConfigError("This group declares no governed subject opening.")
+    return {"identity": dict(opening)}
 
 
 def tree_roots(

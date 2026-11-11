@@ -24,11 +24,14 @@ dropped without saying so, and nothing is deleted from storage.
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any, Mapping, Optional
 
 from rey_lib.ai.errors import AIRequestError
 from rey_lib.run.state import status_of
+from rey_lib.artifacts import ARTIFACT_MEDIA_TYPES
+from rey_lib.formatting import markdown_to_html
 
 __all__ = ["AIConversation", "supported_conversation_roles", "supported_conversation_statuses"]
 
@@ -91,6 +94,9 @@ class AIConversation:
             int(one["run_id"]) for one in self._messages if one.get("run_id") is not None
         }
         self._guard = threading.Lock()
+        # Typed answer projections supplied by the live task. Stored messages
+        # remain unchanged; restored text without a supplied type stays text.
+        self._presentations: dict[int, dict[str, Any]] = {}
 
     @classmethod
     def restore(cls, control: Any, installation_id: int, application_id: int,
@@ -120,6 +126,56 @@ class AIConversation:
         """The whole history in order, as copies."""
         with self._guard:
             return [dict(one) for one in self._messages]
+
+    def present_answer(self, run_id: int, answer: Mapping[str, Any]) -> None:
+        """Retain the live task's canonical artifact projection for its exchange."""
+        artifact = {key: answer[key] for key in ("media_type", "text", "value", "content", "notes")
+                    if key in answer}
+        media_type = str(answer.get("media_type") or "text/plain")
+        language = next((kind for kind, media in ARTIFACT_MEDIA_TYPES.items()
+                         if media == media_type), "text")
+        content = dict(answer.get("content") or {})
+        text = content.get("text", answer.get("text"))
+        if language == "json":
+            try:
+                value = json.loads(text) if isinstance(text, str) else answer.get("value")
+                text = json.dumps(value,
+                                  indent=2, ensure_ascii=False)
+            except (ValueError, TypeError):
+                pass
+        content.update(text=str(text or ""), language=language)
+        if language == "markdown":
+            content.update(html=markdown_to_html(str(text or "")), html_trusted=True)
+        else:
+            content.update(html="", html_trusted=False)
+        artifact["content"] = content
+        with self._guard:
+            self._presentations[int(run_id)] = artifact
+
+    def projection(self, pending: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The whole conversation, with owner-supplied pending execution if any.
+
+        This is presentation of the canonical history, never the task-context
+        window. Historical text without artifact metadata is explicitly plain.
+        """
+        with self._guard:
+            history = [dict(one) for one in self._messages]
+            presentations = dict(self._presentations)
+        messages = []
+        for message in history:
+            shown = {**message, "media_type": "text/plain"}
+            if message.get("role") == _USER:
+                shown["outcome"] = _outcome(message, history)
+            elif message.get("run_id") in presentations:
+                shown["artifact"] = presentations[message["run_id"]]
+                shown["media_type"] = shown["artifact"].get("media_type") or "text/plain"
+            messages.append(shown)
+        if pending and not any(one.get("run_id") == pending.get("run_id")
+                               for one in history if pending.get("run_id") is not None):
+            messages.append({"role": _USER, "content": str(pending.get("prompt") or ""),
+                             "media_type": "text/plain", "pending": True,
+                             "run_id": pending.get("run_id")})
+        return {"conversation_id": self.conversation_id, "messages": messages}
 
     def record_exchange(self, *, prompt: str, run_id: Optional[int],
                         answer: Optional[str]) -> bool:

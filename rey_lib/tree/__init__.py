@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.tree.collection import CollectionDataObject
-from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_children, tree_groups, tree_roots
+from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_children, tree_group_selection, tree_groups, tree_roots
 from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.declarations import (
     NODE_TYPE_ACTION_VIEW_NAME,
@@ -117,5 +117,6 @@ __all__ = [
     "subject",
     "tree_children",
     "tree_groups",
+    "tree_group_selection",
     "tree_roots",
 ]

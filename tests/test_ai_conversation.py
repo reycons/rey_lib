@@ -214,3 +214,53 @@ class TestTheAIOwnsItsConversations:
         assert len(control.conversations) == 3
         assert [one["content"] for one in ai.conversation(control, 1, 7, _SUBJECT).messages()
                 ] == ["A"]
+
+
+def test_conversation_projection_keeps_whole_history_and_pending_without_writing() -> None:
+    control = _Control({1: "SUCCEEDED", 2: "RUNNING"})
+    conversation = _restored(control)
+    conversation.record_exchange(prompt="first", run_id=1, answer="answer")
+    before = list(control.messages)
+    shown = conversation.projection({"prompt": "second", "run_id": 2})
+    assert [one["content"] for one in shown["messages"]] == ["first", "answer", "second"]
+    assert shown["messages"][-1]["pending"] is True
+    assert shown["messages"][1]["media_type"] == "text/plain"
+    assert control.messages == before
+    # A finished exchange replaces its pending presentation, never duplicates it.
+    conversation.record_exchange(prompt="second", run_id=2, answer="done")
+    assert len(conversation.projection({"prompt": "second", "run_id": 2})["messages"]) == 4
+
+
+@pytest.mark.parametrize("media_type,text,language", [
+    ("text/x-sql", "SELECT 1", "sql"),
+    ("text/x-python", "print('hi')", "python"),
+    ("application/yaml", "key: value", "yaml"),
+    ("application/xml", "<item/>", "xml"),
+    ("text/html", "<p>hello</p>", "html"),
+    ("text/plain", "hello", "text"),
+])
+def test_supplied_artifact_type_is_projected_from_the_shared_contract(media_type, text, language) -> None:
+    control = _Control({1: "SUCCEEDED"})
+    conversation = _restored(control)
+    conversation.record_exchange(prompt="question", run_id=1, answer=text)
+    conversation.present_answer(1, {"text": text, "media_type": media_type,
+                                    "tool_results": [{"value": "private tool data"}]})
+    artifact = conversation.projection()["messages"][-1]["artifact"]
+    assert artifact["content"]["language"] == language
+    assert artifact["content"]["text"] == text
+    assert "tool_results" not in artifact
+    assert control.messages[-1]["content"] == text
+
+
+def test_conversation_renders_markdown_with_the_existing_safe_formatter_and_formats_json() -> None:
+    conversation = _restored(_Control({1: "SUCCEEDED", 2: "SUCCEEDED"}))
+    conversation.record_exchange(prompt="format", run_id=1, answer="# Hello\n<script>alert(1)</script>")
+    conversation.present_answer(1, {"text": "# Hello\n<script>alert(1)</script>", "media_type": "text/markdown"})
+    content = conversation.projection()["messages"][-1]["artifact"]["content"]
+    assert "<h1>Hello</h1>" in content["html"]
+    assert "<script>" not in content["html"]
+    assert content["html_trusted"] is True
+    conversation.record_exchange(prompt="json", run_id=2, answer='{"a":1}')
+    conversation.present_answer(2, {"text": '{"a":1}', "media_type": "application/json",
+                                     "value": {"artifact_type": "json", "content": '{"a":1}'}})
+    assert conversation.projection()["messages"][-1]["artifact"]["content"]["text"] == '{\n  "a": 1\n}'

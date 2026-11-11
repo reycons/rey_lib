@@ -23,6 +23,7 @@ from typing import Any, Optional
 from rey_lib.artifacts.errors import ArtifactEnvelopeError
 
 __all__ = [
+    "ARTIFACT_MEDIA_TYPES",
     "ARTIFACT_TYPE_FIELD",
     "CONTENT_FIELD",
     "NOTES_FIELD",
@@ -37,6 +38,18 @@ __all__ = [
 ARTIFACT_TYPE_FIELD = "artifact_type"
 CONTENT_FIELD = "content"
 NOTES_FIELD = "notes"
+
+#: Canonical artifact types and their presentation media types.
+ARTIFACT_MEDIA_TYPES: dict[str, str] = {
+    "sql": "text/x-sql",
+    "markdown": "text/markdown",
+    "json": "application/json",
+    "text": "text/plain",
+    "python": "text/x-python",
+    "yaml": "application/yaml",
+    "html": "text/html",
+    "xml": "application/xml",
+}
 
 # A contract may decline an object by returning the content unchanged and adding
 # a notes entry that starts with this prefix. The reason follows the prefix.
