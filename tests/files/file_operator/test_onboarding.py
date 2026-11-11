@@ -385,6 +385,25 @@ def test_preparation_performs_no_analyzer_or_materialization_call(
     assert not hasattr(onboarding, "_onboard_group")
 
 
+def test_classification_passes_ctx_and_run_log_in_run_batch_order(run_log,
+    tmp_path: Path,
+) -> None:
+    """_classify_group hands run_batch its ctx and run log in the declared order."""
+    config = _config(tmp_path)
+    source = tmp_path / "statement_Alpha_1.csv"
+    group = onboarding._Group(value="Alpha", slug="alpha", files=(source,))
+    ctx = _ctx(tmp_path)
+
+    with patch.object(onboarding, "run_batch", return_value=1) as run_batch:
+        with pytest.raises(InputError, match="Classification failed"):
+            onboarding._classify_group(ctx, run_log, config, group, tmp_path / "out")
+
+    files, passed_ctx, passed_run_log, _args = run_batch.call_args.args
+    assert files == [source]
+    assert passed_ctx is ctx
+    assert passed_run_log is run_log
+
+
 def test_analyzer_artifacts_resolve_only_by_exact_lineage(tmp_path: Path) -> None:
     surface = _surface(tmp_path)
     surface.results.mkdir(parents=True)

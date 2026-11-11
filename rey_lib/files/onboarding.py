@@ -632,7 +632,7 @@ def _classify_group(
         drop_ragged_rows=False,
         classification_filename_regex=config.filename_regex,
     )
-    if run_batch(list(group.files), run_log, ctx, args) != 0:
+    if run_batch(list(group.files), ctx, run_log, args) != 0:
         raise InputError(f"Classification failed for filename group '{group.value}'.")
 
     manifest = _read_json_object(
