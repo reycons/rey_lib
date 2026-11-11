@@ -81,6 +81,9 @@ _EDITABLE_SETTINGS = ("profile_id", "instruction_id", "temperature", "representa
 _CHOICE_OF_SETTING = {"profile_id": "profile_key", "instruction_id": "instruction_key",
                       "temperature": "temperature", "representation": "representation",
                       "connection": "connection", "max_turns": "max_turns"}
+#: The settings only the installation's default scope states (#1341): every task
+#: inherits them; only the engine may be chosen again, for the session.
+_DEFAULT_ONLY_SETTINGS = ("profile_id", "temperature")
 #: Save, declared while an edit is unsaved: the command that persists the settings.
 _SAVE_SETTINGS_ACTION = {"role": {"act": "save", "on": "settings"},
                          "command": {"command": "save_settings"}}
@@ -301,7 +304,8 @@ class AI:
                            "effective": effective, "representations": list(policy["allowed"]),
                            "instruction": resource,
                            "actions": [_set_setting_action(scope_id, field)
-                                       for field in _EDITABLE_SETTINGS]})
+                                       for field in _EDITABLE_SETTINGS
+                                       if row is None or field not in _DEFAULT_ONLY_SETTINGS]})
         return {"available": True, "read_only": False, "scopes": scopes,
                 "actions": [_SAVE_SETTINGS_ACTION] if unsaved else [],
                 # Labelled by the profile's own key (user, 2026-11-03): profiles
@@ -407,6 +411,9 @@ class AI:
         scopes = self._settings_of(control, installation)
         if scope not in scopes:
             raise AISelectionError(f"This installation's AI settings hold no scope {scope!r}.")
+        if scope != _DEFAULT_SCOPE and field in _DEFAULT_ONLY_SETTINGS:
+            raise AIRequestError("Engine and temperature are set on the installation's "
+                                 "defaults; every task inherits them.")
         if field == "max_turns" and scope == _DEFAULT_SCOPE and AITask.turn_limit(value) is None:
             raise AIRequestError("The default maximum AI turns must be a positive integer.")
         scopes[scope][field] = self._offered_setting(control, installation, field, value)
@@ -430,10 +437,12 @@ class AI:
             for field in _EDITABLE_SETTINGS:
                 self._offered_setting(control, installation, field, scopes[scope][field])
         for scope in changed:
+            # A task states no engine or temperature (#1341): its save keeps both NULL.
+            default = scope == _DEFAULT_SCOPE
             values = {
-                "profile_key": scopes[scope]["profile_id"] or None,
+                "profile_key": (scopes[scope]["profile_id"] or None) if default else None,
                 "instruction_key": scopes[scope]["instruction_id"] or None,
-                "temperature": scopes[scope]["temperature"],
+                "temperature": scopes[scope]["temperature"] if default else None,
                 "max_turns": scopes[scope]["max_turns"],
                 "representation": scopes[scope]["representation"] or None,
                 "connection_name": scopes[scope]["connection"] or None,
@@ -1557,7 +1566,9 @@ def _stated_scopes(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any
     scopes = {_DEFAULT_SCOPE: stated(first, "default_")}
     for row in listed:
         if row.get("task_key"):
-            scopes[str(row["task_key"])] = stated(row, "task_")
+            # A task's retired per-task engine and temperature are never read (#1341).
+            scopes[str(row["task_key"])] = {**stated(row, "task_"),
+                                            "profile_id": "", "temperature": None}
     return scopes
 
 

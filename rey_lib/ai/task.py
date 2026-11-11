@@ -272,7 +272,10 @@ class AITask:
         ``instructions`` the estate's instruction rows.
 
         Precedence, for every choice: the caller's override, then the task's
-        row, then the installation's defaults. An override is an input here and
+        row, then the installation's defaults -- except the engine and the
+        temperature, which are the installation's alone (#1341): the caller's
+        choice, else the installation's default; a value in a task row's retired
+        per-task columns is never read. An override is an input here and
         never an edit afterwards: a different choice is a different hydration. A
         task key no row configures takes the default scope, as it always has.
 
@@ -309,16 +312,16 @@ class AITask:
                 override or (row or {}).get(column) or group.get(column) or ""
             ).strip()
 
-        engine = cls._engine(engines, chosen(profile_key, "profile_key"), key)
+        # THE ENGINE AND THE TEMPERATURE ARE THE INSTALLATION'S (#1341): the
+        # caller's choice -- the session's engine -- else the installation's
+        # default. A task row's per-task columns are retired and never read.
+        engine = cls._engine(
+            engines, str(profile_key or group.get("profile_key") or "").strip(), key,
+        )
         instruction = cls._instruction(
             instructions, chosen(instruction_key, "instruction_key"), key,
         )
-        stated = (
-            temperature if temperature is not None
-            else next((value for value in ((row or {}).get("temperature"),
-                                          group.get("temperature")) if value is not None),
-                      None)
-        )
+        stated = temperature if temperature is not None else group.get("temperature")
         timeout = engine.get("timeout_seconds")
         kind = AIInstructionKind(str(instruction.get("kind") or "none"))
         # WHAT THE TASK PRODUCES: a structured value where its contract states a

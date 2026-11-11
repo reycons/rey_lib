@@ -55,8 +55,9 @@ class _Control:
 
     def ai_configuration(self, installation: str) -> list[dict[str, Any]]:
         return [
-            {"default_profile_key": "local_testing", "default_instruction_key": None,
-             "default_temperature": None, "default_representation": None,
+            # The engine and temperature are the installation's (#1341).
+            {"default_profile_key": "local_precision", "default_instruction_key": None,
+             "default_temperature": 0, "default_representation": None,
              "default_connection_name": None, "default_composed_first": False,
              "is_enabled": True, "task_key": "generate_sql",
              "task_label": "Generate SQL", "profile_key": "local_precision",

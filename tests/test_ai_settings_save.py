@@ -6,6 +6,11 @@ inheritance: a task value left unset stays NULL, clearing an override writes
 NULL, and a default never replaces a task's override. A new task hydrates
 with the working settings, unsaved edits included; a task already held keeps
 its configuration, and the AI is never replaced.
+
+Engine and temperature are the installation's alone (#1341): only the default
+scope edits and saves them; a task inherits both, cannot edit them, saves both
+as NULL, and a retired per-task value never reaches execution. Only the engine
+may be chosen again, for the session.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import pytest
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.errors import AIRequestError, AISelectionError
+from rey_lib.ai.task import AITask
 
 _FIELDS = ("profile_key", "instruction_key", "temperature", "representation",
            "connection_name", "max_turns")
@@ -29,9 +35,11 @@ class _Control:
         self.defaults: dict[str, Any] = {
             "profile_key": "anthropic", "instruction_key": None, "temperature": 0.2,
             "representation": "redacted", "connection_name": None, "max_turns": 8}
+        # search_index still carries a legacy per-task engine and temperature,
+        # retired by #1341: they are never read.
         self.tasks: dict[str, dict[str, Any]] = {
             "search_index": {"profile_key": "local", "instruction_key": None,
-                             "temperature": None, "representation": None,
+                             "temperature": 0.9, "representation": None,
                              "connection_name": "llm_reader", "max_turns": None},
             "generate_sql": {field: None for field in _FIELDS},
         }
@@ -88,10 +96,10 @@ class TestAnEditIsSessionState:
     def test_an_edit_changes_the_live_ai_and_writes_nothing(self) -> None:
         ai, control = _ai(), _Control()
 
-        ai.set_setting(control, "local", "generate_sql", "profile_id", "other")
+        ai.set_setting(control, "local", "generate_sql", "connection", "rey_apps")
 
         assert control.writes == []
-        assert _scope(ai, control, "generate_sql")["settings"]["profile_id"] == "other"
+        assert _scope(ai, control, "generate_sql")["settings"]["connection"] == "rey_apps"
         assert ai.projection(control, "local")["settings"]["actions"] == [
             {"role": {"act": "save", "on": "settings"}, "command": {"command": "save_settings"}}]
 
@@ -111,50 +119,87 @@ class TestAnEditIsSessionState:
                                          "field": "profile_id"}
         assert actions[0]["inputs"] == {"value": ["value"]}
 
-    def test_a_task_shows_its_own_values_and_inherits_the_rest(self) -> None:
+    def test_a_task_shows_its_own_values_and_inherits_engine_and_temperature(self) -> None:
         ai, control = _ai(), _Control()
 
         scope = _scope(ai, control, "search_index")
 
-        assert scope["settings"]["profile_id"] == "local"
+        assert scope["settings"]["connection"] == "llm_reader"
+        # The legacy per-task values are not shown as the task's own.
+        assert scope["settings"]["profile_id"] == ""
         assert scope["settings"]["temperature"] is None
+        assert scope["effective"]["profile_id"] == "anthropic"
         assert scope["effective"]["temperature"] == 0.2
+
+    def test_a_task_scope_declares_no_engine_or_temperature_edit(self) -> None:
+        ai, control = _ai(), _Control()
+
+        actions = _scope(ai, control, "search_index")["actions"]
+
+        assert [one["role"]["field"] for one in actions] == [
+            "instruction_id", "representation", "connection", "max_turns"]
+
+    @pytest.mark.parametrize("field, value", [("profile_id", "other"), ("temperature", "0.7")])
+    def test_a_task_scope_refuses_an_engine_or_temperature_edit(
+            self, field: str, value: str) -> None:
+        ai, control = _ai(), _Control()
+        before = deepcopy(_scope(ai, control, "search_index")["settings"])
+
+        with pytest.raises(AIRequestError, match="installation's defaults"):
+            ai.set_setting(control, "local", "search_index", field, value)
+
+        assert control.writes == []
+        assert _scope(ai, control, "search_index")["settings"] == before
 
 
 class TestSaveKeepsInheritance:
-    def test_saving_a_default_does_not_replace_a_tasks_override(self) -> None:
+    def test_the_default_scope_saves_engine_and_temperature_and_every_task_inherits(
+            self) -> None:
         ai, control = _ai(), _Control()
 
         ai.set_setting(control, "local", "default", "profile_id", "other")
+        ai.set_setting(control, "local", "default", "temperature", "0.5")
         ai.save_settings(control, "local")
 
         assert control.writes == [("default", "local")]
         assert control.defaults["profile_key"] == "other"
-        assert control.tasks["search_index"]["profile_key"] == "local"
-        assert _scope(ai, control, "search_index")["effective"]["profile_id"] == "local"
-        assert _scope(ai, control, "generate_sql")["effective"]["profile_id"] == "other"
+        assert control.defaults["temperature"] == 0.5
+        for task in ("search_index", "generate_sql"):
+            assert _scope(ai, control, task)["effective"]["profile_id"] == "other"
+            assert _scope(ai, control, task)["effective"]["temperature"] == 0.5
 
     def test_saving_a_task_never_materializes_an_inherited_default(self) -> None:
         ai, control = _ai(), _Control()
 
-        ai.set_setting(control, "local", "search_index", "temperature", "0.7")
+        ai.set_setting(control, "local", "search_index", "representation", "unredacted")
         ai.save_settings(control, "local")
 
         saved = control.tasks["search_index"]
-        assert saved["temperature"] == 0.7
+        assert saved["representation"] == "unredacted"
         # Inherited before the save, inherited after it: NULL, not the default.
         assert saved["instruction_key"] is None
-        assert saved["representation"] is None
-        assert saved["profile_key"] == "local"
+        assert saved["max_turns"] is None
+
+    def test_saving_other_task_settings_recreates_no_engine_or_temperature(self) -> None:
+        ai, control = _ai(), _Control()
+
+        ai.set_setting(control, "local", "search_index", "connection", "rey_apps")
+        ai.save_settings(control, "local")
+
+        saved = control.tasks["search_index"]
+        assert saved["connection_name"] == "rey_apps"
+        # The legacy per-task engine and temperature are not written back.
+        assert saved["profile_key"] is None
+        assert saved["temperature"] is None
 
     def test_clearing_an_override_writes_null_and_restores_inheritance(self) -> None:
         ai, control = _ai(), _Control()
 
-        ai.set_setting(control, "local", "search_index", "profile_id", "")
+        ai.set_setting(control, "local", "search_index", "connection", "")
         ai.save_settings(control, "local")
 
-        assert control.tasks["search_index"]["profile_key"] is None
-        assert _scope(ai, control, "search_index")["effective"]["profile_id"] == "anthropic"
+        assert control.tasks["search_index"]["connection_name"] is None
+        assert _scope(ai, control, "search_index")["effective"]["connection"] == ""
 
     def test_only_changed_scopes_are_written_and_the_save_is_re_read(self) -> None:
         ai, control = _ai(), _Control()
@@ -199,7 +244,7 @@ class TestTheLiveAiAndItsTasksAreKept:
         held = ai.hydrate_task(control, "local", task_key="generate_sql")
         assert held.profile_key == "anthropic"
 
-        ai.set_setting(control, "local", "generate_sql", "profile_id", "other")
+        ai.set_setting(control, "local", "default", "profile_id", "other")
         fresh = ai.hydrate_task(control, "local", task_key="generate_sql")
 
         assert fresh.profile_key == "other"
@@ -210,12 +255,33 @@ class TestTheLiveAiAndItsTasksAreKept:
         held = ai.hydrate_task(control, "local", task_key="search_index")
         tasks = dict(ai._tasks)
 
-        ai.set_setting(control, "local", "search_index", "profile_id", "other")
+        ai.set_setting(control, "local", "default", "profile_id", "other")
         ai.save_settings(control, "local")
 
         assert ai._tasks == tasks
-        assert ai.task(held.id) is held and held.profile_key == "local"
+        assert ai.task(held.id) is held and held.profile_key == "anthropic"
         assert ai.hydrate_task(control, "local", task_key="search_index").profile_key == "other"
+
+
+class TestEngineAndTemperatureAreTheInstallations:
+    def test_a_legacy_per_task_engine_and_temperature_never_reach_execution(self) -> None:
+        control = _Control()
+
+        task = AITask.from_governed(control, "local", "search_index")
+
+        assert control.tasks["search_index"]["profile_key"] == "local"
+        assert control.tasks["search_index"]["temperature"] == 0.9
+        assert task.profile_key == "anthropic"
+        assert task.temperature == 0.2
+
+    def test_the_session_engine_overrides_the_installations_and_not_the_temperature(
+            self) -> None:
+        control = _Control()
+
+        task = AITask.from_governed(control, "local", "search_index", profile_key="other")
+
+        assert task.profile_key == "other"
+        assert task.temperature == 0.2
 
 
 class TestWorkbenchSelectionBelongsToTheAI:
@@ -236,7 +302,7 @@ class TestWorkbenchSelectionBelongsToTheAI:
         first = ai.workbench_task(control, "local")
         from rey_lib.ai import AIInput
         edited = ai.rehydrate_task(control, first.id, {"input": AIInput.prompt("Keep this prompt.")})
-        ai.set_setting(control, "local", "generate_sql", "profile_id", "other")
+        ai.set_setting(control, "local", "default", "profile_id", "other")
         changed = ai.workbench_task(control, "local")
         assert changed.id == first.id
         assert changed.input == edited.input
@@ -246,7 +312,7 @@ class TestWorkbenchSelectionBelongsToTheAI:
         ai.save_settings(control, "local")
         assert ai.workbench_task(control, "local").id == first.id
         assert ai.hydrate_task(control, "local", task_key="generate_sql").profile_key == "other"
-        assert control.writes == [("generate_sql", "local")]
+        assert control.writes == [("default", "local")]
 
     def test_selection_and_default_fallback_are_projected_by_the_object(self) -> None:
         ai, control = _ai(), _Control()

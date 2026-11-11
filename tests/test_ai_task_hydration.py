@@ -99,7 +99,22 @@ class TestScopes:
         assert task.composed_first is False
 
     def test_a_stated_zero_temperature_is_kept(self) -> None:
-        assert _hydrate(task_key="search_index").temperature == 0.0
+        rows = [dict(row, default_temperature=0) for row in CONFIGURATION]
+
+        task = AITask.hydrate(rows, ENGINES, INSTRUCTIONS, installation="local",
+                              task_key="search_index")
+
+        assert task.temperature == 0.0
+
+    def test_a_task_rows_engine_and_temperature_are_not_read(self) -> None:
+        # Engine and temperature are the installation's alone (#1341).
+        rows = [dict(CONFIGURATION[0], profile_key="anthropic", temperature=0.9)]
+
+        task = AITask.hydrate(rows, ENGINES, INSTRUCTIONS, installation="local",
+                              task_key="search_index")
+
+        assert task.profile_key == "local_testing"
+        assert task.temperature == 0.2
 
     def test_a_task_no_row_configures_takes_the_default_scope(self) -> None:
         task = _hydrate(task_key="not_configured")

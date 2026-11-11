@@ -98,8 +98,11 @@ def test_the_projection_equals_the_one_captured_before_the_cutover() -> None:
     assert settings.pop("read_only") is False
     assert settings.pop("actions") == []
     for scope in settings["scopes"]:
-        assert [one["role"]["field"] for one in scope.pop("actions")] == [
-            "profile_id", "instruction_id", "temperature", "representation", "connection", "max_turns"]
+        # Engine and temperature are the default scope's alone (#1341).
+        assert [one["role"]["field"] for one in scope.pop("actions")] == (
+            ["profile_id", "instruction_id", "temperature", "representation", "connection",
+             "max_turns"] if scope["is_default"]
+            else ["instruction_id", "representation", "connection", "max_turns"])
         # #1063 adds a governed turn budget; this older fixture states none.
         assert scope["settings"].pop("max_turns") is None
         assert scope["effective"].pop("max_turns") is None
@@ -115,5 +118,15 @@ def test_the_projection_equals_the_one_captured_before_the_cutover() -> None:
     }
     golden = json.loads(_GOLDEN.read_text())
     assert golden["settings"].pop("read_only") is True
+    # Engine and temperature are the installation's alone (#1341): a task states
+    # neither, so it resolves both -- and its engine's representations -- from the
+    # default scope; its retired per-task values are not read.
+    default = next(one for one in golden["settings"]["scopes"] if one["is_default"])
+    for scope in golden["settings"]["scopes"]:
+        if not scope["is_default"]:
+            scope["settings"].update(profile_id="", temperature=None)
+            scope["effective"].update(profile_id=default["effective"]["profile_id"],
+                                      temperature=default["effective"]["temperature"])
+            scope["representations"] = default["representations"]
 
     assert json.loads(json.dumps(projection)) == golden
