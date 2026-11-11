@@ -26,6 +26,7 @@ import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping, Optional
 
 from rey_lib.errors.error_utils import AppError, ConfigError, StateError
@@ -33,7 +34,8 @@ from rey_lib.logs import AppLogger
 from rey_lib.run.app_channel import IO_REQUEST_SECONDS, LaunchedApp
 from rey_lib.run.async_runtime import CLOSED_ERRORS
 
-__all__ = ["AppTransport", "AppTransports", "Listener", "TransportNotHeld"]
+__all__ = ["AppTransport", "AppTransports", "HeldTransport", "Listener", "TransportNotHeld",
+           "Watcher"]
 
 _logger = AppLogger(__name__)
 
@@ -49,6 +51,22 @@ _LAST_LINE_CHARS = 300
 
 #: One pushed message: an application event as emitted, or ``{"stdout": text}``.
 Listener = Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class HeldTransport:
+    """One running application an execution context holds: its token and what it is.
+
+    A directory entry, never the transport: the token is what a consumer attaches
+    to and sends by, through the routes that already take it.
+    """
+
+    ref: str
+    application: str
+
+
+#: Told the complete list of running transports, whenever it changes.
+Watcher = Callable[[list[HeldTransport]], None]
 
 
 #: What the application holding the transports answers a request routed to it with
@@ -80,8 +98,13 @@ class AppTransport:
 
     def __init__(self, app: Any,
                  route: Optional[Callable[["AppTransport", dict[str, Any]], None]] = None,
-                 application: str = "") -> None:
+                 application: str = "",
+                 on_end: Optional[Callable[[], None]] = None) -> None:
         self._listeners: list[Listener] = []
+        # Told once, when the last pump returns: the application has ended, however
+        # it ended, and everything it emitted has been pushed.
+        self._on_end = on_end
+        self._pumping = 0
         self._guard = threading.Lock()
         self._app: Any = app
         #: The application this transport's context launched, by name (#1325): who a
@@ -110,7 +133,10 @@ class AppTransport:
 
     def start(self) -> None:
         """Begin pushing what the application emits."""
-        for source, wrap in ((self._app.events, dict), (self._app.output, _stdout)):
+        sources = ((self._app.events, dict), (self._app.output, _stdout))
+        with self._guard:
+            self._pumping = len(sources)
+        for source, wrap in sources:
             pump = threading.Thread(target=self._pump, args=(source, wrap), daemon=True)
             pump.start()
             self._pumps.append(pump)
@@ -191,9 +217,19 @@ class AppTransport:
             pump.join()
 
     def _pump(self, source: Callable[[], Iterator[Any]], wrap: Callable[[Any], dict]) -> None:
-        """Push each item of ``source`` to every subscriber, until it ends."""
-        for item in source():
-            self._push(wrap(item))
+        """Push each item of ``source`` to every subscriber, until it ends.
+
+        The last pump to return tells ``on_end``: the application has ended.
+        """
+        try:
+            for item in source():
+                self._push(wrap(item))
+        finally:
+            with self._guard:
+                self._pumping -= 1
+                last = self._pumping == 0
+            if last and self._on_end is not None:
+                self._on_end()
 
     def _push(self, message: dict[str, Any]) -> None:
         """Route or answer one message, or tell every subscriber.
@@ -243,6 +279,10 @@ class AppTransports:
         # transports answers itself, by the ref it handed out for it.
         self._answerers: dict[str, Answerer] = {}
         self._guard = threading.Lock()
+        # Who is told the running list when it changes, and which held transports'
+        # applications have ended (no longer running, until they are closed).
+        self._watchers: list[Watcher] = []
+        self._finished: set[str] = set()
 
     def open(self, app: Any, application: str = "") -> tuple[str, AppTransport]:
         """Hold a new transport for the launched ``app``, not yet started; answer its ref.
@@ -250,9 +290,11 @@ class AppTransports:
         ``application`` is the application ``app`` is, as this context launched it.
         """
         ref = uuid.uuid4().hex
-        transport = AppTransport(app, route=self._route, application=application)
+        transport = AppTransport(app, route=self._route, application=application,
+                                 on_end=lambda: self._ended(ref))
         with self._guard:
             self._held[ref] = transport
+        self._tell()
         return ref, transport
 
     def answer_requests(self, answer: Answerer) -> str:
@@ -359,8 +401,54 @@ class AppTransports:
         """Close and drop the transport held as ``ref``."""
         with self._guard:
             transport = self._held.pop(str(ref or ""), None)
+            self._finished.discard(str(ref or ""))
         if transport is not None:
+            self._tell()
             transport.close()
+
+    def held(self) -> list[HeldTransport]:
+        """The running applications this context holds, each by its token, in no order
+        that means anything.
+
+        Running: held, and not yet ended -- an application that exited, however it
+        exited, is gone from the list before it is closed. A directory only:
+        nothing here reads what any application says.
+        """
+        with self._guard:
+            return [HeldTransport(ref, transport.application)
+                    for ref, transport in self._held.items() if ref not in self._finished]
+
+    def watch(self, watcher: Watcher) -> Callable[[], None]:
+        """Be told the complete running list now, and again whenever it changes.
+
+        Changes are a transport opened, closed, or ended. Answers the call that
+        stops it -- what a consumer whose own connection closes calls.
+        """
+        with self._guard:
+            self._watchers.append(watcher)
+        watcher(self.held())
+
+        def unwatch() -> None:
+            with self._guard:
+                if watcher in self._watchers:
+                    self._watchers.remove(watcher)
+        return unwatch
+
+    def _ended(self, ref: str) -> None:
+        """A held transport's application ended: it is no longer running."""
+        with self._guard:
+            if ref not in self._held:
+                return
+            self._finished.add(ref)
+        self._tell()
+
+    def _tell(self) -> None:
+        """Tell every watcher the running list as it now stands."""
+        with self._guard:
+            watchers = list(self._watchers)
+        running = self.held()
+        for watcher in watchers:
+            watcher(running)
 
     def close_all(self) -> None:
         """Close and drop every transport this context holds: the context has ended.
@@ -378,8 +466,10 @@ class AppTransports:
         with self._guard:
             held = list(self._held.values())
             self._held.clear()
+            self._finished.clear()
         if not held:
             return
+        self._tell()
         with ThreadPoolExecutor(max_workers=len(held),
                                 thread_name_prefix="app-transport-close") as closing:
             closed = [closing.submit(transport.close) for transport in held]

@@ -22,7 +22,12 @@ import pytest
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.run.app_channel import LaunchedApp
-from rey_lib.run.app_transports import AppTransport, AppTransports, TransportNotHeld
+from rey_lib.run.app_transports import (
+    AppTransport,
+    AppTransports,
+    HeldTransport,
+    TransportNotHeld,
+)
 
 #: How long any one wait in these tests may take.
 WAIT = 20.0
@@ -496,3 +501,58 @@ def test_a_holder_ref_of_another_runtime_is_not_reachable() -> None:
     assert a.sent == [{"error": "No application with that transport is held here.",
                        "request_id": "r-8"}]
     a.end()
+
+
+
+# -- the running applications a context holds, and their lifecycle (AI Workbench) ----
+
+def test_held_lists_each_running_transport_by_its_token_and_application() -> None:
+    transports = AppTransports()
+    ref_a, _ = transports.open(_Peer(), "data_engine")
+    ref_b, _ = transports.open(_Peer(), "rey_db_admin")
+
+    assert sorted(transports.held(), key=lambda one: one.application) == [
+        HeldTransport(ref_a, "data_engine"), HeldTransport(ref_b, "rey_db_admin")]
+
+
+def test_a_watcher_is_told_the_list_now_and_on_every_open_close_and_end() -> None:
+    transports = AppTransports()
+    told: list[list[str]] = []
+    ref_a, _ = transports.open(_Peer(), "data_engine")
+    unwatch = transports.watch(lambda running: told.append(sorted(one.ref for one in running)))
+
+    b = _Peer()
+    ref_b, transport_b = transports.open(b, "rey_db_admin")
+    transport_b.start()
+    b.end(1)  # the application exited unexpectedly, before anyone closed it
+    _until(lambda: told[-1] == [ref_a])
+    transports.close(ref_a)
+
+    assert told[0] == [ref_a]                       # the initial state
+    assert sorted([ref_a, ref_b]) in told           # opened
+    assert told[-1] == []                           # closed
+    assert all(ref_b not in one for one in told[told.index(sorted([ref_a, ref_b])) + 1:])
+    unwatch()
+    transports.open(_Peer(), "workflow_app")
+    assert told[-1] == []                           # unwatched: told nothing more
+
+
+def test_an_ended_transport_leaves_the_list_before_it_is_closed() -> None:
+    transports = AppTransports()
+    peer = _Peer()
+    ref, transport = transports.open(peer, "data_engine")
+    transport.start()
+
+    peer.end(0)
+    _until(transport.ended)
+
+    _until(lambda: transports.held() == [])
+    assert transports.get(ref) is transport         # still held until closed
+
+
+def test_two_contexts_never_list_each_others_transports() -> None:
+    mine, theirs = AppTransports(), AppTransports()
+    ref, _ = mine.open(_Peer(), "data_engine")
+    theirs.open(_Peer(), "rey_db_admin")
+
+    assert [one.ref for one in mine.held()] == [ref]
