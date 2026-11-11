@@ -22,6 +22,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError, AIToolError
 from rey_lib.ai.task import AITask
@@ -161,7 +162,7 @@ class _Engine:
                               if isinstance(p, ToolReturnPart)]
         if self._calls:
             return ModelResponse(parts=[ToolCallPart(*self._calls.pop(0))])
-        return ModelResponse(parts=[TextPart("one day")])
+        return ModelResponse(parts=[TextPart(enveloped("one day"))])
 
 
 def _ai(engine: _Engine, monkeypatch: pytest.MonkeyPatch, operations: dict) -> AI:

@@ -18,6 +18,8 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from rey_lib.artifacts.envelope import build_envelope_instruction
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIContent, AIContentKind, AIInput
 from rey_lib.ai.errors import (
     AIExecutionError,
@@ -81,7 +83,7 @@ class TestText:
     def test_a_text_task_is_answered_and_the_task_records_it(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _Engine("ready")
+        engine = _Engine(enveloped("ready"))
         task = _task()
 
         result = _ai(engine, monkeypatch).execute_task(task)
@@ -95,17 +97,17 @@ class TestText:
     def test_the_contract_settings_and_subject_are_what_is_sent(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _Engine("ready")
+        engine = _Engine(enveloped("ready"))
 
         _ai(engine, monkeypatch).execute_task(_task(subject="SELECT 1"))
 
         assert engine.seen[0].instructions == "Explain it."
         assert engine.seen[0].model_settings["temperature"] == 0.0
         assert engine.seen[0].model_settings["timeout"] == 30.0
-        assert engine.prompts[0] == "SELECT 1\n\nWhat is this?"
+        assert engine.prompts[0] == "SELECT 1\n\nWhat is this?" + build_envelope_instruction()
 
     def test_markdown_is_answered_as_markdown(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _Engine("# Title")
+        engine = _Engine(enveloped("# Title", "markdown"))
 
         result = _ai(engine, monkeypatch).execute_task(_task(output=AIOutputSpec.markdown()))
 
@@ -186,7 +188,7 @@ class TestRefusalsAndFailures:
         assert task.status == AITask.FAILED
 
     def test_inside_a_running_event_loop_it_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _Engine("ready")
+        engine = _Engine(enveloped("ready"))
         task = _task()
 
         async def inside() -> None:
@@ -201,7 +203,7 @@ class TestRefusalsAndFailures:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#1334: the live object's context reaches the model; text-only is unchanged."""
-        engine = _Engine("ready", "ready")
+        engine = _Engine(enveloped("ready"), enveloped("ready"))
         context = {"source": {"connection": "file_reader", "provider": "duckdb"}}
         given = AIInput.of(
             AIContent(kind=AIContentKind.TEXT, value="fix this"),
@@ -213,11 +215,12 @@ class TestRefusalsAndFailures:
         ai.execute_task(_task())
 
         import json
-        assert engine.prompts[0] == json.dumps(context, indent=2) + "\n\nfix this"
-        assert engine.prompts[1] == "What is this?"
+        assert engine.prompts[0] == (json.dumps(context, indent=2) + "\n\nfix this"
+                                 + build_envelope_instruction())
+        assert engine.prompts[1] == "What is this?" + build_envelope_instruction()
 
     def test_input_other_than_text_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _Engine("ready")
+        engine = _Engine(enveloped("ready"))
         image = AIContent(kind=AIContentKind.IMAGE, value="aGk=")
 
         with pytest.raises(AIRequestError, match="other than text"):
@@ -229,7 +232,7 @@ class TestStdout:
         self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setattr(pydantic_ai, "BANNER_ENABLED", True)
-        engine = _Engine("ready")
+        engine = _Engine(enveloped("ready"))
 
         _ai(engine, monkeypatch).execute_task(_task())
 
@@ -246,5 +249,5 @@ def test_pydantic_execution_receives_the_task_budget(monkeypatch: pytest.MonkeyP
         observed.append(kwargs["usage_limits"].request_limit)
         return original(agent, *args, **kwargs)
     monkeypatch.setattr(Agent, "run_sync", run)
-    _ai(_Engine("ready"), monkeypatch).execute_task(_task(max_turns=limit))
+    _ai(_Engine(enveloped("ready")), monkeypatch).execute_task(_task(max_turns=limit))
     assert observed == [limit]

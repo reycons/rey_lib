@@ -76,6 +76,12 @@ class AIOutput:
     value: Any = None
     media_type: str = ""
     html: str = ""
+    #: What the model said about its answer that is not the answer (the artifact
+    #: envelope's notes): metadata beside ``text``, never part of it.
+    notes: tuple[Any, ...] = ()
+    #: The model's response this output was read from, unchanged: evidence for the
+    #: execution record, never the answer shown.
+    raw: str = ""
 
     @staticmethod
     def of_text(value: str, media_type: str = "", html: str = "") -> "AIOutput":
@@ -164,6 +170,9 @@ class AIAttempt:
     number: int
     failed: bool = False
     error: str = ""
+    #: What the model answered on this try, exactly as received: the evidence a
+    #: correction would otherwise replace.
+    raw_output: str = ""
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.results import AIOutputForm
@@ -44,6 +45,7 @@ def _ai(model: FunctionModel, monkeypatch: pytest.MonkeyPatch) -> AI:
 
 
 def _answering(text: str, json_schema: bool = False) -> FunctionModel:
+    """A model answering ``text`` as it is: an envelope, or structured JSON."""
     return FunctionModel(
         lambda messages, info: ModelResponse(parts=[TextPart(text)]),
         profile={"supports_json_schema_output": json_schema},
@@ -51,11 +53,11 @@ def _answering(text: str, json_schema: bool = False) -> FunctionModel:
 
 
 class TestMarkdown:
-    def test_a_markdown_task_answers_markdown_and_no_rendering(
+    def test_an_answer_declared_markdown_is_markdown_and_no_rendering(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        result = _ai(_answering(MARKDOWN), monkeypatch).execute_task(
-            _task(AIOutputSpec.markdown()),
+        result = _ai(_answering(enveloped(MARKDOWN, "markdown")), monkeypatch).execute_task(
+            _task(AIOutputSpec.text()),
         )
 
         assert result.output.form is AIOutputForm.TEXT
@@ -63,14 +65,15 @@ class TestMarkdown:
         assert result.media_type == "text/markdown"
         assert result.html == ""
 
-    def test_a_task_naming_no_representation_states_none(
+    def test_the_task_does_not_decide_what_its_answer_is(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        result = _ai(_answering(MARKDOWN), monkeypatch).execute_task(
-            _task(AIOutputSpec.text()),
+        """A task asking for Markdown answered as SQL is SQL: the model declares it."""
+        result = _ai(_answering(enveloped("SELECT 1", "sql")), monkeypatch).execute_task(
+            _task(AIOutputSpec.markdown()),
         )
 
-        assert (result.text, result.media_type, result.html) == (MARKDOWN, "", "")
+        assert (result.text, result.media_type, result.html) == ("SELECT 1", "text/x-sql", "")
 
 
 class TestStructured:
@@ -103,8 +106,9 @@ class TestCompletedEvent:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
-            for line in MARKDOWN.splitlines(keepends=True):
-                yield line
+            answer = enveloped(MARKDOWN, "markdown")
+            for at in range(0, len(answer), 20):
+                yield answer[at:at + 20]
 
         events: list[AIEvent] = []
         task = _task(AIOutputSpec.markdown())
@@ -117,14 +121,15 @@ class TestCompletedEvent:
         assert completed.result is result
         assert (completed.result.text, completed.result.media_type, completed.result.html) == (
             MARKDOWN, "text/markdown", "")
-        assert "".join(e.text for e in events if e.kind is AIEventKind.CONTENT_DELTA) == MARKDOWN
+        # The envelope is never told in part: the artifact arrives complete.
+        assert [e for e in events if e.kind is AIEventKind.CONTENT_DELTA] == []
         assert task.answer is result
 
     def test_nothing_rendered_is_ever_told(self, monkeypatch: pytest.MonkeyPatch) -> None:
         events: list[AIEvent] = []
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
-            yield MARKDOWN
+            yield enveloped(MARKDOWN, "markdown")
 
         _ai(FunctionModel(stream_function=stream), monkeypatch).execute_task(
             _task(AIOutputSpec.markdown()), observe=events.append,

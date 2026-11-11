@@ -23,6 +23,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.errors import AIConfigurationError, AIRequestError
 from rey_lib.ai.sql_generator import SQLGenerator
 from rey_lib.db import database_objects
@@ -91,7 +92,7 @@ class _Engine:
                               if isinstance(part, ToolReturnPart)]
         if self._calls:
             return ModelResponse(parts=[ToolCallPart(*self._calls.pop(0))])
-        return ModelResponse(parts=[TextPart(GENERATED)])
+        return ModelResponse(parts=[TextPart(enveloped(GENERATED, "sql"))])
 
 
 @pytest.fixture

@@ -9,6 +9,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIProviderError
 from rey_lib.ai.task import AITask
@@ -26,7 +27,7 @@ def test_repeated_executions_have_separate_closed_loops(monkeypatch, worker):
 
     async def answer(_messages, _info):
         loops.append(asyncio.get_running_loop())
-        return ModelResponse(parts=[TextPart("ready")])
+        return ModelResponse(parts=[TextPart(enveloped("ready"))])
 
     ai = AI()
     monkeypatch.setattr(ai, "_model", lambda *args: FunctionModel(answer))

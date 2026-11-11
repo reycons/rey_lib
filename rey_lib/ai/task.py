@@ -108,7 +108,7 @@ class AITask:
     #: unstated, hydration derives it again at every rehydration.
     CHOICES: ClassVar[tuple[str, ...]] = (
         "profile_key", "instruction_key", "temperature", "representation", "connection", "max_turns",
-        "output",
+        "output", "artifact_types",
     )
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -141,6 +141,10 @@ class AITask:
 
     input: AIInput = field(default_factory=AIInput)
     output: AIOutputSpec = field(default_factory=AIOutputSpec)
+    #: The artifact types the answer's destination permits (the artifact envelope):
+    #: what its model may declare. Empty permits every type rey_lib defines. It
+    #: constrains the answer's form only; the task's contract stays its own.
+    artifact_types: tuple[str, ...] = ()
 
     subject: str = ""
     subject_reference: Mapping[str, Any] = field(
@@ -194,6 +198,7 @@ class AITask:
         connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
+        artifact_types: Sequence[str] = (),
         subject: str = "",
         subject_reference: Mapping[str, Any] | None = None,
         origin_id: str = "",
@@ -219,6 +224,7 @@ class AITask:
             profile_key=profile_key, instruction_key=instruction_key,
             temperature=temperature, max_turns=max_turns, representation=representation,
             connection=connection, input=input, output=output,
+            artifact_types=artifact_types,
             subject=subject, subject_reference=subject_reference,
             origin_id=origin_id, task_id=task_id,
         )
@@ -240,6 +246,7 @@ class AITask:
         connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
+        artifact_types: Sequence[str] = (),
         subject: str = "",
         subject_reference: Mapping[str, Any] | None = None,
         origin_id: str = "",
@@ -314,9 +321,9 @@ class AITask:
         )
         timeout = engine.get("timeout_seconds")
         kind = AIInstructionKind(str(instruction.get("kind") or "none"))
-        # WHAT THE TASK PRODUCES, as ai.ai_task declares it (#1323) -- the task's own
-        # fact, not its execution's. Undeclared, the instruction kind decides, as it
-        # always has.
+        # WHAT THE TASK PRODUCES: a structured value where its contract states a
+        # schema; otherwise an artifact whose type the model declares (the artifact
+        # envelope) -- no task column decides it.
         schema = instruction.get("output_schema")
         if schema is not None:
             if kind is not AIInstructionKind.CONTRACT or not isinstance(schema, dict):
@@ -334,14 +341,8 @@ class AITask:
                     f"an invalid output schema: {exc.message}"
                 ) from exc
             schema = deepcopy(schema)
-        declared = str((row or {}).get("output_media_type") or "").strip()
-        if output is None and schema is not None and declared and declared != "application/json":
-            raise AIConfigurationError(
-                f"AI task '{key}' declares '{declared}' but its contract requires JSON schema output."
-            )
         required = output if output is not None else (
             AIOutputSpec(kind=AIOutputKind.CONTRACT, media_type="application/json") if schema is not None
-            else AIOutputSpec.text(declared) if declared
             else AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
             else AIOutputSpec.markdown()
         )
@@ -352,6 +353,8 @@ class AITask:
             "profile_key": profile_key, "instruction_key": instruction_key,
             "temperature": temperature, "representation": representation,
             "connection": connection, "output": output, "max_turns": max_turns,
+            # No permitted types is no choice: every defined type stays open.
+            "artifact_types": tuple(str(one) for one in (artifact_types or ())) or None,
         }
         return cls(
             **identity,
@@ -384,6 +387,7 @@ class AITask:
             connection=chosen(connection, "connection_name"),
             input=input if input is not None else AIInput(),
             output=required,
+            artifact_types=tuple(str(one) for one in (artifact_types or ())),
             subject=subject,
             # Copied as given and held read-only; its meaning is the host's.
             subject_reference=MappingProxyType(dict(subject_reference or {})),
@@ -524,6 +528,8 @@ class AITask:
             "run_id": self.run_id,
             "answer": None if answer is None else {
                 "text": answer.text, "value": answer.value, "media_type": answer.media_type,
+                # What the model said about its artifact, beside it and never in it.
+                "notes": list(getattr(getattr(answer, "output", None), "notes", ()) or ()),
                 **({"content": self._answer_content(answer)}
                    if isinstance(answer.text, str) else {}),
                 # The run's tool exchange beside the payload (AIResult), as plain data:

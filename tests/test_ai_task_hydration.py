@@ -146,16 +146,14 @@ class TestFacts:
     def test_a_contract_task_with_no_declared_output_is_plain_text(self) -> None:
         assert _hydrate(task_key="search_index").output.media_type == ""
 
-    def test_the_task_declares_what_it_produces_over_its_instruction_kind(self) -> None:
-        """#1323: ai.ai_task.output_media_type is the task's own fact."""
-        configuration = [{**CONFIGURATION[0], "output_media_type": "text/markdown"},
-                         *CONFIGURATION[1:]]
-
-        task = AITask.hydrate(configuration, ENGINES, INSTRUCTIONS, installation="local",
+    def test_no_task_column_decides_what_a_task_produces(self) -> None:
+        """The artifact envelope: a contract task with no schema asks for an artifact
+        whose type the model declares; ai.ai_task states none."""
+        task = AITask.hydrate(CONFIGURATION, ENGINES, INSTRUCTIONS, installation="local",
                               task_key="search_index")
 
         assert task.instruction_kind is AIInstructionKind.CONTRACT
-        assert task.output.media_type == "text/markdown"
+        assert (task.output.is_structured(), task.output.media_type) == (False, "")
 
     def test_the_callers_unit_of_work_is_carried(self) -> None:
         task = _hydrate(

@@ -31,15 +31,17 @@ import json
 
 import threading
 
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from rey_lib.ai.errors import AIConfigurationError, AIRequestError, AIUnavailableError
+from rey_lib.artifacts.envelope import permitted_artifact_types
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import AppLogger
 from rey_lib.run.app_channel import IO_REQUEST_SECONDS
 from rey_lib.run.app_transports import Answerer, AppTransport, AppTransports
 
-__all__ = ["ApplicationAI", "Relay"]
+__all__ = ["AIAcceptance", "ApplicationAI", "Relay"]
 
 logger = AppLogger(__name__)
 
@@ -69,6 +71,20 @@ def _engines(configured: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(([default] if default in keys else []) + [one for one in keys if one != default])
 
 
+@dataclass(frozen=True)
+class AIAcceptance:
+    """Whether one AI artifact may be given to one destination of the application.
+
+    Delivery, never execution: a refused artifact is still the completed task's
+    answer, and the task's status is the AI's. ``text`` is the artifact to apply
+    when accepted; ``reason`` says why it is not.
+    """
+
+    accepted: bool
+    text: str = ""
+    reason: str = ""
+
+
 class ApplicationAI:
     """The AI tasks one application may run, and its own transport to ai_app.
 
@@ -80,8 +96,22 @@ class ApplicationAI:
     """
 
     def __init__(self, task_keys: Sequence[str], transports: AppTransports,
-                 application_id: int | None = None, engines: Sequence[str] = ()) -> None:
+                 application_id: int | None = None, engines: Sequence[str] = (),
+                 destinations: Mapping[str, Sequence[str]] | None = None,
+                 task_destinations: Mapping[str, str | None] | None = None) -> None:
         self._task_keys = tuple(str(key) for key in task_keys)
+        #: Where this application applies each task's answer, as its declaration
+        #: states it: a destination_key, or None -- presentation only.
+        self._task_destinations = {
+            str(key): (str(value) if value else None)
+            for key, value in (task_destinations or {}).items()
+        }
+        #: What each of this application's destinations accepts from its AI, by
+        #: destination_key, as its governed declaration states it: the media types.
+        self._destinations = {
+            str(key): frozenset(str(one) for one in (types or ()))
+            for key, types in (destinations or {}).items()
+        }
         #: The installation's enabled engines by profile_key, its default first (#1341):
         #: what the reader may choose to run a session's AI on.
         self._engines = tuple(str(key) for key in engines)
@@ -143,12 +173,80 @@ class ApplicationAI:
         ]
         logger.debug("application %s has AI tasks %s in installation %s",
                      application, keys, installation)
+        destinations = {
+            str(task.get("task_key") or ""): task.get("destination_key")
+            for task in (declared.get("tasks") or [])
+            if str(task.get("task_key") or "") in keys
+        }
         return cls(keys, transports if transports is not None else AppTransports(),
-                   application_id, _engines(configured))
+                   application_id, _engines(configured), declared.get("destinations") or {},
+                   destinations)
 
     def task_keys(self) -> tuple[str, ...]:
         """The governed tasks this application may run, in declared order."""
         return self._task_keys
+
+    def destination_of(self, task_key: str) -> str | None:
+        """Where this application applies ``task_key``'s answer; None is presentation only.
+
+        Its governed declaration, and nothing else: which task ran never grants
+        anything by itself.
+        """
+        return self._task_destinations.get(str(task_key or ""))
+
+    def permitted_types(self, task_key: str) -> tuple[str, ...]:
+        """The artifact types ``task_key``'s answer may be, from its destination.
+
+        Empty for a presentation-only task: every type rey_lib defines stays open.
+
+        Raises:
+            AIRequestError: When the task names a destination this application
+                declares no media type for, or none an AI artifact can be --
+                refused before any model runs.
+        """
+        destination = self.destination_of(task_key)
+        if destination is None:
+            return ()
+        accepts = self._destinations.get(destination)
+        if not accepts:
+            raise AIRequestError(
+                f"AI task {task_key!r} answers to {destination}, which this application "
+                "declares no media type for.")
+        kinds = permitted_artifact_types(accepts)
+        if not kinds:
+            raise AIRequestError(
+                f"AI task {task_key!r} answers to {destination}, which accepts "
+                f"{', '.join(sorted(accepts))}: no artifact an AI can produce.")
+        return kinds
+
+    def acceptance(self, destination: str, answer: Any) -> AIAcceptance:
+        """Whether a completed task's artifact may be given to ``destination``.
+
+        The answer is the artifact the AI produced and validated -- its media type
+        the one its model declared. It is accepted when this application's
+        governed declaration says ``destination`` accepts that media type; a
+        destination declared nowhere accepts nothing. Its content is not judged
+        here: empty may be what its contract asked for. Nothing is applied here --
+        the owning application alone applies an accepted artifact -- and a refusal
+        changes nothing about the task, which completed.
+        """
+        accepts = self._destinations.get(str(destination or ""))
+        if not accepts:
+            return AIAcceptance(False, reason=(
+                f"{destination or '(no destination)'} accepts no AI artifact: this "
+                "application declares no media type for it."))
+        if not isinstance(answer, Mapping):
+            return AIAcceptance(False, reason="The task's answer is no artifact.")
+        media_type = str(answer.get("media_type") or "")
+        if media_type not in accepts:
+            return AIAcceptance(False, reason=(
+                f"{media_type or 'an undeclared type'} is not accepted for {destination} "
+                f"(accepts {', '.join(sorted(accepts))})."))
+        text = answer.get("text")
+        if not isinstance(text, str):
+            value = answer.get("value")
+            text = "" if value is None else json.dumps(value, default=str)
+        return AIAcceptance(True, text=text)
 
     def engines(self) -> tuple[str, ...]:
         """The engines a session's AI may run on, by profile_key, the default first."""
@@ -205,6 +303,11 @@ class ApplicationAI:
             )
         if coordinates is not None and not subject_reference:
             raise AIRequestError("Hosted coordinates require a governed subject reference.")
+        # WHAT EACH TASK'S ANSWER MAY BE, resolved before any model runs: the task
+        # named, or every candidate select_task may choose. A refusal here stops
+        # the call before ai_app is asked anything.
+        permitted = {one: list(kinds) for one in ((key,) if key else self._task_keys)
+                     if (kinds := self.permitted_types(one))}
         transport = self._ai_app(runtime)
         # A task named runs as named; with none, ai_app chooses among this
         # application's available tasks (#1341). The engine chosen for the session,
@@ -215,6 +318,9 @@ class ApplicationAI:
                   "object": self._ai_object})
         if chosen:
             request["profile_key"] = chosen
+        if permitted:
+            # By task: ai_app constrains the task that runs, never select_task.
+            request["artifact_types"] = permitted
         if self.application_id is not None:
             # Who is asking (#1338): the AI's conversation about the subject is the
             # one this application owns.

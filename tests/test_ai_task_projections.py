@@ -15,6 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.requests import AIOutputSpec
 from rey_lib.ai.results import AIExecutionInfo, AIOutput, AIResult
@@ -65,7 +66,7 @@ class TestTaskProjection:
         """The answer as AI stated it, and beside it the canonical Content (#1323):
         a Markdown answer carries the HTML the shared renderer prepares."""
         ai = AI()
-        model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("# Done")]))
+        model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart(enveloped("# Done", "markdown"))]))
         monkeypatch.setattr(ai, "_model", lambda *engine_facts: model)
         task = _task()
 
@@ -76,7 +77,7 @@ class TestTaskProjection:
         answer = dict(projection["answer"])
         content = answer.pop("content")
         assert answer == {
-            "text": "# Done", "value": None, "media_type": "text/markdown",
+            "text": "# Done", "value": None, "media_type": "text/markdown", "notes": [],
             "tool_calls": [], "tool_results": []}
         assert (content["text"], content["language"], content["html_trusted"]) == (
             "# Done", "markdown", True)

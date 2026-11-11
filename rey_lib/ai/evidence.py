@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 
 from dataclasses import asdict, is_dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from rey_lib.ai.errors import AIRequestError
 from rey_lib.config.config_loader import parse_yaml
@@ -143,6 +143,9 @@ def result_of(task: Any, result: Any) -> dict[str, Any]:
         "finish_reason": str(getattr(finish, "value", finish) or ""),
         "media_type": str(getattr(output, "media_type", "") or ""),
         "output": result.value if result.value is not None else result.text,
+        # What the model answered, exactly as received, and every try before it.
+        "raw_output": str(getattr(output, "raw", "") or ""),
+        "attempts": [_attempt(one) for one in getattr(execution, "attempts", ())],
         "usage": {"input_tokens": int(result.usage.input_tokens),
                   "output_tokens": int(result.usage.output_tokens)},
         "tool_calls": [_plain(call) for call in result.tool_calls],
@@ -153,13 +156,29 @@ def result_of(task: Any, result: Any) -> dict[str, Any]:
     }
 
 
-def failure_of(task: Any, status: str, error: str) -> dict[str, Any]:
-    """Why the execution ended without an answer: failed, or cancelled."""
+def failure_of(task: Any, status: str, error: str,
+               attempts: Sequence[Any] = ()) -> dict[str, Any]:
+    """Why the execution ended without an answer: failed, or cancelled.
+
+    With the tries it made (``AIExecutionInfo.attempts``), the model's last answer
+    exactly as received is ``raw_output``, and every try is kept beside it.
+    """
+    tries = list(attempts)
     return {
         "analysis_name": str(getattr(task, "instruction_key", "") or ""),
         "status": str(status),
         "error": str(error),
+        **({"raw_output": str(getattr(tries[-1], "raw_output", "") or ""),
+            "attempts": [_attempt(one) for one in tries]} if tries else {}),
     }
+
+
+def _attempt(attempt: Any) -> dict[str, Any]:
+    """One try as the record keeps it: its number, how it ended, what was answered."""
+    return {"number": int(getattr(attempt, "number", 0)),
+            "failed": bool(getattr(attempt, "failed", False)),
+            "error": str(getattr(attempt, "error", "") or ""),
+            "raw_output": str(getattr(attempt, "raw_output", "") or "")}
 
 
 def _contract_of(task: Any) -> dict[str, Any]:

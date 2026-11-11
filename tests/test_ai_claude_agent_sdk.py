@@ -46,6 +46,8 @@ from rey_lib.ai.streaming import AIEvent, AIEventKind  # noqa: E402
 from rey_lib.ai.task import AITask  # noqa: E402
 from rey_lib.ai.tools import AITool, AIToolSet  # noqa: E402
 from rey_lib.errors.error_utils import AppError  # noqa: E402
+from rey_lib.artifacts.envelope import build_envelope_instruction  # noqa: E402
+from tests.ai_answers import enveloped  # noqa: E402
 
 SCHEMA = {
     "type": "object",
@@ -83,7 +85,8 @@ def _result(text: str | None = None, structured: Any = None, *, subtype: str = "
     return ResultMessage(
         subtype=subtype, duration_ms=1, duration_api_ms=1, is_error=is_error, num_turns=1,
         session_id="s", usage={"input_tokens": 3, "output_tokens": 2},
-        result=text, structured_output=structured,
+        # A text answer is the artifact envelope the model declares it in.
+        result=enveloped(text) if text is not None else None, structured_output=structured,
     )
 
 
@@ -166,7 +169,7 @@ class TestSelection:
         assert result.text == "Hello"
         assert (result.usage.input_tokens, result.usage.output_tokens) == (3, 2)
         assert task.status == AITask.COMPLETED
-        assert sessions.queries == ["What is this?"]
+        assert sessions.queries == ["What is this?" + build_envelope_instruction()]
 
     def test_a_mechanism_ai_does_not_run_fails_the_task(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -268,18 +271,18 @@ class TestEvents:
         _ai(sessions, monkeypatch).execute_task(_task(), observe=events.append)
 
         assert sessions.options[0].include_partial_messages is True
+        # Tool activity and status stream; the text arriving -- the envelope -- does not.
         assert [event.kind for event in events] == [
-            AIEventKind.EXECUTION_STARTED, AIEventKind.CONTENT_DELTA,
+            AIEventKind.EXECUTION_STARTED,
             AIEventKind.TOOL_CALL_REQUESTED, AIEventKind.TOOL_RESULT_ACCEPTED,
             AIEventKind.RATE_LIMITED, AIEventKind.EXECUTION_COMPLETED,
         ]
-        assert events[1].text == "Hel"
-        assert events[2].tool_call.name == "run_query"
-        assert events[2].tool_call.arguments == {"sql": "select 1"}
-        assert (events[3].tool_result.call_id, events[3].tool_result.failed) == ("t1", False)
-        assert events[4].metadata == {"status": "allowed_warning", "resets_at": 1700000000,
+        assert events[1].tool_call.name == "run_query"
+        assert events[1].tool_call.arguments == {"sql": "select 1"}
+        assert (events[2].tool_result.call_id, events[2].tool_result.failed) == ("t1", False)
+        assert events[3].metadata == {"status": "allowed_warning", "resets_at": 1700000000,
                                       "rate_limit_type": "five_hour"}
-        assert events[4].projection()["kind"] == "rate_limited"
+        assert events[3].projection()["kind"] == "rate_limited"
 
 
 class TestTools:

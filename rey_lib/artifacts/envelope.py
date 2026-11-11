@@ -18,7 +18,7 @@ wrapped in fencing — both are normalised here.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from rey_lib.artifacts.errors import ArtifactEnvelopeError
 
@@ -31,7 +31,10 @@ __all__ = [
     "build_envelope_instruction",
     "extract_artifact",
     "extract_artifact_envelope",
+    "extract_declared_artifact",
     "loads_llm_json",
+    "media_type_for",
+    "permitted_artifact_types",
     "rejection_reason_from_notes",
 ]
 
@@ -144,22 +147,92 @@ def _complete_truncated_json_document(text: str) -> str:
     return text + "".join(suffix)
 
 
-def build_envelope_instruction(artifact_type: str) -> str:
+def media_type_for(artifact_type: str) -> str:
+    """The media type of a declared artifact type (``ARTIFACT_MEDIA_TYPES``).
+
+    Raises
+    ------
+    ArtifactEnvelopeError
+        When the type is none the estate defines, naming the ones it does.
+    """
+    declared = str(artifact_type or "").strip().lower()
+    if declared not in ARTIFACT_MEDIA_TYPES:
+        raise ArtifactEnvelopeError(
+            f"LLM response declared artifact type {artifact_type!r}, which is none of "
+            f"{', '.join(ARTIFACT_MEDIA_TYPES)}. No final artifact was written."
+        )
+    return ARTIFACT_MEDIA_TYPES[declared]
+
+
+def permitted_artifact_types(media_types: Iterable[str]) -> tuple[str, ...]:
+    """The artifact types whose media types are ``media_types``, in the defined order.
+
+    What a destination accepts, said as the types a model may declare: a media
+    type no artifact type is contributes none.
+    """
+    accepted = {str(one) for one in media_types}
+    return tuple(kind for kind, media in ARTIFACT_MEDIA_TYPES.items() if media in accepted)
+
+
+def _permitted(permitted: Sequence[str]) -> tuple[str, ...]:
+    """``permitted`` as defined artifact types, or every one when none is given.
+
+    Raises
+    ------
+    ArtifactEnvelopeError
+        When a permitted type is none the estate defines.
+    """
+    kinds = tuple(str(one).strip().lower() for one in permitted)
+    for kind in kinds:
+        media_type_for(kind)
+    return kinds or tuple(ARTIFACT_MEDIA_TYPES)
+
+
+def build_envelope_instruction(artifact_type: Optional[str] = None, *,
+                               permitted: Sequence[str] = ()) -> str:
     """Return the standard JSON-envelope output instruction for a request.
 
     Provider/model independent — every provider receives the same instruction
-    so the shared layer can extract the artifact uniformly.
+    so the shared layer can extract the artifact uniformly. With no
+    ``artifact_type`` the model declares what it produces, as one of
+    ``permitted`` -- what the answer's destination accepts -- or, with none
+    given, one of ``ARTIFACT_MEDIA_TYPES``.
 
     Parameters
     ----------
-    artifact_type : str
-        The requested artifact type (e.g. ``"sql"``). Falls back to ``"text"``.
+    artifact_type : str, optional
+        A requested artifact type (e.g. ``"sql"``); None for the model to declare.
+    permitted : Sequence[str]
+        The artifact types the model may declare; empty for every defined one.
 
     Returns
     -------
     str
         Instruction text appended to the user message.
     """
+    if artifact_type is None:
+        allowed = _permitted(permitted)
+        kinds = ", ".join(allowed)
+        bound = (f"This answer goes where only {kinds} is accepted: declare "
+                 f"{ARTIFACT_TYPE_FIELD} as {' or '.join(allowed)}, and nothing else. "
+                 if permitted else "")
+        return (
+            "\n\nReturn your response as valid JSON only. Use this exact structure:\n"
+            "{\n"
+            f'  "{ARTIFACT_TYPE_FIELD}": "<what the content is: one of {kinds}>",\n'
+            f'  "{CONTENT_FIELD}": "<your whole answer>",\n'
+            f'  "{NOTES_FIELD}": []\n'
+            "}\n"
+            f"Declare in {ARTIFACT_TYPE_FIELD} what your answer is: sql for SQL, "
+            "markdown for prose or a formatted report, and so on. "
+            + bound +
+            f"The {CONTENT_FIELD} field holds the answer only, as that type. "
+            f"Do not include Markdown fences inside the {CONTENT_FIELD} field unless "
+            f"{ARTIFACT_TYPE_FIELD} is markdown. "
+            f"Put anything about the answer that is not the answer in {NOTES_FIELD}; "
+            f"to decline, return no answer and a note beginning {REJECTION_PREFIX}: "
+            "with the reason."
+        )
     at = (artifact_type or "text").lower()
     return (
         "\n\nReturn your response as valid JSON only. Use this exact structure:\n"
@@ -297,6 +370,47 @@ def extract_artifact_envelope(
 
     notes = envelope.get(NOTES_FIELD)
     return content, (notes if isinstance(notes, list) else [])
+
+
+def extract_declared_artifact(raw_response: str, permitted: Sequence[str] = (),
+                              ) -> tuple[str, str, list[Any]]:
+    """Extract ``(artifact_type, content, notes)`` from an envelope whose model
+    declared what it produced (``build_envelope_instruction()``).
+
+    The declared type must be one ``ARTIFACT_MEDIA_TYPES`` defines; the content
+    is then extracted and validated exactly as :func:`extract_artifact_envelope`
+    does for that type.
+
+    Raises
+    ------
+    ArtifactEnvelopeError
+        When the response is not a JSON envelope, declares no type or one the
+        estate does not define, or its content fails validation for that type.
+    """
+    text = _strip_outer_fence((raw_response or "").strip())
+    try:
+        envelope = loads_llm_json(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ArtifactEnvelopeError(
+            "LLM response extraction failed. Expected a JSON envelope declaring its "
+            f"'{ARTIFACT_TYPE_FIELD}'. The raw response was preserved for review. "
+            f"JSON parse error: {exc}"
+        ) from exc
+    if not isinstance(envelope, dict):
+        raise ArtifactEnvelopeError(
+            "LLM response extraction failed. The JSON response was not an envelope "
+            "object. No final artifact was written."
+        )
+    declared = str(envelope.get(ARTIFACT_TYPE_FIELD) or "").strip().lower()
+    media_type_for(declared)
+    allowed = _permitted(permitted)
+    if declared not in allowed:
+        raise ArtifactEnvelopeError(
+            f"LLM response declared artifact type {declared!r}; this answer's destination "
+            f"accepts only {', '.join(allowed)}. No final artifact was written."
+        )
+    content, notes = extract_artifact_envelope(envelope, declared)
+    return declared, content, notes
 
 
 def rejection_reason_from_notes(notes: list[Any]) -> Optional[str]:

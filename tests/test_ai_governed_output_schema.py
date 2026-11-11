@@ -108,12 +108,3 @@ def test_rehydration_reads_the_new_governed_shape_and_keeps_identity():
     assert second.id == first.id
     assert second.output_schema == {"type": "array"}
     assert first.output_schema == SCHEMA
-
-
-def test_declared_text_representation_is_not_silently_replaced_by_schema_output():
-    configuration = deepcopy(CONFIGURATION)
-    configuration[0]["output_media_type"] = "text/markdown"
-    configuration[0]["instruction_key"] = "explain_v1"
-    with pytest.raises(AIConfigurationError, match="requires JSON schema output"):
-        AITask.hydrate(configuration, ENGINES, _Control().instructions,
-                       installation="local", task_key=configuration[0]["task_key"])

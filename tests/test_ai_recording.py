@@ -21,6 +21,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai import ai as ai_module
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIProviderError, AIRequestError
 from rey_lib.ai.evidence import origin_of
@@ -59,7 +60,7 @@ class _Engine:
         self.calls += 1
         if self._fails is not None:
             raise self._fails
-        return ModelResponse(parts=[TextPart(self._answer)])
+        return ModelResponse(parts=[TextPart(enveloped(self._answer))])
 
 
 class _Evidence:
@@ -254,7 +255,7 @@ def test_a_broken_live_observer_does_not_disable_the_durable_trace(monkeypatch):
         if len(calls)==1:
             yield {0:DeltaToolCall(name='lookup',json_args='{}',tool_call_id='call1')}
         else:
-            yield 'done'
+            yield enveloped('done')
     monkeypatch.setattr(ai,'_model',lambda *args:FunctionModel(stream_function=reply))
     tool=AITool(name='lookup',description='Read',input_schema={'type':'object','properties':{}},replay_safe=True,capability_key='lookup')
     def broken(event):raise RuntimeError('reader disappeared')
@@ -284,3 +285,112 @@ def test_failed_tool_trace_is_written_through_real_run_log_to_jsonl_and_db(monke
     assert [trace['event']['kind'] for trace in disk]==['execution_started','tool_call_requested','tool_result_accepted','execution_failed']
     assert disk[2]['event']['tool_result']['value']=={'revision':'abc123','text':'source evidence'}
     assert all(trace['task_run_id']=='5416' for trace in disk)
+
+
+
+# -- the model's raw responses are evidence, whatever the output form (#1343-envelope) --
+
+class _Answers:
+    """A FunctionModel answering each try in turn, exactly as given."""
+
+    def __init__(self, *answers: str) -> None:
+        self._answers = list(answers)
+        self.calls = 0
+        self.model = FunctionModel(self._reply)
+
+    def _reply(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        self.calls += 1
+        return ModelResponse(parts=[TextPart(self._answers.pop(0))])
+
+
+def _recorded(monkeypatch: pytest.MonkeyPatch, *answers: str, corrections: int = 0,
+              **facts: Any) -> tuple[Any, _Evidence]:
+    from rey_lib.ai.errors import AIError
+
+    engine = _Answers(*answers)
+    evidence = _Evidence()
+    ai = _ai(engine, monkeypatch)  # type: ignore[arg-type]
+    monkeypatch.setattr(ai_module, "_MAX_OUTPUT_CORRECTIONS", corrections)
+    try:
+        ai.execute_recorded(_task(**facts), None, evidence)
+    except AIError as failed:
+        return failed, evidence
+    return None, evidence
+
+
+def test_a_successful_envelope_records_its_content_and_its_raw_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = "```json\n" + enveloped("It succeeded.", "markdown", ["one run read"]) + "\n```"
+    _, evidence = _recorded(monkeypatch, raw)
+
+    _, record_type, answered = evidence.appended[-1]
+    assert record_type == "LLM_INTERPRETATION"
+    assert (answered["output"], answered["media_type"]) == ("It succeeded.", "text/markdown")
+    assert answered["raw_output"] == raw
+    assert answered["attempts"] == [{"number": 1, "failed": False, "error": "",
+                                     "raw_output": raw}]
+
+
+def test_a_correction_keeps_the_response_it_corrected(monkeypatch: pytest.MonkeyPatch) -> None:
+    good = enveloped("It succeeded.")
+    _, evidence = _recorded(monkeypatch, "It succeeded, in prose.", good, corrections=1)
+
+    _, _, answered = evidence.appended[-1]
+    assert answered["raw_output"] == good
+    assert [(one["number"], one["failed"], one["raw_output"]) for one in answered["attempts"]] \
+        == [(1, True, "It succeeded, in prose."), (2, False, good)]
+    assert "JSON envelope" in answered["attempts"][0]["error"]
+
+
+def test_an_envelope_never_valid_fails_with_every_raw_response_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error, evidence = _recorded(monkeypatch, "prose", "still prose", corrections=1)
+
+    assert error is not None
+    _, record_type, failed = evidence.appended[-1]
+    assert record_type == "LLM_ANALYSIS_FAILURE"
+    assert failed["raw_output"] == "still prose"
+    assert [(one["failed"], one["raw_output"]) for one in failed["attempts"]] == [
+        (True, "prose"), (True, "still prose")]
+
+
+def test_a_declined_artifact_fails_with_its_raw_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = enveloped("", "text", ["REJECTED: nothing to interpret"])
+    error, evidence = _recorded(monkeypatch, raw)
+
+    assert "declined: nothing to interpret" in str(error)
+    _, record_type, failed = evidence.appended[-1]
+    assert (record_type, failed["raw_output"]) == ("LLM_ANALYSIS_FAILURE", raw)
+
+
+def test_a_structured_task_records_its_raw_response_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rey_lib.ai.requests import AIOutputSpec
+
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}},
+              "required": ["answer"]}
+    raw = '{"answer": "ready"}'
+    _, evidence = _recorded(monkeypatch, raw, output=AIOutputSpec.schema_of(schema))
+
+    _, _, answered = evidence.appended[-1]
+    assert (answered["output"], answered["raw_output"]) == ({"answer": "ready"}, raw)
+
+
+def test_a_structured_answer_the_engine_refused_is_still_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw evidence does not depend on the output form: an answer the engine's own
+    structured parsing refused is kept from the run's messages."""
+    from rey_lib.ai.requests import AIOutputSpec
+
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}},
+              "required": ["answer"]}
+    error, evidence = _recorded(monkeypatch, "no json here",
+                                output=AIOutputSpec.schema_of(schema))
+
+    assert error is not None
+    _, record_type, failed = evidence.appended[-1]
+    assert (record_type, failed["raw_output"]) == ("LLM_ANALYSIS_FAILURE", "no json here")

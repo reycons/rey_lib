@@ -31,7 +31,10 @@ from rey_lib.artifacts.envelope import (
     build_envelope_instruction,
     extract_artifact,
     extract_artifact_envelope,
+    extract_declared_artifact,
     loads_llm_json,
+    media_type_for,
+    permitted_artifact_types,
     rejection_reason_from_notes,
 )
 from rey_lib.artifacts.errors import ArtifactEnvelopeError, ArtifactProcessingError
@@ -50,7 +53,10 @@ __all__ = [
     "build_envelope_instruction",
     "extract_artifact",
     "extract_artifact_envelope",
+    "extract_declared_artifact",
     "loads_llm_json",
+    "media_type_for",
+    "permitted_artifact_types",
     "rejection_reason_from_notes",
     "artifact_config_from_ctx",
     "lint_artifact",

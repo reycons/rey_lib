@@ -22,6 +22,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError, AIToolError
 from rey_lib.ai import ai as ai_module
@@ -265,7 +266,7 @@ class _ScriptedEngine:
         if self._calls:
             name, arguments = self._calls.pop(0)
             return ModelResponse(parts=[ToolCallPart(name, arguments)])
-        return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(parts=[TextPart(enveloped("done"))])
 
 
 def _ai(engine: _ScriptedEngine, monkeypatch: pytest.MonkeyPatch, corrections: int = 0) -> AI:

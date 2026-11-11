@@ -377,3 +377,89 @@ def test_a_choice_outside_the_installation_is_refused_before_ai_app_launches(
     with pytest.raises(AIRequestError, match=refusal):
         ai.call(object(), "", "count", lambda message: None, engine=engine)
     assert transports.launched == []
+
+
+
+# -- where each task's answer goes, and what it may be (AI artifact envelope) ----------
+
+def _destined() -> ApplicationAI:
+    """A Loader's AI as its governed declaration states it: two SQL tasks applied to
+    the Source's statement, a review shown, and a task naming an undeclared place."""
+    declaration = {"is_enabled": True,
+                   "destinations": {"source.statement": ["text/x-sql"],
+                                    "source.picture": ["image/png"]},
+                   "tasks": [
+                       {"task_key": "comment_code", "destination_key": "source.statement"},
+                       {"task_key": "generate_sql", "destination_key": "source.statement"},
+                       {"task_key": "review_load", "destination_key": None},
+                       {"task_key": "draw_it", "destination_key": "source.picture"},
+                       {"task_key": "misplaced", "destination_key": "nowhere"}]}
+    control = _Control(declaration, _installation(
+        "comment_code", "generate_sql", "review_load", "draw_it", "misplaced"))
+    ai = ApplicationAI.at_load(control, "local", 3, "data_engine")
+    ai._transports = _Transports()  # noqa: SLF001
+    return ai
+
+
+class TestDestinations:
+    def test_each_tasks_destination_is_its_declarations(self) -> None:
+        ai = _destined()
+        assert (ai.destination_of("comment_code"), ai.destination_of("review_load"),
+                ai.destination_of("unknown")) == ("source.statement", None, None)
+
+    def test_a_destined_task_may_answer_only_what_its_destination_accepts(self) -> None:
+        ai = _destined()
+        assert ai.permitted_types("comment_code") == ("sql",)
+        assert ai.permitted_types("review_load") == ()
+
+    @pytest.mark.parametrize("task_key, refusal", [
+        ("misplaced", "declares no media type"),
+        ("draw_it", "no artifact an AI can produce"),
+    ], ids=["undeclared-destination", "no-producible-type"])
+    def test_an_impossible_destination_is_refused_before_ai_app_is_asked(
+            self, task_key: str, refusal: str) -> None:
+        ai = _destined()
+        with pytest.raises(AIRequestError, match=refusal):
+            ai.call(object(), task_key, "go", lambda message: None)
+        assert ai._transports.launched == []  # noqa: SLF001
+
+    def test_a_named_task_carries_its_permitted_types(self) -> None:
+        ai = _destined()
+        ai.call(object(), "comment_code", "comment it", lambda message: None)
+        assert ai._transports.transport.requested[0]["artifact_types"] == {  # noqa: SLF001
+            "comment_code": ["sql"]}
+
+    def test_a_presentation_only_task_carries_none(self) -> None:
+        ai = _destined()
+        ai.call(object(), "review_load", "review it", lambda message: None)
+        assert "artifact_types" not in ai._transports.transport.requested[0]  # noqa: SLF001
+
+
+class TestAcceptance:
+    """Delivery, never execution: the answer stays the completed task's either way."""
+
+    def test_an_artifact_of_an_accepted_type_is_accepted_with_its_text(self) -> None:
+        accepted = _destined().acceptance(
+            "source.statement", {"text": "SELECT 1", "media_type": "text/x-sql"})
+        assert (accepted.accepted, accepted.text) == (True, "SELECT 1")
+
+    def test_empty_content_of_an_accepted_type_is_still_accepted(self) -> None:
+        accepted = _destined().acceptance(
+            "source.statement", {"text": "", "media_type": "text/x-sql"})
+        assert (accepted.accepted, accepted.text) == (True, "")
+
+    def test_markdown_is_refused_for_the_statement_saying_why(self) -> None:
+        refused = _destined().acceptance(
+            "source.statement", {"text": "# Notes", "media_type": "text/markdown"})
+        assert refused.accepted is False
+        assert refused.reason == (
+            "text/markdown is not accepted for source.statement (accepts text/x-sql).")
+
+    @pytest.mark.parametrize("destination", ["nowhere", ""])
+    def test_an_undeclared_destination_always_refuses(self, destination: str) -> None:
+        refused = _destined().acceptance(
+            destination, {"text": "SELECT 1", "media_type": "text/x-sql"})
+        assert refused.accepted is False and "accepts no AI artifact" in refused.reason
+
+    def test_no_artifact_is_refused(self) -> None:
+        assert _destined().acceptance("source.statement", None).accepted is False

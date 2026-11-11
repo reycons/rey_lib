@@ -15,6 +15,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, RetryPromptPart, To
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIExecutionError, AIProviderError
 from rey_lib.ai.streaming import AIEvent, AIEventKind
@@ -47,7 +48,8 @@ def _ai(stream: Any, monkeypatch: pytest.MonkeyPatch) -> AI:
 
 
 async def _says(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
-    for piece in ("Hel", "lo ", "there"):
+    # The envelope arrives in pieces; none of them is the answer.
+    for piece in ('{"artifact_type": "text", "content": "Hel', "lo ", 'there", "notes": []}'):
         yield piece
 
 
@@ -66,21 +68,21 @@ class _Observer:
 
 
 class TestText:
-    def test_started_then_deltas_then_completed_with_one_execution_id(
+    def test_started_then_completed_with_one_execution_id_and_no_partial_envelope(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The text arriving is the envelope, never told in part: the validated
+        artifact is told once, complete."""
         observer = _Observer()
         task = _task()
 
         result = _ai(_says, monkeypatch).execute_task(task, observe=observer)
 
         assert observer.kinds() == [
-            AIEventKind.EXECUTION_STARTED, AIEventKind.CONTENT_DELTA,
-            AIEventKind.CONTENT_DELTA, AIEventKind.CONTENT_DELTA,
-            AIEventKind.EXECUTION_COMPLETED,
+            AIEventKind.EXECUTION_STARTED, AIEventKind.EXECUTION_COMPLETED,
         ]
-        assert "".join(e.text for e in observer.events[1:-1]) == "Hello there"
         assert observer.events[-1].result is result
+        assert (result.text, result.media_type) == ("Hello there", "text/plain")
         assert {e.execution_id for e in observer.events} == {result.execution.execution_id}
         assert task.status == AITask.COMPLETED
 
@@ -89,7 +91,7 @@ class TestText:
     ) -> None:
         def answers(messages: list[ModelMessage], info: AgentInfo) -> Any:
             from pydantic_ai.messages import ModelResponse, TextPart
-            return ModelResponse(parts=[TextPart("plain")])
+            return ModelResponse(parts=[TextPart(enveloped("plain"))])
 
         ai = AI()
         model = FunctionModel(answers)
@@ -111,7 +113,7 @@ class TestTools:
                                             tool_call_id=f"call-{name}")
                        for index, name in enumerate(names)}
             else:
-                yield "done"
+                yield enveloped("done")
         return stream
 
     def test_a_call_and_its_result_are_told_by_id_name_and_value(

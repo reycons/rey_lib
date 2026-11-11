@@ -19,6 +19,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
+from tests.ai_answers import enveloped
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AICancelled, AIProviderError, AIRequestError
 from rey_lib.ai.streaming import AIEvent, AIEventKind
@@ -68,7 +69,7 @@ def _waiting(withdrawal: list[_Withdrawal]) -> FunctionModel:
     async def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         withdrawal[0].under_way.set()
         await asyncio.sleep(5)
-        return ModelResponse(parts=[TextPart("too late")])
+        return ModelResponse(parts=[TextPart(enveloped("too late"))])
     return FunctionModel(answer)
 
 
@@ -120,7 +121,7 @@ class TestNothingRunning:
     def test_after_a_run_ends_its_token_is_gone_and_the_outcome_stands(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("ok")]))
+        model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart(enveloped("ok"))]))
         ai, task = _ai(model, monkeypatch), _task()
 
         ai.execute_task(task)
@@ -138,12 +139,14 @@ class TestFreshTokenPerExecution:
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
             calls["n"] += 1
+            if calls["n"] != 1:
+                yield enveloped("first ")
+                return
             yield "first "
-            if calls["n"] == 1:
-                holder[0].under_way.set()
-                for _ in range(200):
-                    await asyncio.sleep(0.01)
-                    yield "more "
+            holder[0].under_way.set()
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                yield "more "
 
         ai, task = _ai(FunctionModel(stream_function=stream), monkeypatch), _task()
         holder.append(_Withdrawal(ai, task))
@@ -154,7 +157,7 @@ class TestFreshTokenPerExecution:
         result = ai.execute_task(task, observe=lambda event: None)
 
         assert task.status == AITask.COMPLETED
-        assert result.output.text == "first "
+        assert result.output.text == "first"
 
 
 class TestOneExecutionAtATime:
@@ -166,11 +169,11 @@ class TestOneExecutionAtATime:
         under_way, release = threading.Event(), threading.Event()
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
-            yield "waiting "
+            yield '{"artifact_type": "text", "content": "waiting '
             under_way.set()
             while not release.is_set():
                 await asyncio.sleep(0.01)
-            yield "done"
+            yield 'done", "notes": []}'
 
         ai, task = _ai(FunctionModel(stream_function=stream), monkeypatch), _task()
         first: list[Any] = []

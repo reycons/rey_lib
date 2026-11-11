@@ -35,15 +35,23 @@ from rey_lib.ai.errors import (
 from rey_lib.ai.output import OutputParser
 from rey_lib.ai.requests import AIOutputKind
 from rey_lib.ai.results import (
+    AIAttempt,
     AIExecutionInfo,
     AIFinishReason,
     AIOutput,
     AIResult,
     AIUsage,
 )
-from rey_lib.ai.streaming import AIEvent
+from rey_lib.ai.streaming import AIEvent, AIEventKind
 from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AIToolCall, AIToolResult, AIToolSet, Operation
+from rey_lib.artifacts.envelope import (
+    build_envelope_instruction,
+    extract_declared_artifact,
+    media_type_for,
+    rejection_reason_from_notes,
+)
+from rey_lib.artifacts.errors import ArtifactEnvelopeError
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.app_logger import AppLogger
 
@@ -126,6 +134,9 @@ class AI:
         # only the check, the registration and the release -- never a run.
         self._running: dict[str, Any] = {}
         self._running_lock = threading.Lock()
+        # Each running execution's tries, by task id, under the same lock: what the
+        # model answered each time and what became of it.
+        self._attempts: dict[str, list[AIAttempt]] = {}
         # The installation's AI settings as this session holds them (#1191): per
         # installation, each scope's STATED values -- "default" and each task_key --
         # as last read from governed configuration, and the working copy edits
@@ -563,6 +574,11 @@ class AI:
                 "running event loop; execute it from a thread that has none."
             )
         prompt = self._prompt_of(task)
+        # WITH NO STRUCTURED OUTPUT THE MODEL DECLARES WHAT IT PRODUCES (the artifact
+        # envelope): asked for here, read back by _parse_task_output, whatever runs it.
+        enveloped = not task.output.is_structured()
+        if enveloped:
+            prompt += build_envelope_instruction(permitted=task.artifact_types)
         schema = (
             task.output.schema if task.output.schema is not None
             else task.output_schema if task.output.kind is AIOutputKind.CONTRACT
@@ -575,6 +591,10 @@ class AI:
 
         def tell(event: AIEvent) -> None:
             """Notify independent sinks: a broken reader cannot stop durable evidence."""
+            if enveloped and event.kind is AIEventKind.CONTENT_DELTA:
+                # The text arriving is the envelope, not the answer: the artifact is
+                # told once it is complete and validated, never in part.
+                return
             for sink in tuple(observers):
                 try:
                     sink(event)
@@ -591,6 +611,8 @@ class AI:
             if task.id in self._running:
                 raise AIRequestError(f"AI task '{task.id}' is already running.")
             self._running[task.id] = token
+            attempts: list[AIAttempt] = []
+            self._attempts[task.id] = attempts
         task.started()
         tell(AIEvent.started(execution_id))
         started = datetime.now(timezone.utc)
@@ -618,6 +640,14 @@ class AI:
                 task, prompt, schema, toolset, token,
                 tell if observe is not None or record is not None else None, execution_id,
             )
+            # A DECLINED ARTIFACT IS A FAILED TASK, never a completed one: the model's
+            # REJECTED note is its refusal, said as the task's failure.
+            declined = rejection_reason_from_notes(list(output.notes))
+            if declined is not None:
+                self._attempt(task, failed=True, error=f"declined: {declined}",
+                              raw_output=output.raw)
+                raise AIOutputError(f"AI task '{key}' declined: {declined}")
+            self._attempt(task, raw_output=output.raw)
         except AICancelled:
             # A withdrawal, not a fault: the task records it as its own outcome
             # and nothing is reported at ERROR.
@@ -625,11 +655,14 @@ class AI:
             tell(AIEvent.cancelled(execution_id))
             raise
         except AIError as error:
+            # The tries go with the failure, so its record keeps what was answered.
+            error.attempts = tuple(attempts)
             task.failed(str(error))
             tell(AIEvent.failed(execution_id, str(error)))
             raise
         except Exception as cause:
             error = AIExecutionError(f"AI task '{key}' execution failed.", cause=cause)
+            error.attempts = tuple(attempts)
             task.failed(str(error))
             tell(AIEvent.failed(execution_id, str(error)))
             raise error from cause
@@ -643,6 +676,7 @@ class AI:
                     instruction_id=task.instruction_key,
                     started_at=started.isoformat(),
                     ended_at=datetime.now(timezone.utc).isoformat(),
+                    attempts=tuple(attempts),
                     finish_reason=AIFinishReason.COMPLETED,
                 ),
                 usage=usage,
@@ -657,6 +691,7 @@ class AI:
         finally:
             with self._running_lock:
                 del self._running[task.id]
+                del self._attempts[task.id]
 
     def execute_recorded(
         self,
@@ -732,7 +767,8 @@ class AI:
             raise
         except AIError as error:
             evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
-                                  **recording.failure_of(task, "failed", str(error)))
+                                  **recording.failure_of(task, "failed", str(error),
+                                                      getattr(error, "attempts", ())))
             raise
         record_type = (recording.INTERPRETATION_RECORD
                        if task.task_key == recording.INTERPRETATION_TASK
@@ -780,6 +816,7 @@ class AI:
             RunCancelled,
             StructuredDict,
             UsageLimits,
+            capture_run_messages,
         )
         from pydantic_ai.exceptions import (
             ModelAPIError,
@@ -798,6 +835,7 @@ class AI:
                 if translated is not None and tell is not None:
                     tell(translated)
 
+        exchanged: Any = ()
         try:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
             output_type: Any = str
@@ -843,7 +881,9 @@ class AI:
             )
             # The synchronous SDK entry uses the current loop. Own that loop
             # explicitly instead of relying on deprecated implicit creation.
-            with asyncio.Runner() as runtime:
+            # The run's messages are kept while it runs, so a run that fails still
+            # leaves every response the model gave (_keep_responses).
+            with asyncio.Runner() as runtime, capture_run_messages() as exchanged:
                 runtime.get_loop()
                 run = agent.run_sync(
                     prompt, model_settings=settings or None,
@@ -886,6 +926,7 @@ class AI:
                 f"AI task '{key}' reached a usage limit.", cause=error,
             ) from error
         except UnexpectedModelBehavior as error:
+            self._keep_responses(task, exchanged, str(error))
             retry = error.__cause__
             refused = getattr(retry, "__cause__", None)
             if isinstance(retry, ModelRetry) and isinstance(refused, AppError) and not isinstance(refused, AIOutputError):
@@ -1176,14 +1217,62 @@ class AI:
     def _parse_task_output(
         self, task: AITask, schema: dict[str, Any] | None, answer: Any,
     ) -> AIOutput:
-        """The task's output, validated by OutputParser in the form it asked for."""
-        if isinstance(answer, str):
-            parsed = self._parser.parse_output(task.output, schema, answer)
-        else:
-            parsed = self._parser.parse_output(task.output, schema, "", dict(answer))
+        """The task's output, validated by OutputParser in the form it asked for.
+
+        A task with no structured output answers in the artifact envelope: the model
+        declares what it produced, and the answer is that artifact -- its content,
+        the media type its declared type is, and its notes beside it. An envelope
+        that cannot be read is an output failure, so it goes back to the model for
+        correction as any other.
+        """
+        raw = answer if isinstance(answer, str) else json.dumps(answer, default=str)
+        try:
+            if isinstance(answer, str) and not task.output.is_structured():
+                try:
+                    declared, content, notes = extract_declared_artifact(answer, task.artifact_types)
+                except ArtifactEnvelopeError as invalid:
+                    raise AIOutputError(str(invalid), cause=invalid) from invalid
+                return AIOutput(text=content, media_type=media_type_for(declared),
+                                notes=tuple(notes), raw=raw)
+            if isinstance(answer, str):
+                parsed = self._parser.parse_output(task.output, schema, answer)
+            else:
+                parsed = self._parser.parse_output(task.output, schema, "", dict(answer))
+        except AIOutputError as refused:
+            # Each refused try is kept with what the model said (#1343-envelope):
+            # a correction never replaces the evidence of what it corrected.
+            self._attempt(task, failed=True, error=str(refused), raw_output=raw)
+            raise
+        parsed = replace(parsed, raw=raw)
         if task.output.media_type:
             return replace(parsed, media_type=task.output.media_type)
         return parsed
+
+    def _keep_responses(self, task: AITask, exchanged: Any, error: str) -> None:
+        """Keep, as failed tries, every model answer a failed run has not yet kept.
+
+        An answer the engine itself refused -- structured output it could not parse
+        -- never reached Rey's validation, so only the run's own messages hold it.
+        Kept exactly as the model sent it: its text parts, in order.
+        """
+        from pydantic_ai.messages import ModelResponse, TextPart  # noqa: PLC0415
+
+        with self._running_lock:
+            kept = {one.raw_output for one in self._attempts.get(task.id, ())}
+        for message in exchanged or ():
+            if not isinstance(message, ModelResponse):
+                continue
+            raw = "".join(part.content for part in message.parts if isinstance(part, TextPart))
+            if raw and raw not in kept:
+                self._attempt(task, failed=True, error=error, raw_output=raw)
+                kept.add(raw)
+
+    def _attempt(self, task: AITask, **attempt: Any) -> None:
+        """Keep one try of the task's running execution, numbered in order."""
+        with self._running_lock:
+            tries = self._attempts.get(task.id)
+            if tries is not None:
+                tries.append(AIAttempt(number=len(tries) + 1, **attempt))
 
     @staticmethod
     def _prompt_of(task: AITask) -> str:
