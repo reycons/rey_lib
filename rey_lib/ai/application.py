@@ -252,6 +252,33 @@ class ApplicationAI:
         """The engines a session's AI may run on, by profile_key, the default first."""
         return self._engines
 
+    def conversation(self, runtime: Any,
+                     subject_reference: Mapping[str, Any]) -> dict[str, Any]:
+        """The AI's conversation about this application's subject, as ai_app presents it.
+
+        Read over this application's own ai_app (the one ``call`` uses, launched if
+        it is not yet running): the conversation ai_app holds or restores for this
+        application and subject. No task is opened and no model runs -- what an AI
+        seat attached to this application shows before anything is asked.
+
+        Raises:
+            AIRequestError: When this application has no id to own a conversation by,
+                no subject is named, or ai_app refuses.
+            AIUnavailableError: When ai_app cannot be launched or does not attach.
+        """
+        if self.application_id is None:
+            raise AIRequestError("This application's AI declaration carries no application "
+                                 "id; it owns no AI conversation to read.")
+        if not subject_reference:
+            raise AIRequestError("An AI conversation is read for a named subject.")
+        answered = self._ai_app(runtime).request({
+            "command": "conversation", "object": self._ai_object,
+            "application_id": self.application_id,
+            "subject_reference": dict(subject_reference)})
+        if "error" in answered:
+            raise AIRequestError(str(answered["error"]))
+        return dict(answered.get("conversation") or {})
+
     def call(self, runtime: Any, task_key: str, text: str, relay: Relay,
              context: Mapping[str, Any] | None = None,
              origin: Mapping[str, Any] | None = None, *,

@@ -465,3 +465,32 @@ class TestAcceptance:
 
     def test_no_artifact_is_refused(self) -> None:
         assert _destined().acceptance("source.statement", None).accepted is False
+
+
+# -- the AI's conversation about this application's subject, read (#1343 step 4) ----
+
+def test_the_conversation_is_read_from_this_applications_ai_app_and_no_task_opens() -> None:
+    talk = {"conversation_id": 8, "messages": [{"role": "user", "content": "add comments"}]}
+    transports = _Transports(_Transport(opened={"conversation": talk}))
+    ai = ApplicationAI(("comment_code",), transports, application_id=15)
+    subject = {"kind": "file_manifest", "file_manifest_id": 1160}
+
+    assert ai.conversation(object(), subject) == talk
+    assert transports.transport.requested == [
+        {"command": "conversation", "object": "ai", "application_id": 15,
+         "subject_reference": subject}]
+    assert transports.transport.sent == []      # no task opened, edited or run
+
+
+@pytest.mark.parametrize("application_id, subject, refusal", [
+    (None, {"kind": "workflow", "workflow_id": 8}, "no application id"),
+    (15, {}, "named subject"),
+], ids=["no-application-id", "no-subject"])
+def test_a_conversation_is_read_only_for_an_owning_application_and_a_subject(
+        application_id: Any, subject: Any, refusal: str) -> None:
+    transports = _Transports()
+    ai = ApplicationAI(("comment_code",), transports, application_id=application_id)
+
+    with pytest.raises(AIRequestError, match=refusal):
+        ai.conversation(object(), subject)
+    assert transports.launched == []
