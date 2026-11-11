@@ -155,6 +155,19 @@ class TestOnTheExecutionPath:
         assert build_envelope_instruction() not in sent[0]
 
 
+def test_a_task_held_to_json_output_answers_bare_json_and_no_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """select_task's case: its contract asks for JSON and nothing else, so it is held
+    to JSON output -- a bare answer is its answer, and no envelope is asked for."""
+    ai, sent = _ai(monkeypatch, '{"task": "comment_code"}')
+
+    result = ai.execute_task(_task(output=AIOutputSpec.json()))
+
+    assert result.value == {"task": "comment_code"}
+    assert "artifact_type" not in sent[0]
+
+
 class TestADestinationsPermittedTypes:
     """Option (a): the destination narrows the envelope; the task's contract is its own."""
 
