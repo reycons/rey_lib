@@ -548,17 +548,29 @@ class Workflow:
         self.renumber()
         return process
 
-    def remove_process(self, name: str) -> None:
+    def remove_process(self, name: str | WorkflowProcess) -> None:
         """Remove one process, and the steps it holds, from the working definition.
 
         Nothing is written: the governed rows go when the Workflow is saved. The
         steps after it close up, keeping the Workflow-wide order.
 
+        Args:
+            name: The process by name, or the process itself -- the one a caller
+                already resolved, removed as it is and not looked up again by name,
+                so one of two processes that share a name can be removed (#1325).
+
         Raises:
-            AppError: While a direction runs, or when no process has that name.
+            AppError: While a direction runs, when no process has that name, or
+                when the process given is not one of this Workflow's.
         """
         self.refuse_edit_while_directing()
-        process = self._process_named(name)
+        if isinstance(name, WorkflowProcess):
+            process = name
+            if not any(one is process for one in self.processes):
+                raise AppError(
+                    f"workflow '{self.name}' holds no such process '{process.name}'.")
+        else:
+            process = self._process_named(name)
         self.processes = tuple(one for one in self.processes if one is not process)
         process.workflow = None
         if self.focused_process is process:
@@ -583,6 +595,58 @@ class Workflow:
         ordered = [one for one in self.processes if one is not process]
         ordered.insert(position, process)
         self.processes = tuple(ordered)
+        self.renumber()
+
+    def move_step_to_process(self, step: str, source: WorkflowProcess,
+                             destination: WorkflowProcess, to: int) -> None:
+        """Move one step, the object itself, from one of its processes to another (#1325).
+
+        A step moves within its process with ``WorkflowProcess.move_step``; across
+        processes it moves here, as itself: its id, governed id, label, operation,
+        settings, references and authored process_name are kept -- nothing is
+        removed and added again. It goes to position ``to`` (0-based) among the
+        destination's steps, its process becomes the destination, and the
+        Workflow-wide order is restated. Nothing is written: Save sends it under
+        the destination, by its governed id.
+
+        Args:
+            step: The step, by its name (unique Workflow-wide).
+            source: The process that holds it, as the caller resolved it.
+            destination: The process it moves to, as the caller resolved it.
+            to: Its position among the destination's steps, 0 to their count.
+
+        Raises:
+            AppError: While a direction runs; when either process is not one of
+                this Workflow's, they are the same process, the source holds no
+                step of that name, the destination's application does not publish
+                the step's operation, or ``to`` names no position.
+        """
+        self.refuse_edit_while_directing()
+        for process in (source, destination):
+            if not any(one is process for one in self.processes):
+                raise AppError(
+                    f"workflow '{self.name}' holds no such process '{process.name}'.")
+        if source is destination:
+            raise AppError(
+                f"workflow '{self.name}': step '{step}' is already in process "
+                f"'{source.name}'; a step moves within its process with move_step.")
+        moved = next((one for one in source.steps if one.id == step), None)
+        if moved is None:
+            raise AppError(f"process '{source.name}' holds no step '{step}'.")
+        # By identity, as WorkflowProcess binds a step: the destination's application
+        # must publish the very operation the step instantiates.
+        if not any(moved.operation is one for one in destination.application.workflow_operations):
+            raise AppError(
+                f"workflow '{self.name}': process '{destination.name}' instantiates "
+                f"application '{destination.application.name}', which does not publish "
+                f"step '{step}''s operation '{moved.operation.name}'.")
+        position = position_at(to, len(destination.steps) + 1,
+                               f"process '{destination.name}': step")
+        source.steps = tuple(one for one in source.steps if one is not moved)
+        steps = list(destination.steps)
+        steps.insert(position, moved)
+        destination.steps = tuple(steps)
+        moved.process = destination
         self.renumber()
 
     def _process_named(self, name: str) -> WorkflowProcess:

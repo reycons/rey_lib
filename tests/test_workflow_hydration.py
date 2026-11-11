@@ -604,16 +604,16 @@ class TestALiveStepIsEditedThroughItsContract:
             workflow._running.release()
 
 
-def _two_processes() -> Workflow:
-    """Workflow ``wf``: process fixture_app (export, commit) then process second (only, s);
-    ``load`` starts from a contract_sample."""
+def _two_processes(second_name: str = "second") -> Workflow:
+    """Workflow ``wf``: process fixture_app (export, commit) then process ``second_name``
+    (only, s); ``load`` starts from a contract_sample."""
     application = Application(name="fixture_app", workflow_operations=(
         ApplicationOperation(name="load", contract_definition=_CONTRACT,
                              contract_sample={"output_root": "{root}/out"}),
         ApplicationOperation(name="commit", contract_definition={"$schema": _SCHEMA,
                                                                  "type": "object"}),
     ))
-    second = {"workflow_process_id": 20, "process_name": "second", "process_ordinal": 2}
+    second = {"workflow_process_id": 20, "process_name": second_name, "process_ordinal": 2}
     rows = [
         *_rows(),
         _row(1, "wf", "only", 3, "commit", {}, **second),
@@ -762,6 +762,83 @@ class TestTheWorkflowDefinitionIsEditedLive:
             ("fixture_app", 2, "export", 3), ("fixture_app", 2, "commit", 4)]
         assert [one.name for one in workflow.processes] == ["second", "fixture_app"]
 
+    def test_a_process_given_itself_is_removed_though_another_shares_its_name(self) -> None:
+        """#1325: the process a caller resolved is removed as it is, not looked up again
+        by name -- the second of two same-named processes goes, the first stays."""
+        workflow = _two_processes(second_name="fixture_app")
+        first, second = workflow.processes
+
+        workflow.remove_process(second)
+
+        assert workflow.processes == (first,)
+        assert _order(workflow) == [
+            ("fixture_app", 1, "export", 1), ("fixture_app", 1, "commit", 2)]
+        assert second.workflow is None and first.workflow is workflow
+
+    def test_a_process_not_its_own_is_refused_and_changes_nothing(self) -> None:
+        workflow = _two_processes()
+        stranger = _two_processes().processes[1]
+        before = _order(workflow)
+
+        with pytest.raises(AppError, match="holds no such process 'second'"):
+            workflow.remove_process(stranger)
+        assert _order(workflow) == before
+
+    def test_a_step_moves_to_another_process_as_itself(self) -> None:
+        """#1325: the step object moves -- id, governed id, label, operation, settings and
+        authored process_name kept -- into the other process, even one of the same name."""
+        workflow = _two_processes(second_name="fixture_app")
+        first, second = workflow.processes
+        moved = workflow.steps["only"]
+        kept = (moved.governed_id, moved.label, moved.operation, moved.process_name,
+                dict(moved.configured_settings), dict(moved.settings))
+
+        workflow.move_step_to_process("only", second, first, 2)
+
+        assert workflow.steps["only"] is moved and moved.process is first
+        assert (moved.governed_id, moved.label, moved.operation, moved.process_name,
+                moved.configured_settings, moved.settings) == kept
+        assert [one.id for one in first.steps] == ["export", "commit", "only"]
+        assert [one.id for one in second.steps] == ["s"]
+        assert _order(workflow) == [
+            ("fixture_app", 1, "export", 1), ("fixture_app", 1, "commit", 2),
+            ("fixture_app", 1, "only", 3), ("fixture_app", 2, "s", 4)]
+
+    def test_a_moved_step_lands_at_its_position_and_its_source_may_empty(self) -> None:
+        workflow = _two_processes()
+        first, second = workflow.processes
+
+        workflow.move_step_to_process("export", first, second, 0)
+        workflow.move_step_to_process("commit", first, second, 1)
+
+        assert first.steps == () and first in workflow.processes
+        assert [one[2] for one in _order(workflow)] == ["export", "commit", "only", "s"]
+
+    def test_a_move_is_refused_and_changes_nothing(self) -> None:
+        workflow = _two_processes()
+        first, second = workflow.processes
+        foreign = WorkflowProcess(
+            name="other", ordinal=3, config=None, steps=(),
+            application=Application(name="other_app", workflow_operations=(
+                ApplicationOperation(name="commit", contract_definition={
+                    "$schema": _SCHEMA, "type": "object"}),)))
+        foreign.workflow = workflow
+        stranger = _two_processes().processes[1]
+        before = _order(workflow)
+
+        for arguments, refusal in [
+            (("only", second, second, 0), "already in process 'second'; a step moves within"),
+            (("export", second, first, 0), "process 'second' holds no step 'export'"),
+            (("only", second, stranger, 0), "holds no such process 'second'"),
+            (("only", second, first, 3), "no position 3 among 3"),
+        ]:
+            with pytest.raises(AppError, match=refusal):
+                workflow.move_step_to_process(*arguments)
+        workflow.processes = (*workflow.processes, foreign)
+        with pytest.raises(AppError, match="which does not publish step 'only''s operation"):
+            workflow.move_step_to_process("only", second, foreign, 0)
+        assert _order(workflow) == before
+
     def test_the_definition_is_not_edited_while_it_runs(self) -> None:
         workflow = _two_processes()
         before = _order(workflow)
@@ -772,6 +849,11 @@ class TestTheWorkflowDefinitionIsEditedLive:
                 _process(workflow, "fixture_app").add_step("load", "extract")
             with pytest.raises(AppError, match="while it runs"):
                 workflow.move_process("second", 0)
+            first, second = workflow.processes
+            with pytest.raises(AppError, match="while it runs"):
+                workflow.move_step_to_process("only", second, first, 0)
+            with pytest.raises(AppError, match="while it runs"):
+                workflow.remove_process(second)
         finally:
             workflow._running.release()
         assert _order(workflow) == before
@@ -873,6 +955,27 @@ class TestTheWorkflowSavesItsCompleteDefinition:
             "apply_only": False, "always_run": False}
         assert workflow.config["execution"]["steps"]["tidy"] == {
             "apply_only": False, "always_run": False}
+
+    def test_a_moved_step_is_saved_under_its_new_process_by_its_own_id(self) -> None:
+        """#1325: the step keeps its governed id; Save sends it under the destination --
+        control.workflow_update re-parents that row by position -- and the emptied
+        same-named process, once removed, is not sent."""
+        workflow, control = _saving()
+        first, second = workflow.processes
+        second.name = "fixture_app"
+
+        workflow.move_step_to_process("only", second, first, 2)
+        workflow.move_step_to_process("s", second, first, 3)
+        workflow.remove_process(second)
+        workflow.save()
+
+        ((_, definition),) = control.saved
+        (process,) = definition["processes"]
+        assert process["workflow_process_id"] == 10
+        assert [(one["workflow_step_id"], one["name"], one["process_name"])
+                for one in process["steps"]] == [
+            (101, "export", "load"), (102, "commit", "commit"),
+            (103, "only", "commit"), (104, "s", "commit")]
 
     def test_the_configured_definition_is_what_save_sends_and_follows_each_edit(self) -> None:
         workflow, control = _saving()
