@@ -323,8 +323,10 @@ class ApplicationAI:
             request["artifact_types"] = permitted
         if self.application_id is not None:
             # Who is asking (#1338): the AI's conversation about the subject is the
-            # one this application owns.
+            # one this application owns -- projected with the task, so any AI seat
+            # attached to this application presents that conversation, the AI's own.
             request["application_id"] = self.application_id
+            request["present_conversation"] = True
         if subject_reference is not None:
             request["subject_reference"] = dict(subject_reference)
         if origin is not None:

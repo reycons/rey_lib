@@ -348,9 +348,11 @@ def test_the_application_and_its_subject_travel_with_the_task_without_coordinate
     ai.call(object(), "generate_sql", "count", lambda message: None,
             subject_reference={"kind": "workflow", "workflow_id": 8})
 
+    # And the conversation projected with the task, so an attached seat presents it.
     assert transports.transport.requested == [
         {"command": "task", "task_key": "generate_sql", "object": "ai",
-         "application_id": 7, "subject_reference": {"kind": "workflow", "workflow_id": 8}}]
+         "application_id": 7, "present_conversation": True,
+         "subject_reference": {"kind": "workflow", "workflow_id": 8}}]
     assert transports.transport.sent[-1] == {"command": "run", "object": "t1"}
 
 
