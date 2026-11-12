@@ -534,6 +534,7 @@ class Application:
             from rey_lib.db.connection import shared_connection
             from rey_lib.inferred_architecture.object_map import ObjectMap
             self._maps["flow"] = ObjectMap.for_application(shared_connection(ctx, "tree"), self.name)
+            self._maps["flow"].bind_layout(getattr(ctx, "shared_control", None))
         return self._maps["flow"]
 
     def map_action(self, ctx: Any, action: str = "open", **given: Any) -> Any:
@@ -547,6 +548,10 @@ class Application:
             mapped.double_click(str(given.get("node") or ""))
         elif action == "context_click":
             return mapped.context_click(str(given.get("node") or ""))
+        elif action == "edit_layout":
+            mapped.edit_layout(given.get("geometry"), given.get("scope"))
+        elif action == "save":
+            mapped.save(given.get("scope"))
         elif action != "open":
             raise ConfigError(f"Application map answers no action {action!r}.")
         return None

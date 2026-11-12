@@ -243,6 +243,58 @@ class Workflow:
         # The definition as last saved -- as governed when hydrated -- against which
         # the working one is unsaved (#1325): Save is offered only while they differ.
         self._saved = self.configured_definition()
+        self._map_layout_enabled = False
+        self._map_layout_state: Optional[dict[str, Any]] = None
+
+    def bind_map_layout(self) -> None:
+        """Enable the Workflow's saved map geometry through its existing Control."""
+        self._map_layout_enabled = self.control is not None
+
+    def _map_layout(self) -> dict[str, Any]:
+        if not self._map_layout_enabled:
+            raise ConfigError("This Workflow has no map persistence connection.")
+        if self._map_layout_state is None:
+            row = self.control.map_layout("workflow", {"workflow_id": self.workflow_id}, {})
+            geometry = row["geometry"] if row else None
+            self._map_layout_state = {"geometry": geometry, "saved": geometry,
+                                      "revision": int(row["revision"]) if row else 0}
+        return self._map_layout_state
+
+    def edit_map_layout(self, geometry: dict[str, Any]) -> None:
+        """Hold reported geometry independently of this Workflow's definition."""
+        if not isinstance(geometry, dict) or not {"elements", "positions", "pan", "zoom"} <= geometry.keys():
+            raise ConfigError("A Workflow map edit requires its graph geometry.")
+        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport"}:
+            raise ConfigError("A Workflow map layout contains geometry only.")
+        self._map_layout()["geometry"] = deepcopy(geometry)
+        self._changed()
+
+    def save_map_layout(self) -> None:
+        """Persist only this Workflow's held map geometry and recover its revision."""
+        held = self._map_layout()
+        if held["geometry"] is None:
+            raise ConfigError("This Workflow has no map geometry to save.")
+        subject = {"workflow_id": self.workflow_id}
+        self.control.save_map_layout("workflow", subject, {}, held["geometry"], held["revision"])
+        row = self.control.map_layout("workflow", subject, {})
+        if row is None:
+            raise ConfigError("The saved Workflow map layout could not be recovered.")
+        held.update(geometry=row["geometry"], saved=row["geometry"], revision=int(row["revision"]))
+        self._changed()
+
+    def map_layout_projection(self) -> dict[str, Any]:
+        """The map edit and Save this Workflow permits, projected as commands."""
+        held = self._map_layout()
+        actions = [{"role": {"act": "set", "on": "map_layout"},
+                    "command": {"command": "operate", "object": "workflow",
+                                "operation": "edit_map_layout", "arguments": {}},
+                    "inputs": {"geometry": ["arguments", "geometry"]}}]
+        if held["geometry"] is not None and held["geometry"] != held["saved"]:
+            actions.append({"role": {"act": "save", "on": "map_layout"},
+                            "command": {"command": "operate", "object": "workflow",
+                                        "operation": "save_map_layout", "arguments": {}}})
+        return {"key": f"workflow:{self.workflow_id}", "geometry": deepcopy(held["geometry"]),
+                "revision": held["revision"], "actions": actions}
 
     @classmethod
     def hydrate(
@@ -927,6 +979,7 @@ class Workflow:
             return {
                 "name": self.name,
                 "enabled": self.enabled,
+                **({"layout": self.map_layout_projection()} if self._map_layout_enabled else {}),
                 # Its live settings, as configured ({} intact) and as resolved (#1325),
                 # read from the object as every other field here is.
                 "config": _configured_and_resolved(self.configured_config, self.config),

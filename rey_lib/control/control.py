@@ -1331,6 +1331,27 @@ class Control:
             saved = json.loads(saved)
         return [int(one) for one in (saved or [])]
 
+    def map_layout(self, map_kind: str, subject_identity: Mapping[str, Any],
+                   screen_identity: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+        """Read one exact saved map scope; a failed read is never an empty layout."""
+        rows = self._call_rows("get_map_layout", {
+            "map_kind": map_kind, "subject_identity": dict(subject_identity),
+            "screen_identity": dict(screen_identity),
+        }, required=True)
+        if len(rows) > 1:
+            raise ConfigError("The map layout read returned more than one saved scope.")
+        return dict(rows[0]) if rows else None
+
+    def save_map_layout(self, map_kind: str, subject_identity: Mapping[str, Any],
+                        screen_identity: Mapping[str, Any], geometry: Mapping[str, Any],
+                        expected_revision: int) -> None:
+        """Persist the owner's complete geometry through its revision-checked routine."""
+        self._call_rows("save_map_layout", {
+            "map_kind": map_kind, "subject_identity": dict(subject_identity),
+            "screen_identity": dict(screen_identity), "geometry": dict(geometry),
+            "expected_revision": expected_revision,
+        }, required=True)
+
     def update_workflow(self, workflow_id: int, definition: dict[str, Any],
                         required: bool = True) -> dict[str, list[int]]:
         """Save a Workflow's complete definition; answer the saved ids in order (#1325).

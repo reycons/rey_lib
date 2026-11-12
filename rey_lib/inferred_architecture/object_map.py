@@ -145,6 +145,67 @@ class ObjectMap:
         self._table_context: dict[str, Any] | None = None
         self._context_path: list[dict[str, Any]] = []
         self._edge_inspection: dict[str, Any] | None = None
+        self._layout_control: Any = None
+        self._layouts: dict[str, dict[str, Any]] = {}
+
+    def bind_layout(self, control: Any) -> None:
+        """Use the existing Control for this map's geometry, without replacing the map."""
+        self._layout_control = control
+
+    def _layout_scope(self) -> dict[str, Any]:
+        return {"reading": self.projection_kind, "focus": dict(self._focus)}
+
+    def _layout(self, scope: dict[str, Any]) -> dict[str, Any]:
+        if self._layout_control is None:
+            raise ConfigError("This map has no layout persistence connection.")
+        key = json.dumps(scope, sort_keys=True)
+        if key not in self._layouts:
+            if scope != self._layout_scope():
+                raise ConfigError("This map has not opened the requested layout scope.")
+            row = self._layout_control.map_layout(scope["reading"], self.subject, scope["focus"])
+            geometry = row["geometry"] if row else None
+            self._layouts[key] = {"geometry": geometry, "saved": geometry,
+                                  "revision": int(row["revision"]) if row else 0}
+        return self._layouts[key]
+
+    def edit_layout(self, geometry: dict[str, Any], scope: dict[str, Any]) -> None:
+        """Hold a reported geometry edit; only Save writes it."""
+        if self._layout_control is None:
+            raise ConfigError("This map has no layout persistence connection.")
+        if not isinstance(geometry, dict) or not {"elements", "positions", "pan", "zoom"} <= geometry.keys():
+            raise ConfigError("A map layout edit requires its graph geometry.")
+        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport"}:
+            raise ConfigError("A map layout contains geometry only.")
+        try:
+            copied = json.loads(json.dumps(geometry, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("A map layout must contain finite JSON geometry.") from exc
+        self._layout(scope)["geometry"] = copied
+
+    def save(self, scope: dict[str, Any]) -> None:
+        """Save the held geometry and re-read its authoritative revision."""
+        held = self._layout(scope)
+        if held["geometry"] is None:
+            raise ConfigError("This map has no geometry to save.")
+        self._layout_control.save_map_layout(scope["reading"], self.subject, scope["focus"],
+                                             held["geometry"], held["revision"])
+        row = self._layout_control.map_layout(scope["reading"], self.subject, scope["focus"])
+        if row is None:
+            raise ConfigError("The saved map layout could not be recovered.")
+        held.update(geometry=row["geometry"], saved=row["geometry"], revision=int(row["revision"]))
+
+    def layout_projection(self) -> dict[str, Any]:
+        """Geometry and the exact commands this live map permits."""
+        scope = self._layout_scope()
+        held = self._layout(scope)
+        actions = [{"role": {"act": "set", "on": "map_layout"},
+                    "command": {"command": "map", "action": "edit_layout", "scope": scope},
+                    "inputs": {"geometry": ["geometry"]}}]
+        if held["geometry"] is not None and held["geometry"] != held["saved"]:
+            actions.append({"role": {"act": "save", "on": "map_layout"},
+                            "command": {"command": "map", "action": "save", "scope": scope}})
+        return {"key": json.dumps(scope, sort_keys=True), "revision": held["revision"],
+                "geometry": json.loads(json.dumps(held["geometry"])), "actions": actions}
 
     # -- opening ---------------------------------------------------------------
 
@@ -578,6 +639,7 @@ class ObjectMap:
         return {
             "subject": dict(self.subject),
             "projection": self.projection_kind,
+            **({"layout": self.layout_projection()} if self._layout_control is not None else {}),
             # Every reading this one object holds (#1304); the active one is ``projection``.
             "readings": list(self._readings),
             "focus": dict(self._focus),
