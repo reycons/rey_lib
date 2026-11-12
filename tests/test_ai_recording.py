@@ -125,6 +125,7 @@ def test_the_package_is_recorded_before_the_engine_and_the_result_after(
                          "contract": {"name": "rey_log_interpreter", "version": "1.3.1"},
                          "purpose": "Interpret."},
         "source": SUMMARY,
+        "task_key": "log_interpretation",
     }
     parent, _, answered = evidence.appended[1]
     assert parent == ORIGIN
@@ -207,6 +208,26 @@ def test_the_package_keeps_the_shared_instructions_the_model_was_given(
 
     _, _, package = evidence.appended[0]
     assert package["shared_instructions"] == [dict(one) for one in shared]
+
+
+def test_the_package_names_the_task_that_executed_not_the_launch_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1344: the run was launched as select_task; the package is built for the task
+    select_task chose, so it names that task -- never the launch request."""
+    engine = _Engine("select 1")
+    evidence = _Evidence(engine=engine)
+    chosen = _task(task_key="generate_sql", instruction_key="sql_generate_sql",
+                   contract_key="sql_generate_sql", contract_version="3.0.0")
+    chosen.record_run("6173")
+
+    _ai(engine, monkeypatch).execute_recorded(chosen, None, evidence)
+
+    _, _, package = evidence.appended[0]
+    assert package["task_key"] == "generate_sql"
+    assert (package["instructions"]["contract_key"], package["instructions"]["contract_version"]) \
+        == ("sql_generate_sql", "3.0.0")
+    assert package["task_run_id"] == "6173"
 
 
 def test_without_shared_instructions_or_a_run_the_package_invents_no_key(

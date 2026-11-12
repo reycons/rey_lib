@@ -141,6 +141,11 @@ def package_of(task: Any, source: Mapping[str, Any] | None, source_record_type: 
     if shared:
         package["shared_instructions"] = shared
     package["source"] = dict(source) if source is not None else None
+    # THE TASK THAT EXECUTED (#1344): the task this package was built for -- after
+    # select_task chose, the chosen task, never the launch request. No task, no key.
+    executed = str(getattr(task, "task_key", "") or "")
+    if executed:
+        package["task_key"] = executed
     _correlated(package, task, task_run_id)
     return package
 

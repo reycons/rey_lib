@@ -170,7 +170,9 @@ def test_the_package_pairs_the_tasks_contract_with_the_source_record(tmp_path: P
 
     package = package_of(_task(), summary, "RESULTS_SUMMARY", runtime=None)
 
-    assert list(package) == ["analysis_name", "source_record_type", "instructions", "source"]
+    assert list(package) == ["analysis_name", "source_record_type", "instructions", "source",
+                             "task_key"]
+    assert package["task_key"] == "log_interpretation"
     assert package["analysis_name"] == "log_interpreter"
     assert package["source_record_type"] == "RESULTS_SUMMARY"
     assert package["instructions"] == {
@@ -203,4 +205,4 @@ def test_declared_references_are_loaded_through_the_one_loader(tmp_path: Path) -
     assert package["references"] == [{"name": "guide", "role": "guidance",
                                       "content": "Read this first."}]
     assert list(package) == ["analysis_name", "source_record_type", "instructions",
-                             "references", "source"]
+                             "references", "source", "task_key"]
