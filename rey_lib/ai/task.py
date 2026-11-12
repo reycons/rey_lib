@@ -133,6 +133,11 @@ class AITask:
     contract_version: str = ""
     contract_body: str = ""
     output_schema: dict[str, Any] | None = None
+    #: The shared instructions that apply to this task (#1337), in the order its
+    #: installation states (ai.ai_installation_vw.instructions): each record its
+    #: instruction_key, contract_key, contract_version and body. They come before
+    #: the task's own contract (``system_instructions``) and never replace it.
+    instructions: tuple[Mapping[str, str], ...] = ()
 
     temperature: float | None = None
     max_turns: int | None = None
@@ -171,6 +176,17 @@ class AITask:
             )
 
         object.__setattr__(self, "max_turns", self.turn_limit(self.max_turns))
+
+    def system_instructions(self) -> str:
+        """What the model is told before the prompt (#1337).
+
+        The shared instructions, in their order, then the task's own contract:
+        governance is added to the contract, never put in its place. The one place
+        this is composed -- every engine sends exactly this.
+        """
+        parts = (*(str(one.get("body") or "") for one in self.instructions),
+                 self.contract_body)
+        return "\n\n".join(part for part in parts if part.strip())
 
     @staticmethod
     def turn_limit(value: Any) -> int | None:
@@ -349,6 +365,19 @@ class AITask:
             else AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
             else AIOutputSpec.markdown()
         )
+        # THE SHARED INSTRUCTIONS (#1337): the task's own row only, as tools are --
+        # the installation states which apply, in order; each body is the
+        # instruction row this hydration already read, never another lookup.
+        shared = tuple(
+            MappingProxyType({
+                "instruction_key": str(one.get("instruction_key") or ""),
+                "contract_key": str(one.get("contract_key") or ""),
+                "contract_version": str(one.get("contract_version") or ""),
+                "body": cls._shared_body(
+                    instructions, str(one.get("instruction_key") or ""), key),
+            })
+            for one in ((row or {}).get("instructions") or ())
+        )
         identity = {"id": str(task_id)} if str(task_id or "").strip() else {}
         # What the caller stated, before anything was derived: a derived value
         # recorded here would come back as a choice nobody made.
@@ -383,6 +412,7 @@ class AITask:
             contract_version=str(instruction.get("contract_version") or ""),
             contract_body=str(instruction.get("body") or ""),
             output_schema=schema,
+            instructions=shared,
             temperature=None if stated is None else float(stated),
             max_turns=next((value for value in (max_turns, (row or {}).get("max_turns"),
                                                group.get("max_turns")) if value is not None), None),
@@ -480,6 +510,20 @@ class AITask:
             )
         return instruction
 
+    @classmethod
+    def _shared_body(
+        cls, instructions: Sequence[Mapping[str, Any]], instruction_key: str, task_key: str,
+    ) -> str:
+        """A shared instruction's body (#1337); one that names nothing to send is refused."""
+        instruction = cls._instruction(instructions, instruction_key, task_key)
+        body = str(instruction.get("body") or "")
+        if not body.strip():
+            raise AIConfigurationError(
+                f"AI task '{task_key or '(default)'}' is given the shared instruction "
+                f"'{instruction_key}', which carries no body, so nothing could be sent for it."
+            )
+        return body
+
     # -- what it shows ------------------------------------------------------
 
     def projection(self) -> dict[str, Any]:
@@ -505,6 +549,14 @@ class AITask:
             "composed_first": self.composed_first,
             "profile_key": self.profile_key,
             "instruction_key": self.instruction_key,
+            # The shared instructions that applied (#1337): which, and which
+            # version -- never their bodies, as the contract body stays out.
+            "instructions": [
+                {"instruction_key": one.get("instruction_key"),
+                 "contract_key": one.get("contract_key"),
+                 "contract_version": one.get("contract_version")}
+                for one in self.instructions
+            ],
             "temperature": self.temperature,
             "max_turns": self.max_turns,
             "representation": self.representation,

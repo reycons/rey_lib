@@ -858,7 +858,7 @@ class AI:
             agent = Agent(
                 model,
                 output_type=output_type,
-                instructions=task.contract_body or None,
+                instructions=task.system_instructions() or None,
                 tools=toolset.pydantic_tools(),
                 retries={
                     "output": _MAX_OUTPUT_CORRECTIONS,
@@ -1018,7 +1018,7 @@ class AI:
         tools = toolset.sdk_tools()
         options = ClaudeAgentOptions(
             model=task.model_identifier,
-            system_prompt=task.contract_body or None,
+            system_prompt=task.system_instructions() or None,
             tools=[],
             setting_sources=[],
             mcp_servers=(
