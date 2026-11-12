@@ -4,9 +4,10 @@ Deterministic: Pydantic AI's FunctionModel stands in for the engine, and the run
 log is a stand-in that keeps every record appended under an explicit parent and
 refuses or fails as told. What is proved: the package precedes the engine call and
 is the task's contract beside the record sent; the result follows, typed by the
-task; both carry the origin's run and parent and never the vehicle's; no origin
-records nothing; a bad origin refuses before the engine runs; a failed write
-changes nothing about the execution.
+task; both carry the origin's run and parent and never the vehicle's; with no
+origin the same records go to the hosting application's own run, joined to the
+task run by task_run_id (#1344); a bad origin refuses before the engine runs; a
+failed write changes nothing about the execution.
 """
 
 from __future__ import annotations
@@ -82,6 +83,14 @@ class _Evidence:
         self.appended.append((dict(parent), record_type, dict(fields)))
         return len(self.appended)
 
+    def append(self, record_type: str, *, message: str = "", **fields: Any) -> int | None:
+        """The hosting application's own run: recorded with no parent ({})."""
+        self.engine_calls_at_append.append(self._engine.calls if self._engine else -1)
+        if self._refuses is not None:
+            return None
+        self.appended.append(({}, record_type, dict(fields)))
+        return len(self.appended)
+
 
 def _ai(engine: _Engine, monkeypatch: pytest.MonkeyPatch) -> AI:
     monkeypatch.setattr(ai_module, "_MAX_OUTPUT_CORRECTIONS", 0)
@@ -138,14 +147,78 @@ def test_any_other_task_records_an_analysis_result(monkeypatch: pytest.MonkeyPat
     assert package["source"] is None and package["source_record_type"] == ""
 
 
-def test_a_task_with_no_origin_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_task_with_no_origin_records_under_the_hosting_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1344: the same evidence, filed under the hosting application's own run --
+    never under a parent made up for it -- and joined to the task run."""
+    engine = _Engine()
+    evidence = _Evidence(engine=engine)
+    task = _task(origin_id="")
+    task.record_run("6173")
+
+    result = _ai(engine, monkeypatch).execute_recorded(task, None, evidence, source=SUMMARY,
+                                                       source_record_type="RESULTS_SUMMARY")
+
+    assert result.text == "It succeeded."
+    assert [(parent, t) for parent, t, _ in evidence.appended] == [
+        ({}, "LLM_PACKAGE"), ({}, "LLM_INTERPRETATION")]
+    assert evidence.engine_calls_at_append == [0, 1]
+    _, _, package = evidence.appended[0]
+    assert package["task_run_id"] == "6173"
+    assert package["instructions"]["contract_version"] == "1.3.1"
+    _, _, answered = evidence.appended[1]
+    assert answered["task_run_id"] == "6173"
+    assert answered["execution_id"] == result.execution.execution_id
+
+
+def test_a_failure_with_no_origin_is_recorded_under_the_hosting_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    engine = _Engine(fails=ModelHTTPError(status_code=503, model_name="m", body="down"))
+    evidence = _Evidence(engine=engine)
+    task = _task(origin_id="")
+    task.record_run("6174")
+
+    with pytest.raises(AIProviderError):
+        _ai(engine, monkeypatch).execute_recorded(task, None, evidence)
+
+    assert [(parent, t) for parent, t, _ in evidence.appended] == [
+        ({}, "LLM_PACKAGE"), ({}, "LLM_ANALYSIS_FAILURE")]
+    _, _, failure = evidence.appended[1]
+    assert failure["status"] == "failed" and failure["task_run_id"] == "6174"
+
+
+def test_the_package_keeps_the_shared_instructions_the_model_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1337/#1344: identity, version and the body exactly as sent, in order."""
+    engine = _Engine()
+    evidence = _Evidence(engine=engine)
+    shared = ({"instruction_key": "development_governance", "contract_key": "development_governance",
+               "contract_version": "1.0.0", "body": "Read and follow the rules."},
+              {"instruction_key": "house_style", "contract_key": "house_style",
+               "contract_version": "2.1.0", "body": "Answer plainly."})
+    task = _task(instructions=shared)
+
+    _ai(engine, monkeypatch).execute_recorded(task, None, evidence)
+
+    _, _, package = evidence.appended[0]
+    assert package["shared_instructions"] == [dict(one) for one in shared]
+
+
+def test_without_shared_instructions_or_a_run_the_package_invents_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = _Engine()
     evidence = _Evidence(engine=engine)
 
-    result = _ai(engine, monkeypatch).execute_recorded(_task(origin_id=""), None, evidence)
+    _ai(engine, monkeypatch).execute_recorded(_task(), None, evidence)
 
-    assert result.text == "It succeeded."
-    assert evidence.appended == []
+    _, _, package = evidence.appended[0]
+    assert "shared_instructions" not in package and "task_run_id" not in package
 
 
 @pytest.mark.parametrize("origin", [
@@ -279,8 +352,13 @@ def test_failed_tool_trace_is_written_through_real_run_log_to_jsonl_and_db(monke
     task.record_run('5416')
     with pytest.raises(AIExecutionError,match='usage limit'):
         ai.execute_recorded(task,{'lookup':lambda *args:{'revision':'abc123','text':'source evidence'}},log)
-    disk=[json.loads(line)['ai_trace'] for line in log.path().read_text().splitlines()]
-    stored=[row['info']['ai_trace'] for row in log.writer._database.rows]
+    lines=[json.loads(line) for line in log.path().read_text().splitlines()]
+    # With no origin the package and the failure are this run's records too (#1344),
+    # beside the traces, and joined to the task run the same way.
+    assert [line['record_type'] for line in lines if 'ai_trace' not in line]==['LLM_PACKAGE','LLM_ANALYSIS_FAILURE']
+    assert all(line['task_run_id']=='5416' for line in lines if 'ai_trace' not in line)
+    disk=[line['ai_trace'] for line in lines if 'ai_trace' in line]
+    stored=[row['info']['ai_trace'] for row in log.writer._database.rows if (row.get('info') or {}).get('ai_trace')]
     assert disk==stored
     assert [trace['event']['kind'] for trace in disk]==['execution_started','tool_call_requested','tool_result_accepted','execution_failed']
     assert disk[2]['event']['tool_result']['value']=={'revision':'abc123','text':'source evidence'}

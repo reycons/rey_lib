@@ -103,7 +103,7 @@ def origin_of(task: Any) -> dict[str, Any] | None:
 
 
 def package_of(task: Any, source: Mapping[str, Any] | None, source_record_type: str,
-               runtime: Any) -> dict[str, Any]:
+               runtime: Any, *, task_run_id: str = "") -> dict[str, Any]:
     """The LLM package AI is sent, in the structure the finalization stage wrote.
 
     ``analysis_name`` is the task's instruction (``log_interpreter`` for the log
@@ -128,16 +128,43 @@ def package_of(task: Any, source: Mapping[str, Any] | None, source_record_type: 
                   if runtime is not None and declared else None)
     if references:
         package["references"] = references
+    # THE SHARED INSTRUCTIONS THE MODEL WAS GIVEN (#1337, #1344): each one's identity,
+    # version and the body exactly as sent, in the order it was sent -- what the model
+    # received, not a pointer to a contract that may change. None given, no key.
+    shared = [
+        {"instruction_key": str(one.get("instruction_key") or ""),
+         "contract_key": str(one.get("contract_key") or ""),
+         "contract_version": str(one.get("contract_version") or ""),
+         "body": str(one.get("body") or "")}
+        for one in (getattr(task, "instructions", ()) or ())
+    ]
+    if shared:
+        package["shared_instructions"] = shared
     package["source"] = dict(source) if source is not None else None
+    _correlated(package, task, task_run_id)
     return package
 
 
-def result_of(task: Any, result: Any) -> dict[str, Any]:
+def _correlated(record: dict[str, Any], task: Any, task_run_id: str = "") -> dict[str, Any]:
+    """The task run this record belongs to, where the task has one (#1344).
+
+    Filed under the caller's parent or the hosting application's own run alike, the
+    record joins its task run, trace and conversation by this id; no run, no key.
+    ``task_run_id`` is the run as named before execution began (as ``trace_of``
+    takes it): the task's own ``run_id`` is cleared while the engine runs.
+    """
+    named = str(task_run_id or getattr(task, "run_id", "") or "")
+    if named:
+        record["task_run_id"] = named
+    return record
+
+
+def result_of(task: Any, result: Any, *, task_run_id: str = "") -> dict[str, Any]:
     """What came back, as the completed execution states it."""
     execution = result.execution
     output = result.output
     finish = getattr(execution, "finish_reason", "")
-    return {
+    return _correlated({
         "execution_id": str(getattr(execution, "execution_id", "") or ""),
         "analysis_name": str(getattr(task, "instruction_key", "") or ""),
         "finish_reason": str(getattr(finish, "value", finish) or ""),
@@ -153,24 +180,24 @@ def result_of(task: Any, result: Any) -> dict[str, Any]:
         "prompt_digest": str(getattr(result.evidence, "prompt_digest", "") or ""),
         "started_at": str(getattr(execution, "started_at", "") or ""),
         "ended_at": str(getattr(execution, "ended_at", "") or ""),
-    }
+    }, task, task_run_id)
 
 
 def failure_of(task: Any, status: str, error: str,
-               attempts: Sequence[Any] = ()) -> dict[str, Any]:
+               attempts: Sequence[Any] = (), *, task_run_id: str = "") -> dict[str, Any]:
     """Why the execution ended without an answer: failed, or cancelled.
 
     With the tries it made (``AIExecutionInfo.attempts``), the model's last answer
     exactly as received is ``raw_output``, and every try is kept beside it.
     """
     tries = list(attempts)
-    return {
+    return _correlated({
         "analysis_name": str(getattr(task, "instruction_key", "") or ""),
         "status": str(status),
         "error": str(error),
         **({"raw_output": str(getattr(tries[-1], "raw_output", "") or ""),
             "attempts": [_attempt(one) for one in tries]} if tries else {}),
-    }
+    }, task, task_run_id)
 
 
 def _attempt(attempt: Any) -> dict[str, Any]:

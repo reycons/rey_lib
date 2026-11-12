@@ -732,8 +732,11 @@ class AI:
         application's own RunLog, linked by task_run_id and execution_id.
         They are independent of the live presentation observer.
 
-        Without an origin no caller-owned package/result is written. An origin
-        that is not an execution context is refused before the engine is called. A
+        WITHOUT AN ORIGIN THE SAME EVIDENCE IS RECORDED (#1344): the package, the
+        result or the failure go to the hosting application's own RunLog, as the
+        traces do -- never under a parent made up for them -- each carrying the
+        task_run_id (and the result its execution_id) that joins it to its task run.
+        An origin that is not an execution context is refused before the engine is called. A
         write that fails is reported by the run log and changes nothing here: the
         answer, the events and the raised error are what ``execute_task`` gives.
         ``runtime`` only resolves the paths of the references the task's contract
@@ -763,27 +766,37 @@ class AI:
                 evidence.append("INFO", message="AI execution trace", **fields)
 
         tracing = {"record": trace} if evidence is not None and task.tools else {}
-        if parent is None or evidence is None:
+        if evidence is None:
             return self.execute_task(task, operations, observe=observe, **tracing)
-        evidence.append_under(
-            parent, recording.PACKAGE_RECORD, record_group="results",
-            **recording.package_of(task, source, source_record_type, runtime))
+
+        def record(record_type: str, **fields: Any) -> None:
+            # Under the caller's place when it gave one; otherwise the hosting
+            # application's own run, as the traces are (#1344).
+            if parent is not None:
+                evidence.append_under(parent, record_type, record_group="results", **fields)
+            else:
+                evidence.append(record_type, record_group="results", **fields)
+
+        record(recording.PACKAGE_RECORD,
+               **recording.package_of(task, source, source_record_type, runtime,
+                                      task_run_id=task_run_id))
         try:
             result = self.execute_task(task, operations, observe=observe, **tracing)
         except AICancelled as withdrawn:
-            evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
-                                  **recording.failure_of(task, "cancelled", str(withdrawn)))
+            record(recording.FAILURE_RECORD,
+                   **recording.failure_of(task, "cancelled", str(withdrawn),
+                                          task_run_id=task_run_id))
             raise
         except AIError as error:
-            evidence.append_under(parent, recording.FAILURE_RECORD, record_group="results",
-                                  **recording.failure_of(task, "failed", str(error),
-                                                      getattr(error, "attempts", ())))
+            record(recording.FAILURE_RECORD,
+                   **recording.failure_of(task, "failed", str(error),
+                                          getattr(error, "attempts", ()),
+                                          task_run_id=task_run_id))
             raise
         record_type = (recording.INTERPRETATION_RECORD
                        if task.task_key == recording.INTERPRETATION_TASK
                        else recording.RESULT_RECORD)
-        evidence.append_under(parent, record_type, record_group="results",
-                              **recording.result_of(task, result))
+        record(record_type, **recording.result_of(task, result, task_run_id=task_run_id))
         return result
 
     def _run_pydantic_ai(
