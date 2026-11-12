@@ -1596,6 +1596,42 @@ class Control:
             }, required=required) or [])
         ]
 
+    def ai_experiences(self, installation_id: int, application_id: int,
+                       subject_identity: dict[str, Any],
+                       required: bool = True) -> list[dict[str, Any]]:
+        """One subject's existing AI experience, every generation (#1344).
+
+        control.f_ai_experience_get, for reconciliation and recall alike: each
+        experience with its ``validation_state``, ``is_superseded``, ``staleness``,
+        ``is_authoritative``, ``verified_claims`` and ``evidence``. The routine owns
+        the scope -- this installation, application and subject only.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_ai_experience", {
+                "installation_id": int(installation_id),
+                "application_id": int(application_id),
+                "subject_identity": dict(subject_identity),
+            }, required=required) or [])
+        ]
+
+    def sql_executions(self, installation_id: int, connection_name: str, schema: str,
+                       name: str, required: bool = True) -> list[dict[str, Any]]:
+        """One database object's past Data Workbench executions, newest first (#1344).
+
+        control.f_sql_execution_get: the SQL_EXECUTION records rey_db_admin wrote for
+        the object's connection, schema and name in this installation -- each
+        ``run_log_id``, ``status``, ``recorded_ts`` and ``duration_ms``, and nothing
+        else. The routine owns the selection; no SQL, error text or payload is read.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_sql_executions", {
+                "installation_id": int(installation_id),
+                "connection_name": str(connection_name),
+                "schema": str(schema),
+                "name": str(name),
+            }, required=required) or [])
+        ]
+
     def analysis_contract(self, name: str) -> Optional[dict[str, Any]]:
         """This installation's stored analysis contract ``name``, or None.
 

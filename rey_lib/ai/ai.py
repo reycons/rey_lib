@@ -814,12 +814,18 @@ class AI:
         Builds the task's model, runs it once and returns the validated output,
         what it used, and its tool exchange -- each function tool call and its
         result, read from the run's own messages, so it is kept whether or not
-        the run was streamed. Every failure leaves as its AIError. Structured output
-        asks Pydantic AI for the model's native JSON-schema output where the
-        model's own profile supports it, prompted output otherwise, and never
-        tool-call output -- a profile's tool flag is not a promise a local
-        engine keeps. ``OutputParser``'s rejection goes back to the model as
-        ``ModelRetry`` within the validation allowance.
+        the run was streamed. Every failure leaves as its AIError.
+
+        STRUCTURED OUTPUT IS ONE CONTRACT FOR EVERY ENGINE (#1344): Pydantic AI's
+        tool-based output -- the answer is a ``final_result`` tool beside the task's
+        own tools -- with a direct text answer also allowed, so the model chooses
+        (``tool_choice`` auto) and no engine response format is sent. A response
+        format is never asked for: measured on Ollama, a JSON-schema or JSON-object
+        format stopped the model calling the task's tools at all. Either answer, the
+        tool's or the text, is validated by ``OutputParser`` against the governed
+        schema; a rejection goes back to the model as ``ModelRetry`` within the
+        validation allowance, and an answer that never satisfies it is refused. The
+        engine's profile decides nothing here.
 
         Raises:
             AICancelled: when ``token`` was cancelled. A synchronous tool call
@@ -833,10 +839,9 @@ class AI:
         from pydantic_ai import (
             Agent,
             ModelRetry,
-            NativeOutput,
-            PromptedOutput,
             RunCancelled,
             StructuredDict,
+            ToolOutput,
             UsageLimits,
             capture_run_messages,
         )
@@ -862,12 +867,8 @@ class AI:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
             output_type: Any = str
             if task.output.is_structured() and schema is not None:
-                shaped = StructuredDict(schema, name="answer")
-                output_type = (
-                    NativeOutput(shaped)
-                    if model.profile.get("supports_json_schema_output")
-                    else PromptedOutput(shaped)
-                )
+                # The answer as a tool, or as text: both validated against the schema.
+                output_type = [ToolOutput(StructuredDict(schema, name="answer")), str]
             agent = Agent(
                 model,
                 output_type=output_type,
@@ -899,7 +900,8 @@ class AI:
             logger.debug(
                 "executing AI task %s on %s (instruction %s, output %s)",
                 key, task.model_identifier,
-                task.instruction_key or "(none)", type(output_type).__name__,
+                task.instruction_key or "(none)",
+                "tool or text" if isinstance(output_type, list) else "text",
             )
             # The synchronous SDK entry uses the current loop. Own that loop
             # explicitly instead of relying on deprecated implicit creation.

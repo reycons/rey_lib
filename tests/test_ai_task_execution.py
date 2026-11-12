@@ -14,7 +14,7 @@ from typing import Any
 import pydantic_ai
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
@@ -55,9 +55,12 @@ class _Engine:
     """A FunctionModel that answers in turn and records what it was sent."""
 
     def __init__(self, *answers: str, json_schema: bool = False,
-                 fails: Exception | None = None) -> None:
+                 fails: Exception | None = None,
+                 final_result: dict[str, Any] | None = None) -> None:
         self._answers = list(answers)
         self._fails = fails
+        # Where given, the model answers by calling the final_result output tool.
+        self._final_result = final_result
         self.seen: list[AgentInfo] = []
         self.prompts: list[str] = []
         self.model = FunctionModel(
@@ -69,6 +72,8 @@ class _Engine:
         self.prompts.append(str(messages[0].parts[-1].content))
         if self._fails is not None:
             raise self._fails
+        if self._final_result is not None:
+            return ModelResponse(parts=[ToolCallPart("final_result", dict(self._final_result))])
         return ModelResponse(parts=[TextPart(self._answers.pop(0))])
 
 
@@ -115,34 +120,46 @@ class TestText:
 
 
 class TestStructured:
-    def test_native_json_schema_output_where_the_profile_supports_it(
+    @pytest.mark.parametrize("json_schema", [True, False])
+    def test_every_engine_is_offered_the_answer_as_a_tool_beside_text(
+        self, monkeypatch: pytest.MonkeyPatch, json_schema: bool,
+    ) -> None:
+        """#1344: one contract whatever the engine's profile says -- the answer is a
+        final_result tool, text is also allowed (tool_choice auto), and no response
+        format is asked for, so the task's tools stay callable."""
+        engine = _Engine('{"answer": "ready"}', json_schema=json_schema)
+
+        result = _ai(engine, monkeypatch).execute_task(
+            _task(output=AIOutputSpec.schema_of(SCHEMA)),
+        )
+
+        parameters = engine.seen[0].model_request_parameters
+        assert parameters.output_mode == "tool"
+        assert parameters.allow_text_output is True
+        assert [tool.name for tool in engine.seen[0].output_tools] == ["final_result"]
+        assert result.value == {"answer": "ready"}
+
+    def test_an_answer_through_the_final_result_tool_is_the_tasks_value(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _Engine('{"answer": "ready"}', json_schema=True)
+        engine = _Engine(final_result={"answer": "ready"})
 
         result = _ai(engine, monkeypatch).execute_task(
             _task(output=AIOutputSpec.schema_of(SCHEMA)),
         )
 
-        assert engine.seen[0].model_request_parameters.output_mode == "native"
         assert result.value == {"answer": "ready"}
 
-    def test_prompted_output_where_it_does_not(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _Engine('{"answer": "ready"}', json_schema=False)
+    def test_a_final_result_that_breaks_the_schema_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = _Engine(final_result={"wrong": 1})
+        task = _task(output=AIOutputSpec.schema_of(SCHEMA))
 
-        result = _ai(engine, monkeypatch).execute_task(
-            _task(output=AIOutputSpec.schema_of(SCHEMA)),
-        )
+        with pytest.raises(AIOutputError):
+            _ai(engine, monkeypatch, corrections=0).execute_task(task)
 
-        assert engine.seen[0].model_request_parameters.output_mode == "prompted"
-        assert result.value == {"answer": "ready"}
-
-    def test_never_tool_call_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _Engine('{"answer": "ready"}', json_schema=True)
-
-        _ai(engine, monkeypatch).execute_task(_task(output=AIOutputSpec.schema_of(SCHEMA)))
-
-        assert engine.seen[0].output_tools == []
+        assert task.status == AITask.FAILED
 
     def test_json_without_a_schema_is_decoded_by_output_parser(
         self, monkeypatch: pytest.MonkeyPatch,
