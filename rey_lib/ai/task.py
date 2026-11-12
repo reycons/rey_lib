@@ -32,6 +32,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 
 from rey_lib.ai.content import AIContentKind, AIInput
 from rey_lib.ai.errors import AIConfigurationError
+from rey_lib.ai.experience.recall import Recall, recall
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.tools import AITool
@@ -138,6 +139,12 @@ class AITask:
     #: instruction_key, contract_key, contract_version and body. They come before
     #: the task's own contract (``system_instructions``) and never replace it.
     instructions: tuple[Mapping[str, str], ...] = ()
+    #: The verified experience this task is given (#1344 bounded recall): what was
+    #: retrieved for its application and subject, what was supplied within its governed
+    #: limits, and the block exactly as sent -- after the contract, supplemental
+    #: evidence and never instruction. None when recall did not apply: no application
+    #: or subject named, or a limit of 0.
+    experiences: Recall | None = None
 
     temperature: float | None = None
     max_turns: int | None = None
@@ -154,6 +161,9 @@ class AITask:
     subject: str = ""
     subject_reference: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({}))
+    #: The asking application's id, where its opening named one (#1344): with the
+    #: subject reference, what this task's experience is recalled for.
+    application_id: int | None = None
     origin_id: str = ""
 
     tools: tuple[AITool, ...] = ()
@@ -181,11 +191,14 @@ class AITask:
         """What the model is told before the prompt (#1337).
 
         The shared instructions, in their order, then the task's own contract:
-        governance is added to the contract, never put in its place. The one place
-        this is composed -- every engine sends exactly this.
+        governance is added to the contract, never put in its place. Then, last, the
+        verified experience block where one was supplied (#1344): supplemental
+        evidence after governance, never before it. The one place this is composed
+        -- every engine sends exactly this.
         """
         parts = (*(str(one.get("body") or "") for one in self.instructions),
-                 self.contract_body)
+                 self.contract_body,
+                 self.experiences.block if self.experiences is not None else "")
         return "\n\n".join(part for part in parts if part.strip())
 
     @staticmethod
@@ -217,6 +230,7 @@ class AITask:
         artifact_types: Sequence[str] = (),
         subject: str = "",
         subject_reference: Mapping[str, Any] | None = None,
+        application_id: int | None = None,
         origin_id: str = "",
         task_id: str = "",
     ) -> "AITask":
@@ -227,15 +241,26 @@ class AITask:
         Control rather than a context, because nothing in this subsystem holds a
         context. Reads once; a changed configuration is a new hydration.
 
+        The subject's experience is read with them (#1344 bounded recall) only where
+        the caller named its application and subject and the task's governed limits
+        both permit recall: a limit of 0 retrieves nothing.
+
         Raises:
             AIConfigurationError: as :meth:`hydrate` does.
         """
         logger.debug("hydrating AI task %s for installation %s",
                      task_key or "(default)", installation)
+        configuration = control.ai_configuration(installation)
+        recalled = (application_id is not None and bool(subject_reference)
+                    and all(cls._experience_limits(configuration, str(task_key or "").strip())))
         return cls.hydrate(
-            control.ai_configuration(installation),
+            configuration,
             control.ai_engine_profiles(installation),
             control.ai_instructions(),
+            experiences=(control.ai_experiences(control.installation_id, int(application_id),
+                                                dict(subject_reference))
+                         if recalled else None),
+            application_id=application_id,
             installation=installation, task_key=task_key,
             profile_key=profile_key, instruction_key=instruction_key,
             temperature=temperature, max_turns=max_turns, representation=representation,
@@ -252,6 +277,8 @@ class AITask:
         engines: Sequence[Mapping[str, Any]],
         instructions: Sequence[Mapping[str, Any]],
         *,
+        experiences: Sequence[Mapping[str, Any]] | None = None,
+        application_id: int | None = None,
         installation: str,
         task_key: str = "",
         profile_key: str = "",
@@ -285,7 +312,10 @@ class AITask:
         rows (ai.ai_installation_vw): one row per task, its inheritance already
         resolved, and the installation's stated defaults -- the default scope --
         on every row. ``engines`` are the installation's available engines and
-        ``instructions`` the estate's instruction rows.
+        ``instructions`` the estate's instruction rows. ``experiences`` are the
+        subject's experience rows (``Control.ai_experiences``), or None where none
+        were read: recall bounds them by the task's resolved ``experience_lesson_limit``
+        and ``experience_token_limit`` (#1344), and a limit of 0 supplies nothing.
 
         Precedence, for every choice: the caller's override, then the task's
         row, then the installation's defaults -- except the engine and the
@@ -378,6 +408,7 @@ class AITask:
             })
             for one in ((row or {}).get("instructions") or ())
         )
+        limits = cls._experience_limits(configuration, key)
         identity = {"id": str(task_id)} if str(task_id or "").strip() else {}
         # What the caller stated, before anything was derived: a derived value
         # recorded here would come back as a choice nobody made.
@@ -413,6 +444,10 @@ class AITask:
             contract_body=str(instruction.get("body") or ""),
             output_schema=schema,
             instructions=shared,
+            # THE VERIFIED EXPERIENCE (#1344): within the task's governed limits, or
+            # none where none was read or a limit is 0.
+            experiences=(recall(experiences, *limits)
+                         if experiences is not None and all(limits) else None),
             temperature=None if stated is None else float(stated),
             max_turns=next((value for value in (max_turns, (row or {}).get("max_turns"),
                                                group.get("max_turns")) if value is not None), None),
@@ -424,6 +459,7 @@ class AITask:
             subject=subject,
             # Copied as given and held read-only; its meaning is the host's.
             subject_reference=MappingProxyType(dict(subject_reference or {})),
+            application_id=None if application_id is None else int(application_id),
             origin_id=origin_id,
             # The task's own row only: tools are offered per task, and the
             # group row and an unconfigured task offer none.
@@ -509,6 +545,26 @@ class AITask:
                 "carries no body, so nothing could be sent for it."
             )
         return instruction
+
+    @staticmethod
+    def _experience_limits(
+        configuration: Sequence[Mapping[str, Any]], task_key: str,
+    ) -> tuple[int, int]:
+        """The task's governed recall limits (#1344): lessons, then tokens.
+
+        The task's row resolves its own over the installation's (ai.ai_installation_vw);
+        a task key no row configures takes the installation's defaults, as every other
+        setting does. A limit the configuration does not state is 0: no recall.
+        """
+        row = next((one for one in configuration
+                    if task_key and str(one.get("task_key")) == task_key), None)
+        first = configuration[0] if configuration else {}
+        stated = ((row.get("experience_lesson_limit"), row.get("experience_token_limit"))
+                  if row is not None else
+                  (first.get("default_experience_lesson_limit"),
+                   first.get("default_experience_token_limit")))
+        lessons, tokens = (0 if value is None else int(value) for value in stated)
+        return lessons, tokens
 
     @classmethod
     def _shared_body(

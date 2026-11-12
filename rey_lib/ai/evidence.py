@@ -140,6 +140,13 @@ def package_of(task: Any, source: Mapping[str, Any] | None, source_record_type: 
     ]
     if shared:
         package["shared_instructions"] = shared
+    # THE VERIFIED EXPERIENCE THE MODEL WAS GIVEN (#1344 bounded recall): what was
+    # retrieved before the budget, what was supplied -- ids, generations and the block
+    # exactly as sent -- and how it was measured. Recall disabled or nothing retrieved,
+    # no key.
+    recalled = getattr(task, "experiences", None)
+    if recalled is not None and recalled.retrieved:
+        package["experience"] = recalled.evidence()
     package["source"] = dict(source) if source is not None else None
     # THE TASK THAT EXECUTED (#1344): the task this package was built for -- after
     # select_task chose, the chosen task, never the launch request. No task, no key.
