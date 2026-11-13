@@ -633,8 +633,7 @@ def _write_rejections(
 		_logger.warning(
 			"Failed to write rejection rows for '%s': %s",
 			file_path.name,
-			exc,
-			exc_info=True,
+			type(exc).__name__,
 		)
 
 

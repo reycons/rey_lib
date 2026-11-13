@@ -1171,9 +1171,8 @@ def _read_date_range_from_column(
             dates.append(datetime.strptime(raw, date_format))
         except ValueError:
             _logger.debug(
-                "Skipping unparseable %s value '%s' in %s",
+                "Skipping an unparseable %s value in %s",
                 source_column,
-                raw,
                 file_path.name,
             )
 

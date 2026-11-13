@@ -475,9 +475,11 @@ class _UngovernedStderr:
         self._reporting = True
         try:
             # Handled -- the write is absorbed -- so reported here, through
-            # AppError (rule 79). The line is the error's evidence and goes
-            # through sanitization with it; the context names only the event.
-            error = AppError(f"ungoverned stderr write: {line}")
+            # AppError (rule 79). The line itself is not kept: third-party
+            # text cannot be assumed free of data values (#1357). The record
+            # states that an ungoverned write happened, and the context names
+            # only the event.
+            error = AppError("ungoverned stderr write")
             error.report("ungoverned stderr write", source="rey_lib.logs")
         finally:
             self._reporting = False

@@ -37,7 +37,7 @@ from typing import Any, NamedTuple, Optional
 
 import duckdb
 
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import StateError
@@ -72,6 +72,17 @@ __all__ = [
 ]
 
 _logger = AppLogger(__name__)
+
+
+def _reason(exc: BaseException) -> str:
+    """A driver failure as its class, which is DuckDB's error category (#1357).
+
+    DuckDB's message can quote the row or value that failed, so it is not kept.
+    """
+    if isinstance(exc, AppError):
+        # Already rey_lib's own governed message, not the driver's.
+        return str(exc)
+    return type(exc).__name__
 
 # ---------------------------------------------------------------------------
 # Neutral → DuckDB type map
@@ -207,7 +218,7 @@ def get_connection(db_cfg: Any = None, *, ctx: Any = None) -> duckdb.DuckDBPyCon
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(target)
     except (duckdb.Error, OSError) as exc:
-        raise DatabaseError(f"duckdb_utils: failed to open '{target}': {exc}") from exc
+        raise DatabaseError(f"duckdb_utils: failed to open '{target}': {_reason(exc)}") from None
 
 
 def execute(
@@ -432,7 +443,7 @@ def insert(
     try:
         returned = conn.execute(sql, [_bound_value(row[name]) for name in columns]).fetchone()
     except duckdb.Error as exc:
-        raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"insert failed for {schema}.{table}: {_reason(exc)}") from None
     if not returned:
         raise DatabaseError(f"insert: {schema}.{table} returned no {key}.")
     return returned[0]
@@ -462,7 +473,7 @@ def update(
         )
         counted = result.fetchone() if result.description else None
     except duckdb.Error as exc:
-        raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"update failed for {schema}.{table}: {_reason(exc)}") from None
     return int(counted[0]) if counted else 0
 
 
@@ -483,7 +494,7 @@ def delete(
         result = conn.execute(sql, condition_values)
         counted = result.fetchone() if result.description else None
     except duckdb.Error as exc:
-        raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"delete failed for {schema}.{table}: {_reason(exc)}") from None
     return int(counted[0]) if counted else 0
 
 
@@ -640,8 +651,8 @@ def register_csv_source(
     except duckdb.Error as exc:
         raise DatabaseError(
             f"Could not register CSV source '{path}' as relation "
-            f"'{relation_name}': {exc}"
-        ) from exc
+            f"'{relation_name}': {_reason(exc)}"
+        ) from None
 
     _logger.debug(
         "Registered CSV relation '%s' from %s", relation_name, path
@@ -725,8 +736,8 @@ def insert_from_path(
     except duckdb.Error as exc:
         raise DatabaseError(
             f"Could not insert into {schema}.{table} from "
-            f"'{source_path}': {exc}"
-        ) from exc
+            f"'{source_path}': {_reason(exc)}"
+        ) from None
 
     # One row, one column. Defended rather than indexed blindly: this number
     # is what the caller's empty-source refusal is built on, so an unexpected
@@ -787,8 +798,8 @@ def register_text_line_source(
     except duckdb.Error as exc:
         raise DatabaseError(
             f"Could not register text-line source '{path}' as relation "
-            f"'{relation_name}': {exc}"
-        ) from exc
+            f"'{relation_name}': {_reason(exc)}"
+        ) from None
 
     _logger.debug(
         "Registered text-line relation '%s' from %s", relation_name, path
@@ -858,7 +869,7 @@ def execute_statement(conn: duckdb.DuckDBPyConnection, sql_text: str) -> int:
         result = conn.execute(sql_text)
         row = result.fetchone() if result.description else None
     except duckdb.Error as exc:
-        raise DatabaseError(f"execute_statement failed: {exc}") from exc
+        raise DatabaseError(f"execute_statement failed: {_reason(exc)}") from None
     return int(row[0]) if row else 0
 
 
@@ -884,7 +895,7 @@ def fetch_rows(
         names = [column[0] for column in result.description or []]
         return [dict(zip(names, row)) for row in result.fetchall()]
     except duckdb.Error as exc:
-        raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+        raise DatabaseError(f"fetch_rows failed: {_reason(exc)}") from None
 
 
 def table_native_definition(
@@ -1228,7 +1239,7 @@ def fetch_sql_rows(
         columns = [column[0] for column in result.description or []]
         rows    = result.fetchall()
     except duckdb.Error as exc:
-        raise DatabaseError(f"SQL execution failed: {exc}") from exc
+        raise DatabaseError(f"SQL execution failed: {_reason(exc)}") from None
     return SqlResult(columns=columns, rows=rows)
 
 
@@ -1537,8 +1548,8 @@ def _refuse_unpageable(handle: duckdb.DuckDBPyConnection, wrapped: str) -> None:
     except duckdb.Error as exc:
         raise UnsupportedDatabaseCapabilityError(
             "This statement cannot be paged: it is not a query that can be "
-            f"read as a subquery. {exc}"
-        ) from exc
+            f"read as a subquery. {_reason(exc)}"
+        ) from None
 
 
 #: The DuckDB type whose values are structured documents, as its cursor
@@ -1646,7 +1657,7 @@ def execute_page(
             columns = [column[0] for column in paged.description or []]
             fetched = paged.fetchall()
         except duckdb.Error as exc:
-            raise DatabaseError(f"The page could not be read: {exc}") from exc
+            raise DatabaseError(f"The page could not be read: {_reason(exc)}") from None
     finally:
         handle.close()
 

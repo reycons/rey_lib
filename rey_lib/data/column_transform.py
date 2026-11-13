@@ -781,7 +781,7 @@ def _transform_date(value: str, cfg: dict) -> Optional[str]:
 
 	if result is None:
 		raise TransformError(
-			f"Cannot parse '{value}' as date with format '{fmt}'."
+			f"Cannot parse the value as date with format '{fmt}'."
 		)
 
 	return _apply_output_format(result, cfg, _ANSI_DATE_FMT)
@@ -833,7 +833,7 @@ def _transform_datetime(value: str, cfg: dict) -> Optional[str]:
 
 	if result is None:
 		raise TransformError(
-			f"Cannot parse '{value}' as datetime with format '{fmt}'."
+			f"Cannot parse the value as datetime with format '{fmt}'."
 		)
 
 	return _apply_output_format(result, cfg, _ANSI_DATETIME_FMT)
@@ -883,7 +883,7 @@ def _transform_time(value: str, cfg: dict) -> Optional[str]:
 
 	if result is None:
 		raise TransformError(
-			f"Cannot parse '{value}' as time with format '{fmt}'."
+			f"Cannot parse the value as time with format '{fmt}'."
 		)
 
 	return _apply_output_format(result, cfg, _ANSI_TIME_FMT)
@@ -925,7 +925,7 @@ def _transform_numeric(value: str, cfg: dict) -> Optional[float]:
     try:
         return float(value)
     except ValueError:
-        _logger.debug("Cannot parse '%s' as numeric — returning None.", value)
+        _logger.debug("Cannot parse the value as numeric — returning None.")
         return None
 
 
@@ -952,7 +952,7 @@ def _transform_boolean(value: Optional[str], column: str) -> Optional[bool]:
     if word in _FALSE_TOKENS:
         return False
     raise TransformError(
-        f"Column '{column}': {text!r} is not a boolean. "
+        f"Column '{column}': the value is not a boolean. "
         "True is true, t, yes, y or 1; false is false, f, no, n or 0.",
         column=column,
     )
@@ -999,7 +999,7 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict, value: Any = No
     m = re.search(pattern, value)
     if not m:
         if not allow_blank:
-            _logger.debug("Pattern '%s' did not match '%s'.", pattern, value)
+            _logger.debug("Pattern '%s' did not match the value.", pattern)
         return None if allow_blank else value
 
     result = m.group(group)
@@ -1010,13 +1010,13 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict, value: Any = No
         try:
             return float(result) if result else None
         except ValueError:
-            _logger.debug("Cannot cast '%s' to float — returning None.", result)
+            _logger.debug("Cannot cast the extracted value to float — returning None.")
             return None
     if cast_to in ("int", "integer"):
         try:
             return int(result) if result else None
         except ValueError:
-            _logger.debug("Cannot cast '%s' to int — returning None.", result)
+            _logger.debug("Cannot cast the extracted value to int — returning None.")
             return None
 
     return result
@@ -1078,8 +1078,8 @@ def _transform_prefix_map(
             return prefixes[prefix]
 
     _logger.debug(
-        "No prefix matched for value '%s' — using default '%s'.",
-        raw_value, default,
+        "No prefix matched for column '%s' — using default '%s'.",
+        source, default,
     )
     return default
 
@@ -1139,7 +1139,7 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[str]:
         if allow_blank:
             return None
         raise TransformError(
-            f"Pattern '{pattern}' has no group {group} in value '{value}'."
+            f"Pattern '{pattern}' has no group {group} in the value."
         )
 
     result = _try_parse_date(date_str.strip(), fmt)
@@ -1147,7 +1147,7 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[str]:
         if allow_blank:
             return None
         raise TransformError(
-            f"Cannot parse '{date_str}' as date with format '{fmt}'."
+            f"Cannot parse the extracted value as date with format '{fmt}'."
         )
     return _apply_output_format(result, cfg, _ANSI_DATE_FMT)
 

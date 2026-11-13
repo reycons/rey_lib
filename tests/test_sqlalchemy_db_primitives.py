@@ -200,7 +200,7 @@ def test_postgres_run_sql_rolls_back_its_script_and_wraps_the_error() -> None:
 
     core.exec_driver_sql = only_the_script_fails  # type: ignore[method-assign]
 
-    with pytest.raises(DatabaseError, match="run_sql failed: boom"):
+    with pytest.raises(DatabaseError, match="run_sql failed: RuntimeError$"):
         postgres_utils.run_sql(conn, "DELETE FROM records")
 
     assert issued[0] == "BEGIN"
@@ -221,7 +221,7 @@ def test_postgres_query_rows_failure_needs_no_recovery() -> None:
     conn, core, _engine = _connection()
     core.failure = RuntimeError("no such table")
 
-    with pytest.raises(DatabaseError, match="query failed: no such table"):
+    with pytest.raises(DatabaseError, match="query failed: RuntimeError$"):
         postgres_utils.query_rows(conn, "SELECT * FROM nope")
 
     assert core.rollbacks == 0
@@ -430,7 +430,7 @@ def test_mysql_query_error_is_normalized() -> None:
     conn, core, _engine = _connection(provider="mysql")
     core.failure = RuntimeError("bad query")
 
-    with pytest.raises(DatabaseError, match="DBAdapter: query failed: bad query"):
+    with pytest.raises(DatabaseError, match="DBAdapter: query failed: RuntimeError$"):
         DBAdapter().query_rows(conn, "SELECT broken")
 
 

@@ -466,7 +466,10 @@ def test_a_file_connection_opens_the_configured_path(tmp_path: Path) -> None:
 
 
 def test_a_file_that_is_not_a_database_is_a_database_error(tmp_path: Path) -> None:
-    """The driver's refusal reaches the caller as the canonical error (backlog 1033)."""
+    """The driver's refusal reaches the caller as the canonical error (backlog 1033).
+
+    Its category is named; its message and chained cause are not kept (#1357).
+    """
     from types import SimpleNamespace
 
     from rey_lib.db.duckdb_utils import get_connection
@@ -474,11 +477,12 @@ def test_a_file_that_is_not_a_database_is_a_database_error(tmp_path: Path) -> No
     target = _write(tmp_path, "not_a_database.duckdb", "plain text, not DuckDB")
     with pytest.raises(DatabaseError, match="failed to open") as raised:
         get_connection(SimpleNamespace(provider="duckdb", path=str(target)))
-    assert isinstance(raised.value.__cause__, duckdb.Error)
+    assert "IOException" in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def test_a_parent_that_cannot_be_created_is_a_database_error(tmp_path: Path) -> None:
-    """A filesystem refusal is a database failure too, with its cause kept (backlog 1033)."""
+    """A filesystem refusal is a database failure too, its category named (backlog 1033, #1357)."""
     from types import SimpleNamespace
 
     from rey_lib.db.duckdb_utils import get_connection
@@ -486,7 +490,8 @@ def test_a_parent_that_cannot_be_created_is_a_database_error(tmp_path: Path) -> 
     blocker = _write(tmp_path, "blocker", "a file where a directory is needed")
     with pytest.raises(DatabaseError, match="failed to open") as raised:
         get_connection(SimpleNamespace(provider="duckdb", path=str(blocker / "db.duckdb")))
-    assert isinstance(raised.value.__cause__, OSError)
+    assert "FileExistsError" in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def test_the_shared_adapter_dispatches_to_duckdb() -> None:

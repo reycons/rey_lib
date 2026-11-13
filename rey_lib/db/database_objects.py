@@ -2210,7 +2210,9 @@ class DatabaseSchema:
         try:
             read = adapter.get_schema_metadata(conn, schema)
         except Exception as exc:
-            raise DatabaseError(f"The schema '{schema}' could not be read: {exc}") from exc
+            # A driver's own message can quote a value; only rey_lib's is kept (#1357).
+            reason = str(exc) if isinstance(exc, DatabaseError) else type(exc).__name__
+            raise DatabaseError(f"The schema '{schema}' could not be read: {reason}") from None
         tables = _ordered(
             _table(adapter, conn, connection, catalog, schema, entry)
             for entry in read.get("tables") or []

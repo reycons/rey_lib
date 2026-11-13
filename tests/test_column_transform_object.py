@@ -799,7 +799,7 @@ class TestBoolean:
         assert held.transform([{"A": raw}]) == [{"a": None}]
 
     @pytest.mark.parametrize("raw", ["maybe", "2", "on", "-1", "truthy"])
-    def test_anything_else_is_refused_naming_column_and_value(self, raw: str) -> None:
+    def test_anything_else_is_refused_naming_the_column_never_the_value(self, raw: str) -> None:
         held = ColumnTransform(_declaration(
             {"source": "A", "name": "flag", "transform": {"type": "boolean"}},
         ))
@@ -808,7 +808,7 @@ class TestBoolean:
             held.transform([{"A": raw}])
 
         assert raised.value.column == "flag"
-        assert "flag" in str(raised.value) and repr(raw) in str(raised.value)
+        assert "flag" in str(raised.value) and repr(raw) not in str(raised.value)
 
     def test_the_datatype_alone_converts_nothing(self) -> None:
         held = ColumnTransform(

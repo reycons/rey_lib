@@ -40,7 +40,7 @@ from typing import Any, Iterable, Optional
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.encryption import sha256_text
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.logs import AppLogger
 
 __all__ = [
@@ -165,8 +165,8 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
         )
     except Exception as exc:
         raise DatabaseError(
-            f"postgres_utils: failed to connect to '{database}' on '{host}': {exc}"
-        ) from exc
+            f"postgres_utils: failed to connect to '{database}' on '{host}': {_reason(exc)}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +237,8 @@ def render_and_execute(conn: Any, call: RoutineCall) -> Any:
     except Exception as exc:
         raise DatabaseError(
             f"postgres_utils: {call.shape.value} call failed for "
-            f"'{call.routine}': {exc}"
-        ) from exc
+            f"'{call.routine}': {_reason(exc)}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +305,8 @@ def run_sql(
             raise
     except Exception as exc:
         raise DatabaseError(
-            f"postgres_utils: run_sql failed: {exc}"
-        ) from exc
+            f"postgres_utils: run_sql failed: {_reason(exc)}"
+        ) from None
 
 
 def query_rows(
@@ -340,7 +340,7 @@ def query_rows(
         # no transaction to clear and the next consumer is unaffected. The
         # rollback that used to be here existed only to undo the implicit
         # transaction this contract removed.
-        raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
+        raise DatabaseError(f"DBAdapter: query failed: {_reason(exc)}") from None
 
 
 #: The PostgreSQL types whose values are structured documents: json, jsonb.
@@ -418,7 +418,7 @@ def execute_statements(
     except Exception as exc:
         # No rollback: the connection is in AUTOCOMMIT, so a failed statement
         # leaves no transaction to clear and the next consumer is unaffected.
-        raise DatabaseError(f"postgres_utils: execution failed: {exc}") from exc
+        raise DatabaseError(f"postgres_utils: execution failed: {_reason(exc)}") from None
     finally:
         if cursor is not None and hasattr(cursor, "close"):
             cursor.close()
@@ -552,8 +552,8 @@ def execute_named_sql(
         raise
     except Exception as exc:
         raise DatabaseError(
-            f"postgres_utils: execute_named_sql failed: {exc}"
-        ) from exc
+            f"postgres_utils: execute_named_sql failed: {_reason(exc)}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +654,7 @@ def bulk_insert(
             f"bulk_insert: a row for {schema}.{table} is missing column {exc}."
         ) from exc
     except Exception as exc:
-        raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def _bound_value(value: Any) -> Any:
@@ -695,8 +695,8 @@ def insert(conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
         key_columns = inspect_primary_key(conn, schema, table)
     except SQLAlchemyError as exc:
         raise DatabaseError(
-            f"insert: could not read the primary key of {schema}.{table}: {exc}"
-        ) from exc
+            f"insert: could not read the primary key of {schema}.{table}: {_reason(exc)}"
+        ) from None
     if len(key_columns) != 1:
         raise DatabaseError(
             f"insert: {schema}.{table} has {len(key_columns)} primary-key column(s); "
@@ -712,7 +712,7 @@ def insert(conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
     try:
         return core_connection(conn).execute(statement).scalar_one()
     except SQLAlchemyError as exc:
-        raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"insert failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def update(
@@ -742,7 +742,7 @@ def update(
     try:
         return int(core_connection(conn).execute(statement).rowcount)
     except SQLAlchemyError as exc:
-        raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"update failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def delete(conn: Any, schema: str, table: str, criteria: dict[str, Any]) -> int:
@@ -766,7 +766,7 @@ def delete(conn: Any, schema: str, table: str, criteria: dict[str, Any]) -> int:
     try:
         return int(core_connection(conn).execute(statement).rowcount)
     except SQLAlchemyError as exc:
-        raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
+        raise DatabaseError(f"delete failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
@@ -810,8 +810,8 @@ def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
         return []
     except Exception as exc:
         raise DatabaseError(
-            f"get_table_columns failed for {schema}.{table}: {exc}"
-        ) from exc
+            f"get_table_columns failed for {schema}.{table}: {_reason(exc)}"
+        ) from None
 
     return [str(item["name"]) for item in columns]
 
@@ -1860,8 +1860,8 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
             raise DatabaseError(
                 f"postgres_utils: the definition of {nsp}.{name} could not be "
                 f"retrieved, so this scan cannot state what it references: "
-                f"{exc}"
-            ) from exc
+                f"{_reason(exc)}"
+            ) from None
         routines.append({
             "oid": oid, "schema": nsp, "name": name,
             "object_type": _PROKIND_TO_OBJECT_TYPE.get(prokind, "function"),
@@ -2339,7 +2339,7 @@ def execute_statement(conn: Any, sql_text: str) -> int:
     try:
         return int(core_connection(conn).exec_driver_sql(sql_text).rowcount)
     except Exception as exc:
-        raise DatabaseError(f"execute_statement failed: {exc}") from exc
+        raise DatabaseError(f"execute_statement failed: {_reason(exc)}") from None
 
 
 def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2358,7 +2358,7 @@ def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[st
         result = core_connection(conn).execute(text(sql_text), dict(params))
         return [dict(row) for row in result.mappings()]
     except Exception as exc:
-        raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+        raise DatabaseError(f"fetch_rows failed: {_reason(exc)}") from None
 
 
 def schema_metadata(
@@ -2852,21 +2852,43 @@ def _refuse_if_not_pageable(core: Any, wrapped: str) -> None:
         original = getattr(exc, "orig", exc)
         state = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
         if state == "42501":
-            raise DatabaseError(f"Permission denied while reading the query (SQLSTATE 42501). {_reason(exc)}") from exc
+            raise DatabaseError(f"Permission denied while reading the query (SQLSTATE 42501). {_reason(exc)}") from None
         if state is not None and state not in {"42601", "0A000"}:
-            raise DatabaseError(f"PostgreSQL refused the query (SQLSTATE {state}). {_reason(exc)}") from exc
+            raise DatabaseError(f"PostgreSQL refused the query (SQLSTATE {state}). {_reason(exc)}") from None
         if state is None:
-            raise DatabaseError(f"PostgreSQL could not validate the query. {_reason(exc)}") from exc
+            raise DatabaseError(f"PostgreSQL could not validate the query. {_reason(exc)}") from None
         raise UnsupportedDatabaseCapabilityError(
             "This statement cannot be paged: it is not a query that can be "
             f"read as a subquery. {_reason(exc)}"
-        ) from exc
+        ) from None
+
+
+#: The driver's diagnostic fields that name structure, never a value (#1357).
+_DIAGNOSTIC_FIELDS: tuple[str, ...] = (
+    "schema_name", "table_name", "column_name", "datatype_name", "constraint_name",
+)
 
 
 def _reason(exc: Exception) -> str:
-    """One line of a driver failure, for an operator to act on."""
-    detail = " ".join(str(exc).split())
-    return detail[:200] if detail else exc.__class__.__name__
+    """One line of a driver failure, for an operator to act on.
+
+    The driver's message and detail can quote the value that failed, so neither
+    is kept: the error class, the SQLSTATE and the objects it names are (#1357).
+    """
+    if isinstance(exc, AppError):
+        # Already rey_lib's own governed message, not the driver's.
+        return str(exc)
+    original = getattr(exc, "orig", exc)
+    parts = [type(original).__name__]
+    state = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if state:
+        parts.append(f"SQLSTATE {state}")
+    diag = getattr(original, "diag", None)
+    for field in _DIAGNOSTIC_FIELDS:
+        named = getattr(diag, field, None) if diag is not None else None
+        if named:
+            parts.append(f"{field.removesuffix('_name')} {named}")
+    return "; ".join(parts)
 
 
 def execute_page(
@@ -2972,7 +2994,7 @@ def execute_page(
             except Exception as exc:
                 raise DatabaseError(
                     f"The page could not be read: {_reason(exc)}"
-                ) from exc
+                ) from None
 
     consumed = offset + len(rows)
     return PageResult(

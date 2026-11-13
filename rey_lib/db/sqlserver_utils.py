@@ -58,7 +58,7 @@ from typing import Any, Optional
 import pyodbc
 
 from rey_lib.config.env_reference import resolve_env_reference
-from rey_lib.errors.error_utils import DatabaseError, ConfigError
+from rey_lib.errors.error_utils import AppError, DatabaseError, ConfigError
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import StateError
 
@@ -81,6 +81,20 @@ __all__ = [
 ]
 
 _logger = AppLogger(__name__)
+
+
+def _reason(exc: BaseException) -> str:
+    """A driver failure as its class and SQLSTATE (#1357).
+
+    pyodbc carries the SQLSTATE first and the server's message second; the
+    message can quote the value that failed, so it is not kept.
+    """
+    if isinstance(exc, AppError):
+        # Already rey_lib's own governed message, not the driver's.
+        return str(exc)
+    args = getattr(exc, "args", ())
+    state = args[0] if args and isinstance(args[0], str) and len(args[0]) == 5 else None
+    return f"{type(exc).__name__}; SQLSTATE {state}" if state else type(exc).__name__
 
 # ---------------------------------------------------------------------------
 # Neutral → SQL Server type map
@@ -330,8 +344,8 @@ def bulk_insert(
 		# Propagated, so not reported here: the AppError boundary reports it
 		# once (rule 79). Row values are never logged.
 		raise DatabaseError(
-			f"bulk_insert failed for {schema}.{table}: {exc}"
-		) from exc
+			f"bulk_insert failed for {schema}.{table}: {_reason(exc)}"
+		) from None
 
 	finally:
 		cursor.close()
@@ -404,7 +418,7 @@ def insert(conn: pyodbc.Connection, schema: str, table: str, row: dict[str, Any]
 		cursor.execute(sql, [_bound_value(row[name]) for name in columns])
 		returned = cursor.fetchone()
 	except pyodbc.Error as exc:
-		raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"insert failed for {schema}.{table}: {_reason(exc)}") from None
 	finally:
 		cursor.close()
 	if not returned:
@@ -435,7 +449,7 @@ def update(
 		cursor.execute(sql, [*(_bound_value(value) for value in values.values()), *condition_values])
 		return int(cursor.rowcount)
 	except pyodbc.Error as exc:
-		raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"update failed for {schema}.{table}: {_reason(exc)}") from None
 	finally:
 		cursor.close()
 
@@ -456,7 +470,7 @@ def delete(conn: pyodbc.Connection, schema: str, table: str, criteria: dict[str,
 		cursor.execute(sql, condition_values)
 		return int(cursor.rowcount)
 	except pyodbc.Error as exc:
-		raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"delete failed for {schema}.{table}: {_reason(exc)}") from None
 	finally:
 		cursor.close()
 
@@ -585,8 +599,8 @@ def call_proc_with_output(
         return {name: row[i] for i, (name, _t) in enumerate(output_param_specs)}
     except pyodbc.Error as exc:
         raise DatabaseError(
-            f"Stored procedure '{proc_name}' (with output) failed: {exc}"
-        ) from exc
+            f"Stored procedure '{proc_name}' (with output) failed: {_reason(exc)}"
+        ) from None
     finally:
         cursor.close()
 
@@ -664,7 +678,7 @@ def execute_statement(conn: pyodbc.Connection, sql_text: str) -> int:
 		finally:
 			cursor.close()
 	except pyodbc.Error as exc:
-		raise DatabaseError(f"execute_statement failed: {exc}") from exc
+		raise DatabaseError(f"execute_statement failed: {_reason(exc)}") from None
 
 
 #: A named ``:name`` parameter -- never a ``::`` cast or part of a word.
@@ -703,7 +717,7 @@ def fetch_rows(
 		finally:
 			cursor.close()
 	except pyodbc.Error as exc:
-		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+		raise DatabaseError(f"fetch_rows failed: {_reason(exc)}") from None
 
 
 def _database_prefix(database_name: str) -> str:
@@ -1351,7 +1365,7 @@ def _run_cursor(
         return cursor
     except pyodbc.Error as exc:
         cursor.close()
-        raise DatabaseError(f"{error_context} failed: {exc}") from exc
+        raise DatabaseError(f"{error_context} failed: {_reason(exc)}") from None
 
 
 def _cursor_to_dicts(cursor: pyodbc.Cursor) -> list[dict[str, Any]]:
@@ -1380,7 +1394,7 @@ def _cursor_to_dicts(cursor: pyodbc.Cursor) -> list[dict[str, Any]]:
         columns = [col[0] for col in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
     except pyodbc.Error as exc:
-        raise DatabaseError(f"Failed to fetch cursor results: {exc}") from exc
+        raise DatabaseError(f"Failed to fetch cursor results: {_reason(exc)}") from None
 
 
 def _build_odbc_call(proc_name: str, param_count: int) -> str:

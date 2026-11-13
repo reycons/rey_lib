@@ -36,6 +36,7 @@ from rey_lib.db.database_query import PageResult, StatementResult
 from rey_lib.db.routine_call import RoutineCall
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import (
+    AppError,
     ConfigError,
     DatabaseError,
     UnsupportedDatabaseCapabilityError,
@@ -203,6 +204,19 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
 
 _logger = AppLogger(__name__)
 
+
+def _reason(exc: BaseException) -> str:
+    """A DB-API failure as its class and SQLSTATE where the driver states one (#1357).
+
+    The driver's message can quote the value that failed, so it is not kept.
+    """
+    if isinstance(exc, AppError):
+        # Already rey_lib's own governed message, not the driver's.
+        return str(exc)
+    original = getattr(exc, "orig", exc)
+    state = getattr(original, "sqlstate", None)
+    return f"{type(original).__name__}; SQLSTATE {state}" if state else type(original).__name__
+
 #: How much of a statement identifies it in a log. Enough to recognise which
 #: query was running, and never the whole text -- which is long and can carry
 #: literals a caller inlined.
@@ -276,7 +290,7 @@ def _execute_statements_over_dbapi(
         _logger.debug(
             "dbapi statement execution failed for statement=%s", _glimpse(sql_text),
         )
-        raise DatabaseError(f"DBAdapter: execution failed: {exc}") from exc
+        raise DatabaseError(f"DBAdapter: execution failed: {_reason(exc)}") from None
     finally:
         if cursor is not None and hasattr(cursor, "close"):
             cursor.close()
@@ -631,7 +645,7 @@ class DBAdapter:
             _logger.debug(
                 "dbapi read failed for statement=%s", _glimpse(sql_text),
             )
-            raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
+            raise DatabaseError(f"DBAdapter: query failed: {_reason(exc)}") from None
         finally:
             if cursor is not None and hasattr(cursor, "close"):
                 cursor.close()

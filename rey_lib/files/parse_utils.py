@@ -49,7 +49,11 @@ def parse_iso_date(value: str) -> Optional[date]:
     text = (value or "").strip()
     if not text:
         return None
-    return date.fromisoformat(text)
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        # The native message quotes the value; a diagnostic never carries it (#1357).
+        raise ValueError("The value is not an ISO-8601 date.") from None
 
 
 def parse_float(value: str) -> Optional[float]:
@@ -78,4 +82,8 @@ def parse_float(value: str) -> Optional[float]:
     text = (value or "").strip()
     if not text:
         return None
-    return float(text)
+    try:
+        return float(text)
+    except ValueError:
+        # The native message quotes the value; a diagnostic never carries it (#1357).
+        raise ValueError("The value is not a number.") from None

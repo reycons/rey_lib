@@ -458,8 +458,7 @@ def materialize_prepared_rule_sets(
                     validation_name="rule_set_materialization_group",
                     status="passed",
                     message=(
-                        f"Materialized onboarding '{config.name}' filename "
-                        f"group '{group_value}'."
+                        f"Materialized onboarding '{config.name}' filename group."
                     ),
                     onboarding_name=config.name,
                     group_value=group_value,
@@ -469,11 +468,11 @@ def materialize_prepared_rule_sets(
                 # Handled -- counted, recorded, the next group runs -- so
                 # reported here (rule 79).
                 error = exc if isinstance(exc, AppError) else RedactorError(
-                    f"materialization failed for group '{group_value}'")
+                    "materialization failed for a filename group")
                 if error is not exc:
                     error.__cause__ = exc
                 error.report(
-                    f"materializing onboarding {config.name} group {group_value}",
+                    f"materializing onboarding {config.name} filename group",
                     source=__name__,
                 )
                 log_validation_result(run_log,
@@ -595,8 +594,7 @@ def _discover_groups(config: RuleSetOnboardingConfig) -> tuple[_Group, ...]:
         prior = slugs.get(slug)
         if prior is not None and prior != value:
             raise InputError(
-                f"Filename group values '{prior}' and '{value}' normalize to "
-                f"the same workspace key '{slug}'."
+                "Two filename group values normalize to the same workspace key."
             )
         slugs[slug] = value
         groups.append(
@@ -920,10 +918,10 @@ def _group_from_preparation_entry(
     value = _required_string(entry, "group_value", config.name)
     slug = _required_string(entry, "group_slug", config.name)
     if slug != _slug(value):
-        raise InputError(f"Prepared filename group slug changed for '{value}'.")
+        raise InputError("Prepared filename group slug changed.")
     raw_sources = entry.get("source_files")
     if not isinstance(raw_sources, list) or not raw_sources:
-        raise InputError(f"Prepared filename group '{value}' has no source files.")
+        raise InputError("A prepared filename group has no source files.")
     files: list[Path] = []
     for index, raw_source in enumerate(raw_sources):
         source = _mapping(raw_source, f"prepared source_files[{index}]")
@@ -944,11 +942,11 @@ def _group_from_preparation_entry(
         match = re.fullmatch(config.filename_regex, path.name)
         if match is None or match.group(config.group_capture) != value:
             raise InputError(
-                f"Prepared source '{path.name}' no longer belongs to group '{value}'."
+                f"Prepared source '{path.name}' no longer belongs to its filename group."
             )
         files.append(path)
     if files != sorted(files, key=lambda item: item.name):
-        raise InputError(f"Prepared sources for group '{value}' are not ordered.")
+        raise InputError("A prepared filename group's sources are not ordered.")
     return _Group(value=value, slug=slug, files=tuple(files))
 
 
@@ -1341,7 +1339,7 @@ def _sum_source_column(
         except InvalidOperation as exc:
             raise InputError(
                 f"Trusted control total '{column}' cannot be calculated for "
-                f"'{source.name}': nonnumeric value '{raw}'."
+                f"'{source.name}': a value is nonnumeric."
             ) from exc
         total += value
         found = True
@@ -1543,7 +1541,7 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
 def _slug(value: str) -> str:
     result = _SAFE_COMPONENT.sub("_", value).strip("._-").lower()
     if not result:
-        raise InputError(f"Filename group value '{value}' has no safe characters.")
+        raise InputError("A filename group value has no safe characters.")
     return result
 
 

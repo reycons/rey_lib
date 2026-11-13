@@ -66,7 +66,7 @@ from rey_lib.logs import AppLogger
 from rey_lib.config.ctx import find_by_name
 from rey_lib.db.database_objects import DatabaseFunction, DatabaseProcedure
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.logs import log_sql_execution
 
 __all__ = [
@@ -501,7 +501,8 @@ class ProcedureMap:
                 operation="routine",
                 status="failed",
                 duration_ms=int((time.monotonic() - t0) * 1000),
-                error_message=str(exc),
+                # A driver's own message can quote a value; only rey_lib's is kept (#1357).
+            error_message=str(exc) if isinstance(exc, AppError) else type(exc).__name__,
                 safe_to_preview=False,
                 procedure_map=self.map_name,
                 routine=routine_name,
@@ -563,7 +564,8 @@ def execute_sql_text(
             operation=operation,
             status="failed",
             duration_ms=int((time.monotonic() - t0) * 1000),
-            error_message=str(exc),
+            # A driver's own message can quote a value; only rey_lib's is kept (#1357).
+            error_message=str(exc) if isinstance(exc, AppError) else type(exc).__name__,
             safe_to_preview=safe_to_preview,
             **context,
         )
@@ -618,7 +620,8 @@ def _execute_sql(
             operation=execution_target,
             status="failed",
             duration_ms=int((time.monotonic() - t0) * 1000),
-            error_message=str(exc),
+            # A driver's own message can quote a value; only rey_lib's is kept (#1357).
+            error_message=str(exc) if isinstance(exc, AppError) else type(exc).__name__,
             safe_to_preview=False,
             procedure_map=map_name,
             result_mode=result_mode,

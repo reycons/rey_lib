@@ -75,7 +75,9 @@ class TestGetTableColumns:
             postgres_utils.get_table_columns(None, "staging", "trade")
 
         assert "staging.trade" in str(raised.value)
-        assert raised.value.__cause__ is not None
+        # Its category, not the driver's message or a chained cause (#1357).
+        assert "RuntimeError" in str(raised.value)
+        assert raised.value.__cause__ is None
 
     @pytest.mark.parametrize(
         "schema,table",

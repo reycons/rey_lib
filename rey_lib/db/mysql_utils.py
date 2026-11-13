@@ -17,7 +17,7 @@ import mysql.connector
 from mysql.connector import Error as MySQLError
 
 from rey_lib.config.env_reference import resolve_env_reference
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import AppError, DatabaseError
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import ConfigError, StateError, UnsupportedDatabaseCapabilityError
 
@@ -40,6 +40,24 @@ __all__ = [
 ]
 
 _logger = AppLogger(__name__)
+
+
+def _reason(exc: BaseException) -> str:
+    """A driver failure as its class, error number and SQLSTATE (#1357).
+
+    The server's message can quote the value that failed, so it is not kept.
+    """
+    if isinstance(exc, AppError):
+        # Already rey_lib's own governed message, not the driver's.
+        return str(exc)
+    parts = [type(exc).__name__]
+    errno = getattr(exc, "errno", None)
+    if errno:
+        parts.append(f"errno {errno}")
+    state = getattr(exc, "sqlstate", None)
+    if state:
+        parts.append(f"SQLSTATE {state}")
+    return "; ".join(parts)
 
 _sql_dir: Path | None = None
 _SQL: dict[str, str] = {}
@@ -103,7 +121,7 @@ def query_rows(
 		)
 		return columns, [dict(zip(columns, row)) for row in values]
 	except Exception as exc:
-		raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
+		raise DatabaseError(f"DBAdapter: query failed: {_reason(exc)}") from None
 
 
 def bulk_insert(
@@ -140,7 +158,7 @@ def bulk_insert(
 		core_connection(conn).execute(statement, parameter_rows)
 		return len(rows)
 	except Exception as exc:
-		raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def _bound_value(value: Any) -> Any:
@@ -181,8 +199,8 @@ def insert(conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
 		key_columns = inspect_primary_key(conn, schema, table)
 	except SQLAlchemyError as exc:
 		raise DatabaseError(
-			f"insert: could not read the primary key of {schema}.{table}: {exc}"
-		) from exc
+			f"insert: could not read the primary key of {schema}.{table}: {_reason(exc)}"
+		) from None
 	if len(key_columns) != 1:
 		raise DatabaseError(
 			f"insert: {schema}.{table} has {len(key_columns)} primary-key column(s); "
@@ -196,7 +214,7 @@ def insert(conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
 	try:
 		result = core_connection(conn).execute(statement)
 	except SQLAlchemyError as exc:
-		raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"insert failed for {schema}.{table}: {_reason(exc)}") from None
 	if row.get(key) is not None:
 		return row[key]
 	return result.lastrowid
@@ -229,7 +247,7 @@ def update(
 	try:
 		return int(core_connection(conn).execute(statement).rowcount)
 	except SQLAlchemyError as exc:
-		raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"update failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def delete(conn: Any, schema: str, table: str, criteria: dict[str, Any]) -> int:
@@ -253,7 +271,7 @@ def delete(conn: Any, schema: str, table: str, criteria: dict[str, Any]) -> int:
 	try:
 		return int(core_connection(conn).execute(statement).rowcount)
 	except SQLAlchemyError as exc:
-		raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
+		raise DatabaseError(f"delete failed for {schema}.{table}: {_reason(exc)}") from None
 
 
 def call_proc(
@@ -274,7 +292,7 @@ def call_proc(
 
 	except MySQLError as exc:
 		cursor.close()
-		raise DatabaseError(f"Stored procedure '{proc_name}' failed: {exc}") from exc
+		raise DatabaseError(f"Stored procedure '{proc_name}' failed: {_reason(exc)}") from None
 
 
 def call_proc_with_output(
@@ -329,7 +347,7 @@ def execute_statement(conn: Any, sql_text: str) -> int:
 	try:
 		return int(core_connection(conn).exec_driver_sql(sql_text).rowcount)
 	except Exception as exc:
-		raise DatabaseError(f"execute_statement failed: {exc}") from exc
+		raise DatabaseError(f"execute_statement failed: {_reason(exc)}") from None
 
 
 def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -348,7 +366,7 @@ def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[st
 		result = core_connection(conn).execute(text(sql_text), dict(params))
 		return [dict(row) for row in result.mappings()]
 	except Exception as exc:
-		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+		raise DatabaseError(f"fetch_rows failed: {_reason(exc)}") from None
 
 
 def table_native_definition(conn: Any, schema: str, table: str) -> str:

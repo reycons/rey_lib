@@ -113,9 +113,9 @@ def redact_fixed_width(
                 replacement = replacement.ljust(field_width)
             elif len(replacement) > field_width:
                 _logger.warning(
-                    "Fixed-width replacement exceeds field width %d for column '%s' — truncating. "
-                    "original=%r replacement=%r",
-                    field_width, col, original, replacement,
+                    "Fixed-width replacement exceeds field width %d for column '%s' — truncating "
+                    "%d characters to %d.",
+                    field_width, col, len(replacement), field_width,
                 )
                 replacement = replacement[:field_width]
 

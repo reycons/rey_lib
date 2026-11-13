@@ -490,7 +490,8 @@ def test_sql_failure_logs_sanitized_failure_evidence(run_log, tmp_path: Path):
     record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "adhoc_sql"
     assert record["status"] == "failed"
-    assert record["error_message"]["message"] == "connection failed"
+    # A driver's own message can quote a value; its class is recorded (#1357).
+    assert record["error_message"]["message"] == "RuntimeError"
     text = json.dumps(record)
     assert "DELETE FROM" not in text
     assert "SECRET" not in text
