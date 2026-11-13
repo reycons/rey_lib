@@ -158,13 +158,6 @@ class _Namespace:
         else:
             replacement = self._generic(value)
 
-        if len(replacement) != len(value):
-            _logger.warning(
-                "Replacement length mismatch for column '%s': "
-                "original=%d replacement=%d value=%r",
-                self.name, len(value), len(replacement), value,
-            )
-
         self._map[value] = replacement
         self._assigned.add(replacement)
         return replacement
