@@ -1154,8 +1154,13 @@ def _load_one_file(
         # the destination's provider to read the source itself. A file target
         # has no provider to ask, so the materialised path -- the guaranteed
         # one -- runs.
-        if not writes_a_file and _non_row_execution_possible(
-            source, transform, conn, exists,
+        # Recreate needs a schema derived from the incoming records and the
+        # loader's rebuild-and-replace policy. The native path only inserts
+        # into an existing table; it cannot perform recreation (#652).
+        if (
+            not writes_a_file
+            and not loader.recreate_destination
+            and _non_row_execution_possible(source, transform, conn, exists)
         ):
             # THE SAME TWO CHECKS, from the structure the file declares
             # instead of from records. Neither is skipped and neither is

@@ -1985,8 +1985,9 @@ def _catalog_observations(
     of competing with a weaker one.
     """
     out: list[dict[str, Any]] = []
-    by_oid = {r["oid"]: r for r in relations}
-    by_oid.update({r["oid"]: r for r in routines})
+    # OIDs are catalog-local: pg_class and pg_proc can use the same number.
+    relations_by_oid = {r["oid"]: r for r in relations}
+    routines_by_oid = {r["oid"]: r for r in routines}
 
     def origin_of(row: dict[str, Any]) -> tuple[str, str, str, str]:
         return (row["schema"], row["name"], row["object_type"],
@@ -1998,14 +1999,33 @@ def _catalog_observations(
         FROM pg_class v
         JOIN pg_namespace n ON n.oid = v.relnamespace
         JOIN pg_rewrite rw ON rw.ev_class = v.oid
-        JOIN pg_depend d ON d.objid = rw.oid
-        JOIN pg_class t ON t.oid = d.refobjid
+        JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid
+        JOIN pg_class t ON d.refclassid = 'pg_class'::regclass AND t.oid = d.refobjid
         WHERE v.relkind IN ('v','m') AND t.relkind IN ('r','p','v','m')
           AND v.oid <> t.oid
           AND n.nspname NOT IN ('pg_catalog','information_schema')
           AND (%s::text IS NULL OR n.nspname = %s::text)
     """, [schema, schema]):
-        view, target = by_oid.get(oid), by_oid.get(dep_oid)
+        view, target = relations_by_oid.get(oid), relations_by_oid.get(dep_oid)
+        if view is None:
+            continue
+        out.append(_catalog_edge(origin_of(view), target, "reference",
+                                 view["definition_hash"], "view_definition"))
+
+    # A view may also depend on an exact function overload (#853). Read the
+    # catalog dependency, rather than inferring a function from its SQL text.
+    for oid, dep_oid in _reference_rows(conn, """
+        SELECT DISTINCT v.oid, f.oid
+        FROM pg_class v
+        JOIN pg_namespace n ON n.oid = v.relnamespace
+        JOIN pg_rewrite rw ON rw.ev_class = v.oid
+        JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid
+        JOIN pg_proc f ON d.refclassid = 'pg_proc'::regclass AND f.oid = d.refobjid
+        WHERE v.relkind IN ('v','m')
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+    """, [schema, schema]):
+        view, target = relations_by_oid.get(oid), routines_by_oid.get(dep_oid)
         if view is None:
             continue
         out.append(_catalog_edge(origin_of(view), target, "reference",
@@ -2031,9 +2051,9 @@ def _catalog_observations(
             # refuses.
             continue
         origin = (nsp, tgname, "trigger", "")
-        out.append(_catalog_edge(origin, by_oid.get(rel_oid), "trigger", "",
+        out.append(_catalog_edge(origin, relations_by_oid.get(rel_oid), "trigger", "",
                                  "pg_trigger"))
-        out.append(_catalog_edge(origin, by_oid.get(fn_oid), "call", "",
+        out.append(_catalog_edge(origin, routines_by_oid.get(fn_oid), "call", "",
                                  "pg_trigger"))
 
     # Foreign keys, member to member.

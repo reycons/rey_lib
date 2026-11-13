@@ -30,6 +30,7 @@ import duckdb
 import pytest
 
 from rey_lib.db.db_adapter import DBAdapter, _PROVIDER_CONTRACT_CAPABILITIES
+from rey_lib.db.data_loader import DataLoader
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.duckdb_utils import insert_from_path
 from rey_lib.errors.error_utils import DatabaseError
@@ -71,7 +72,7 @@ class _Adapter(DBAdapter):
 
 
 def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
-         adapter=None, transform=None, captured=None):
+         adapter=None, transform=None, captured=None, loader=None):
     """Run _load_one_file against a real connection.
 
     ``captured`` receives whatever validation the load recorded, patched the
@@ -94,6 +95,7 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
         IdentityTransform(columns=declared) if transform is None else transform,
         _TARGET,
         ctx=SimpleNamespace(), run_log=run_log,
+        loader=loader,
         transform_cfg=SimpleNamespace(file_type="CSV", encoding="utf-8"),
         load_cfg=SimpleNamespace(
             name="my_load",
@@ -101,6 +103,35 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
             movements=SimpleNamespace(failure=[], success=[])),
         paths=SimpleNamespace(),
     )
+
+
+@pytest.mark.parametrize("header, body", [
+    ("name,asset_id", "Alpha,1\nBeta,2\n"),
+    ("asset_id,name", "1,Alpha\n2,Beta\n"),
+    ("asset_id,description", "1,Alpha\n2,Beta\n"),
+])
+def test_recreate_builds_from_the_source_instead_of_inserting_into_the_old_table(
+    tmp_path, monkeypatch, run_log, header, body,
+) -> None:
+    """#652: recreation ignores the old schema and replaces its old rows."""
+    conn = _duck(tmp_path)
+    try:
+        conn.execute("INSERT INTO main.asset VALUES ('99', 'old row')")
+        source = _csv(tmp_path, header=header, body=body)
+        loaded = _run(
+            tmp_path, monkeypatch, run_log, conn, source,
+            loader=DataLoader(recreate_destination=True),
+        )
+        assert loaded == 2
+        assert [column[0] for column in conn.execute(
+            "SELECT * FROM main.asset"
+        ).description] == header.split(",")
+        assert conn.execute("SELECT count(*) FROM main.asset").fetchone() == (2,)
+        assert conn.execute(
+            "SELECT count(*) FROM main.asset WHERE asset_id = 99"
+        ).fetchone() == (0,)
+    finally:
+        conn.close()
 
 
 class TestTheRecordsAreNeverMaterialized:
