@@ -17,6 +17,7 @@ from rey_lib.ai.ai import AI
 from rey_lib.ai.evidence import package_of
 from rey_lib.ai.experience.recall import HEADING, MEASURE_METHOD, recall
 from rey_lib.ai.task import AITask
+from rey_lib.logs.record_enrichment import sanitize_log_value
 from tests.test_ai_shared_instructions import GOVERNANCE, _configuration, _shared
 from tests.test_ai_task_hydration import ENGINES, INSTRUCTIONS
 
@@ -106,7 +107,7 @@ class TestSelection:
         assert "MODEL'S OWN WORDS" not in recalled.block
         assert recalled.measure == {"method": MEASURE_METHOD, "exact": False,
                                     "count": len(BLOCK.encode("utf-8")),
-                                    "lesson_limit": 5, "token_limit": 1000}
+                                    "lesson_limit": 5, "context_budget_limit": 1000}
 
     def test_only_authoritative_validated_current_experience_with_claims_qualifies(self) -> None:
         rows = [
@@ -254,6 +255,24 @@ class TestPackage:
         assert experience["block"] in task.system_instructions()
         assert experience["measure"]["method"] == MEASURE_METHOD
         assert experience["measure"]["exact"] is False
+
+    def test_the_run_log_records_the_budget_as_its_number(self) -> None:
+        """The write path masks secret-looking keys; the budget is not one (#1344).
+
+        Recorded as ``token_limit`` it was stored as [REDACTED]; as
+        ``context_budget_limit`` the number survives, and only verified claims,
+        never the model's own statement, are in what is recorded.
+        """
+        task = AITask.hydrate(_limited(lessons=2), ENGINES, [*INSTRUCTIONS, GOVERNANCE],
+                              experiences=[E34, E35], installation="local",
+                              task_key="search_index")
+
+        written = sanitize_log_value(package_of(task, None, "", None))["experience"]
+
+        assert written["measure"]["context_budget_limit"] == 1000
+        assert written["measure"]["lesson_limit"] == 2
+        assert "[REDACTED]" not in repr(written)
+        assert "MODEL'S OWN WORDS" not in repr(written)
 
     def test_recall_disabled_or_nothing_retrieved_leaves_no_key(self) -> None:
         disabled = AITask.hydrate(_limited(lessons=0), ENGINES, [*INSTRUCTIONS, GOVERNANCE],

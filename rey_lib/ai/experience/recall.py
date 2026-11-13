@@ -51,7 +51,9 @@ class Recall:
             ``generation`` and ``content`` (its lines, exactly as sent).
         block: The whole rendered block, exactly as sent; empty when none was supplied.
         measure: How the block was counted -- ``method``, ``exact``, ``count`` -- and
-            the ``lesson_limit`` and ``token_limit`` it was held to.
+            the ``lesson_limit`` and ``context_budget_limit`` (the token limit) it was
+            held to. Recorded under that name, not ``token_limit``: the run log masks
+            a key that reads as a secret, and this one holds a number (#1344).
     """
 
     retrieved: tuple[int, ...] = ()
@@ -106,7 +108,8 @@ def recall(experiences: Sequence[Mapping[str, Any]], lesson_limit: int,
         supplied=tuple(supplied),
         block=block,
         measure={"method": MEASURE_METHOD, "exact": False, "count": _measured(block),
-                 "lesson_limit": int(lesson_limit), "token_limit": int(token_limit)},
+                 "lesson_limit": int(lesson_limit),
+                 "context_budget_limit": int(token_limit)},
     )
 
 
