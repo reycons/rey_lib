@@ -9,19 +9,19 @@ from tests.test_object_map import _schema
 
 
 def _index(monkeypatch, rows):
+    """The shared Control's governed table-context read (#1360): its calls recorded."""
     calls = []
 
-    class Query:
-        def __init__(self, statement, params):
-            calls.append((statement, params))
-
-        def rows(self, handle):
-            assert handle == "index-handle"
+    class Control:
+        def object_map_table_context(self, catalog, provider, schema, table, node, installation):
+            calls.append(("object_map_table_context", {
+                "catalog": catalog, "provider": provider, "schema": schema, "table": table,
+                "node": node, "installation": installation}))
             return rows
 
-    monkeypatch.setattr(module, "DatabaseQuery", Query)
     held = _schema()
     held._index_connection = SimpleNamespace(handle=lambda: "index-handle")
+    held._control = Control()
     held._index_installation = "admin"
     held._database_provider = "postgres"
     return held, calls

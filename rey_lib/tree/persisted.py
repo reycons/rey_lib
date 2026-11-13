@@ -20,8 +20,9 @@ sourced from somewhere else; every feeder answers in the same canonical record
 shape, and none of them knows the others exist.
 
 It reads through ``tree.f_tree_rows`` (backlog 1206 / 1207), the database
-implementation of this object's retrieval seam: one packaged, parameterized
-statement (``sql/tree_rows.sql``), every value bound. Which provider answers is
+implementation of this object's retrieval seam, ordered and bounded by
+``tree.f_tree_rows_ordered`` and reached as ``get_tree_rows`` through the
+runtime's one Control (#1360), every value bound. Which provider answers is
 the database's dispatch of the record's own expansion -- NULL is the persisted
 provider, an unknown expansion is refused, and there is no fallback to the union.
 Python never names a relation. The tables beneath -- ``tree_group``,
@@ -31,14 +32,11 @@ Python never names a relation. The tables beneath -- ``tree_group``,
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from rey_lib.db.connection import shared_connection
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
-from rey_lib.db.database_query import DatabaseQuery
-from rey_lib.files import read_text_file
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "persisted_tree",
@@ -58,10 +56,6 @@ TREE_CONNECTION = "tree"
 #: which view specializes; nothing else parses a name to find the tree.
 TREE_SCHEMA = "tree"
 TREE_VIEW_NAME = "tree_vw"
-
-
-#: The packaged statement every Tree read runs (backlog 1207).
-_ROWS_SQL = Path(__file__).parent / "sql" / "tree_rows.sql"
 
 
 @dataclass(frozen=True)
@@ -117,7 +111,8 @@ class TreeDataObject(DatabaseView):
     ) -> tuple[TreeDataRow, ...]:
         """Read the Tree rows one expansion owns, in the Tree's presentation order.
 
-        One packaged statement (``sql/tree_rows.sql``) over ``tree.f_tree_rows``,
+        ``tree.f_tree_rows_ordered`` (``tree.f_tree_rows`` ordered and bounded),
+        read through the runtime's one Control as ``get_tree_rows`` (#1360),
         every value bound: an omitted filter is bound as NULL and applies no
         predicate. Values arrive as the database emitted them. Nothing is
         reinterpreted, normalized, deduplicated or reordered afterwards: a node
@@ -125,7 +120,8 @@ class TreeDataObject(DatabaseView):
         projection says.
 
         Args:
-            ctx: Finalized installation context, which resolves the connection.
+            ctx: Finalized installation context, which carries the runtime's
+                shared Control.
             row_type: Restrict to one kind of row, or every kind when omitted.
             tree_group_id: Restrict to one group, or every group when omitted.
             parent_node_key: Restrict to the children of one node, or every row
@@ -139,17 +135,25 @@ class TreeDataObject(DatabaseView):
 
         Returns:
             The rows, in the Tree's presentation order.
+
+        Raises:
+            ConfigError: When the runtime has no control database.
         """
-        params = {
-            "expansion_tvw": relation,
-            "row_type": None if row_type is None else str(row_type),
-            "tree_group_id": None if tree_group_id is None else int(tree_group_id),
-            "tree_root_id": None if tree_root_id is None else int(tree_root_id),
-            "parent_node_key": None if parent_node_key is None else str(parent_node_key),
-            "row_limit": None if limit is None else int(limit),
-        }
-        handle = shared_connection(ctx, TREE_CONNECTION).handle()
-        read = DatabaseQuery(read_text_file(_ROWS_SQL), params).rows(handle)
+        # Imported here, as load/source.py does: the bootstrap reaches the tree package.
+        from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            raise ConfigError("The Tree's rows are read through Control, and this runtime has "
+                              "no control database.")
+        read = control.tree_rows(
+            expansion_tvw=relation,
+            row_type=None if row_type is None else str(row_type),
+            tree_group_id=None if tree_group_id is None else int(tree_group_id),
+            tree_root_id=None if tree_root_id is None else int(tree_root_id),
+            parent_node_key=None if parent_node_key is None else str(parent_node_key),
+            row_limit=None if limit is None else int(limit),
+        )
         return tuple(TreeDataRow(values=MappingProxyType(row)) for row in read)
 
     def children(self, ctx: Any, record: dict[str, Any]) -> list[dict[str, Any]]:

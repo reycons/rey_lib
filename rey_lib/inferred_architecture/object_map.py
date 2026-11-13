@@ -37,13 +37,10 @@ from __future__ import annotations
 
 import json
 
-from pathlib import Path
 from typing import Any, Callable, Final
 
 from rey_lib.db.database_objects import DatabaseObjectListing, DatabaseSchema
-from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.errors.error_utils import AppError, ConfigError
-from rey_lib.files import read_text_file
 from rey_lib.repository_map.indexed_database_object import IndexedDatabaseObject
 
 __all__ = ["CLAIM_NODE_TYPE", "FLOW_PROJECTION", "OBJECT_PROJECTION", "SCHEMA_PROJECTION",
@@ -57,8 +54,6 @@ CLAIM_NODE_TYPE: Final = "canonical_object"
 OBJECT_PROJECTION: Final = "object"
 SCHEMA_PROJECTION: Final = "schema"
 FLOW_PROJECTION: Final = "flow"
-
-_SQL_DIR: Final = Path(__file__).parent / "sql"
 
 #: The five reads the object projection is built from, in the order they are held.
 _OBJECT_READS: Final = ("claims", "relationships", "placements", "areas", "area_links")
@@ -90,11 +85,6 @@ _BOUNDARY: Final = "boundary:"
 #: ``owner_subject_id`` is the path relative to it (#1218).
 _CLAIM_FILE_KIND: Final = "configured_file"
 _CLAIM_FILE_ROOT: Final = "{apps}"
-
-
-def _statement(name: str) -> str:
-    """One of the object map's statements, read from its file."""
-    return read_text_file(_SQL_DIR / f"object_map_{name}.sql")
 
 
 class ObjectMap:
@@ -140,6 +130,8 @@ class ObjectMap:
         #: highlights. None when nothing is selected.
         self._selected: str | None = None
         self._index_connection: Any = None
+        #: The runtime's shared Control: every index read is its governed read (#1360).
+        self._control: Any = None
         self._index_installation = ""
         self._database_provider = ""
         self._table_context: dict[str, Any] | None = None
@@ -210,39 +202,56 @@ class ObjectMap:
     # -- opening ---------------------------------------------------------------
 
     @classmethod
-    def for_architecture(cls, connection: Any, installation: str) -> "ObjectMap":
-        """The estate's object map, read on the shared ``connection``.
+    def for_architecture(cls, connection: Any, installation: str, control: Any) -> "ObjectMap":
+        """The estate's object map: its five reads through the shared Control (#1360).
 
         Args:
-            connection: The shared Connection the host resolved; held by the
-                host, never opened or closed here.
+            connection: The shared Connection the host resolved, held for the
+                map's later index reads; never opened or closed here.
             installation: The installation the map subject names.
+            control: The runtime's shared Control, whose governed reads
+                (``code.f_object_map_*``) answer the five object-map reads.
         """
-        handle = connection.handle()
-        read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
-                for name in _OBJECT_READS}
+        readers = {
+            "claims": control.object_map_claims,
+            "relationships": control.object_map_relationships,
+            "placements": control.object_map_placements,
+            "areas": control.object_map_areas,
+            "area_links": control.object_map_area_links,
+        }
+        read = {name: [dict(row) for row in readers[name]()] for name in _OBJECT_READS}
         held = cls({"kind": "inferred_architecture", "installation": installation},
                    OBJECT_PROJECTION, read)
         held._index_connection = connection
+        held._control = control
         return held
 
     @classmethod
-    def for_application(cls, connection: Any, application: str) -> "ObjectMap":
-        """The selected application's input flows, with no estate-level navigation."""
-        handle = connection.handle()
-        read = {name: [dict(row) for row in DatabaseQuery(_statement(name)).rows(handle)]
-                for name in _FLOW_READS}
+    def for_application(cls, connection: Any, application: str, control: Any) -> "ObjectMap":
+        """The selected application's input flows, with no estate-level navigation.
+
+        The four flow reads are the shared Control's governed reads (#1360).
+        """
+        readers = {
+            "flows": control.object_map_flows,
+            "flow_commands": control.object_map_flow_commands,
+            "flow_operations": control.object_map_flow_operations,
+            "flow_requests": control.object_map_flow_requests,
+        }
+        read = {name: [dict(row) for row in readers[name]()] for name in _FLOW_READS}
         read["flows"] = [row for row in read["flows"] if row["entry_repository_key"] == application]
         for name in ("flow_commands", "flow_operations", "flow_requests"):
             read[name] = [row for row in read[name] if row["application_name"] == application]
         held = cls({"kind": "application", "application": application}, FLOW_PROJECTION, read)
         held._index_connection = connection
+        held._control = control
         held.focus(application=application)
         return held
 
     @classmethod
     def for_schema(cls, connection: Any, catalog: str, schema: str, *,
-                   index_connection: Any = None, installation: str = "") -> "ObjectMap":
+                   index_connection: Any = None, installation: str = "",
+                   control: Any = None) -> "ObjectMap":
         """One database schema's map, from the canonical database read.
 
         The schema and its tables are read as the database domain's own objects
@@ -260,6 +269,7 @@ class ObjectMap:
         held._index_connection = index_connection
         held._index_installation = installation
         held._database_provider = str(getattr(connection, "provider", "") or "")
+        held._control = control
         return held
 
     # -- behaviour ---------------------------------------------------------------
@@ -441,13 +451,12 @@ class ObjectMap:
                                      for node, row in self._flow_scope()[0] if row)
                 if symbol_id is None or not (visited or available_site):
                     raise AppError("This flow does not hold that call-site context.")
-            # Read each proved implementation through the existing DatabaseQuery owner.
+            # Read each proved implementation through the shared Control (#1360).
             # A leaf row still carries its indexed source metadata.
-            if self._index_connection is not None and source_ids:
+            if self._control is not None and source_ids:
                 steps = []
                 for current_id in source_ids:
-                    rows = [dict(row) for row in DatabaseQuery(_statement("flow_steps"),
-                            {"symbol_id": current_id}).rows(self._index_connection.handle())]
+                    rows = [dict(row) for row in self._control.object_map_flow_steps(current_id)]
                     if not rows:
                         raise AppError(f"The index no longer holds symbol {current_id!r}.")
                     steps.extend(rows)
@@ -610,7 +619,7 @@ class ObjectMap:
 
     def _read_edge_evidence(self, row: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Read supporting call sites through the existing canonical-region view."""
-        if row is None or self._index_connection is None:
+        if row is None or self._control is None:
             raise AppError("This map has no configured index connection for relationship evidence.")
         if "canonical_object_id" in row:
             sources = [row["canonical_object_id"]]
@@ -622,13 +631,7 @@ class ObjectMap:
                               if p["inferred_architecture_area_id"] == row["to_area_id"]})
         if not sources or not targets:
             return []
-        statement = _statement("edge_evidence")
-        params = {}
-        for name, values in (("sources", sources), ("targets", targets)):
-            bindings = {f"{name}_{i}": value for i, value in enumerate(values)}
-            statement = statement.replace(f":{name}", ", ".join(f":{key}" for key in bindings))
-            params.update(bindings)
-        return [dict(r) for r in DatabaseQuery(statement, params).rows(self._index_connection.handle())]
+        return [dict(r) for r in self._control.object_map_edge_evidence(sources, targets)]
 
     def projection(self) -> dict[str, Any]:
         """The focused screen: nodes, edges, the path back, the details, and the
@@ -1680,13 +1683,11 @@ class ObjectMap:
     def _read_table_context(self, table: str | None = None, *, node: str | None = None,
                             schema: str | None = None, alias: str | None = None) -> dict[str, Any]:
         """The existing index's bounded graph, on the host's shared index connection."""
-        if self._index_connection is None or not self._index_installation:
+        if self._control is None or not self._index_installation:
             raise AppError("This map has no configured index connection/installation for table context.")
-        rows = list(DatabaseQuery(_statement("table_context"), {
-            "catalog": self.subject["catalog"], "provider": self._database_provider,
-            "schema": schema or self.subject["schema"], "table": table, "node": node,
-            "installation": self._index_installation,
-        }).rows(self._index_connection.handle()))
+        rows = list(self._control.object_map_table_context(
+            self.subject["catalog"], self._database_provider, schema or self.subject["schema"],
+            table, node, self._index_installation))
         if len(rows) != 1 or rows[0]["root_count"] != 1:
             raise AppError("The index does not identify exactly one table/object for this context.")
         read = dict(rows[0])

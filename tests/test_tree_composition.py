@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from rey_lib.config import bootstrap
+from rey_lib.control.control import Control
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tree import composition
 from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_group_selection, tree_groups, tree_roots
@@ -58,16 +61,17 @@ def _ctx() -> SimpleNamespace:
 
 
 def _groups(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> dict[str, Any]:
-    """Stub the routine read; record what was asked."""
+    """Stub the runtime's shared Control; record what its governed read was asked."""
     asked: dict[str, Any] = {}
-    monkeypatch.setattr(composition, "shared_connection", lambda ctx, name: (
-        asked.__setitem__("connection", name) or SimpleNamespace(handle=lambda: None)))
 
-    def query(statement: str, params: dict[str, Any]) -> SimpleNamespace:
-        asked["statement"], asked["params"] = statement, params
-        return SimpleNamespace(rows=lambda handle: rows)
+    class _Control:
+        def tree_tabs(self, installation: str, placement: str) -> list[dict]:
+            asked["installation"], asked["placement"] = installation, placement
+            return rows
 
-    monkeypatch.setattr(composition, "DatabaseQuery", query)
+    monkeypatch.setattr(bootstrap, "open_shared_control",
+                        lambda ctx: asked.__setitem__("ctx", ctx)
+                        or SimpleNamespace(shared_control=_Control()))
     return asked
 
 
@@ -90,23 +94,44 @@ def test_groups_are_the_routines_answer_for_the_installation_and_placement(monke
          "icon": "tree", "panel_key": "explorer", "panel_configuration": None},
     ])
 
-    found = tree_groups(_ctx(), "explorer")
+    ctx = _ctx()
+    found = tree_groups(ctx, "explorer")
 
-    assert asked["connection"] == "tree"
-    assert "tree.f_tree_tabs(:installation, :placement)" in asked["statement"]
-    assert asked["params"] == {"installation": "local", "placement": "explorer"}
+    assert asked["ctx"] is ctx
+    assert (asked["installation"], asked["placement"]) == ("local", "explorer")
     assert found == [{"tree_group_id": 7, "tree_group_key": "development",
                       "label": "Development", "icon": "tree", "panel_key": "explorer",
                       "panel_configuration": {}}]
 
 
-def test_the_groups_statement_is_the_packaged_file(monkeypatch) -> None:
-    asked = _groups(monkeypatch, [])
+def test_the_groups_keep_the_routines_order(monkeypatch) -> None:
+    _groups(monkeypatch, [
+        {"tree_group_id": 9, "panel_configuration": {"opening": {"kind": "ai"}}},
+        {"tree_group_id": 3, "panel_configuration": None},
+    ])
 
-    tree_groups(_ctx(), "explorer")
+    found = tree_groups(_ctx(), "explorer")
 
-    packaged = (composition._SQL_DIR / "tree_groups.sql").read_text(encoding="utf-8")
-    assert asked["statement"] == packaged
+    assert [one["tree_group_id"] for one in found] == [9, 3]
+    assert found[0]["panel_configuration"] == {"opening": {"kind": "ai"}}
+
+
+def test_the_groups_are_read_through_the_governed_binding() -> None:
+    rows = [{"tree_group_id": 7, "tree_group_key": "development"}]
+    with patch.object(Control, "_call_rows", return_value=rows) as called:
+        answered = Control.__new__(Control).tree_tabs("local", "explorer")
+
+    called.assert_called_once_with("get_tree_tabs",
+                                   {"installation": "local", "placement": "explorer"},
+                                   required=True)
+    assert answered == rows and answered[0] is not rows[0]
+
+
+def test_a_runtime_with_no_control_database_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(bootstrap, "open_shared_control",
+                        lambda ctx: SimpleNamespace(shared_control=None))
+    with pytest.raises(ConfigError, match="no control database"):
+        tree_groups(_ctx(), "explorer")
 
 
 def test_no_placement_is_refused() -> None:

@@ -14,19 +14,18 @@ SITE = {"repository_key": "rey_lib", "relative_path": "rey_lib/example.py",
 
 
 def _held(monkeypatch, rows):
+    """The shared Control's governed edge-evidence read (#1360): its calls recorded."""
     calls = []
 
-    class Query:
-        def __init__(self, statement, params):
-            calls.append((statement, params))
-
-        def rows(self, handle):
-            assert handle == "index"
+    class Control:
+        def object_map_edge_evidence(self, sources, targets):
+            calls.append(("object_map_edge_evidence",
+                          {"sources": list(sources), "targets": list(targets)}))
             return rows
 
-    monkeypatch.setattr(module, "DatabaseQuery", Query)
     held = _architecture()
     held._index_connection = SimpleNamespace(handle=lambda: "index")
+    held._control = Control()
     return held, calls
 
 
@@ -50,8 +49,7 @@ def test_double_click_shows_indexed_call_sites_and_right_click_uses_the_file_ope
     held, calls = _held(monkeypatch, [SITE])
     held.focus(level="area", area_id=10)
     held.double_click("relationship:1:2")
-    assert calls[0][1] == {"sources_0": 1, "targets_0": 2}
-    assert "code.canonical_region_vw" in calls[0][0]
+    assert calls[0] == ("object_map_edge_evidence", {"sources": [1], "targets": [2]})
     projected = held.projection()
     assert projected["focus"] == {"level": "area", "area_id": 10}
     assert "Alpha.run → Beta.read" in projected["details"]["rows"][-1][1]
@@ -66,8 +64,7 @@ def test_double_click_shows_indexed_call_sites_and_right_click_uses_the_file_ope
 def test_area_link_inspection_reads_only_the_claim_pairs_mapped_by_that_link(monkeypatch):
     held, calls = _held(monkeypatch, [SITE])
     held.double_click("link:10:20")
-    assert calls[0][1] == {"sources_0": 1, "sources_1": 2, "targets_0": 3}
-    assert "IN (:sources_0, :sources_1)" in calls[0][0]
+    assert calls[0] == ("object_map_edge_evidence", {"sources": [1, 2], "targets": [3]})
     assert ["Source", "Core"] in held.projection()["details"]["rows"]
     assert ["Target", "Edge"] in held.projection()["details"]["rows"]
 

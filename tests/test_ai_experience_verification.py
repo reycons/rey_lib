@@ -59,20 +59,17 @@ class _Connection:
 
 @pytest.fixture(autouse=True)
 def _index(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """The index read: the statement's parameters are recorded, INDEXED answered."""
+    """The index read, Control's governed get_experience_indexed_object (#1360):
+    what it was asked is recorded, INDEXED answered."""
     asked: list[dict[str, Any]] = []
     rows = {"code.development_backlog_vw": INDEXED}
 
-    class _Query:
-        def __init__(self, statement: str, params: dict[str, Any]) -> None:
-            assert "code.db_object_vw" in statement and ":schema" in statement
-            self.params = params
+    def experience_indexed_object(self: Any, schema: str, name: str) -> list[dict[str, Any]]:
+        asked.append({"schema": schema, "name": name})
+        return [dict(row) for row in rows.get(f"{schema}.{name}", ())]
 
-        def rows(self, _handle: Any) -> tuple[dict[str, Any], ...]:
-            asked.append(dict(self.params))
-            return tuple(rows.get(f"{self.params['schema']}.{self.params['name']}", ()))
-
-    monkeypatch.setattr(module, "DatabaseQuery", _Query)
+    monkeypatch.setattr(_Control, "experience_indexed_object", experience_indexed_object,
+                        raising=False)
     return asked
 
 
@@ -174,14 +171,9 @@ class TestWhatIsRejected:
         twice = INDEXED + [{"code_db_object_id": 1, "source_key": "rey_apps",
                             "member_name": "priority"}]
 
-        class _Twice:
-            def __init__(self, statement: str, params: dict[str, Any]) -> None:
-                pass
-
-            def rows(self, _handle: Any) -> tuple[dict[str, Any], ...]:
-                return tuple(twice)
-
-        monkeypatch.setattr(module, "DatabaseQuery", _Twice)
+        monkeypatch.setattr(_Control, "experience_indexed_object",
+                            lambda self, schema, name: [dict(row) for row in twice],
+                            raising=False)
         (lesson,) = _verify(_lesson())
 
         assert lesson.state == CANDIDATE
@@ -196,3 +188,28 @@ class TestTheBoundary:
 
     def test_no_lessons_is_no_verification(self) -> None:
         assert _verify() == ()
+
+
+def test_the_index_read_is_the_governed_binding() -> None:
+    """Control.experience_indexed_object calls get_experience_indexed_object, required (#1360)."""
+    from unittest.mock import patch
+
+    from rey_lib.control.control import Control
+
+    with patch.object(Control, "_call_rows", return_value=list(INDEXED)) as called:
+        answered = Control.__new__(Control).experience_indexed_object(
+            "code", "development_backlog_vw")
+
+    called.assert_called_once_with("get_experience_indexed_object",
+                                   {"schema": "code", "name": "development_backlog_vw"},
+                                   required=True)
+    assert answered == INDEXED and answered[0] is not INDEXED[0]
+
+
+def test_the_verifier_holds_no_statement() -> None:
+    """The index read is the database's; nothing here reads a statement file (#1360)."""
+    from pathlib import Path
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    for token in ("DatabaseQuery", "read_text_file", "_SQL_DIR", "SELECT"):
+        assert token not in source, token

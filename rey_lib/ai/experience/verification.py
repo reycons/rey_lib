@@ -20,22 +20,17 @@ resolves to exactly one indexed object, in the named source, that has the column
 the indexed state only, never the live database; either is contradicted only when
 the object resolves and the opposite holds; anything else is undecided.
 
-**Where it reads.** The subject's executions and conversations through Control's
-governed reads; the database index through the views the given connection may read
-(``code.db_object_vw``, ``code.db_member_vw``), by a statement kept in a file and
-bound by name -- the read path the object map uses. The host resolves both and hands
-them in; nothing here reads installation context. Publication enforces admissibility
+**Where it reads.** The subject's executions and conversations, and the database
+index (``code.f_experience_indexed_object`` over ``code.db_object_vw`` and
+``code.db_member_vw``, #1360), all through Control's governed reads. The host
+resolves Control and hands it in; nothing here reads installation context. Publication enforces admissibility
 again on its own (the database never trusts a submitted state).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Final, Mapping
-
-from rey_lib.db.database_query import DatabaseQuery
-from rey_lib.files import read_text_file
 
 __all__ = [
     "CANDIDATE", "REJECTED", "VALIDATED", "ClaimCheck", "EvidenceCheck",
@@ -56,8 +51,6 @@ UNDECIDED: Final = "undecided"
 _OBSERVED_FACT: Final = "observed_fact"
 _PRESENT: Final = "db_member_present"
 _ABSENT: Final = "db_member_absent"
-
-_SQL_DIR: Final = Path(__file__).parent / "sql"
 
 
 @dataclass(frozen=True)
@@ -289,8 +282,7 @@ class ExperienceVerifier:
         key = (source, target)
         if key not in indexed:
             schema, _, name = target.rpartition(".")
-            rows = DatabaseQuery(read_text_file(_SQL_DIR / "experience_indexed_object.sql"),
-                                 {"schema": schema, "name": name}).rows(self._index.handle())
+            rows = self._control.experience_indexed_object(schema, name)
             objects = {int(row["code_db_object_id"]): str(row.get("source_key") or "")
                        for row in rows}
             only = next(iter(objects), None)

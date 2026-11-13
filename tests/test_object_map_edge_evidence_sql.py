@@ -3,7 +3,13 @@ import os
 import re
 
 import pytest
-from rey_lib.inferred_architecture.object_map import _SQL_DIR
+
+
+def _body(cursor, function):
+    """The statement, now the database function's own body (#1360)."""
+    cursor.execute("SELECT pg_get_functiondef(to_regprocedure(%s))", (function,))
+    return cursor.fetchone()[0].split("$function$")[1]
+
 
 pytestmark = pytest.mark.skipif(not os.environ.get("REY_TEST_POSTGRES_DSN"),
                                 reason="Requires an explicit PostgreSQL TEMP-fixture connection")
@@ -11,7 +17,6 @@ pytestmark = pytest.mark.skipif(not os.environ.get("REY_TEST_POSTGRES_DSN"),
 
 def test_only_canonical_region_call_sites_support_the_selected_link():
     psycopg = pytest.importorskip("psycopg")
-    sql = (_SQL_DIR / "object_map_edge_evidence.sql").read_text()
     tables = {
         "object_map_relationship_vw": "canonical_object_id bigint, linked_canonical_object_id bigint, entry_code_symbol_ids bigint[]",
         "canonical_region_vw": "canonical_object_id bigint, role text, target_code_symbol_id bigint, target_kind text, target_code_file_id bigint",
@@ -20,6 +25,7 @@ def test_only_canonical_region_call_sites_support_the_selected_link():
     connection = psycopg.connect(os.environ["REY_TEST_POSTGRES_DSN"])
     try:
         with connection.cursor() as cursor:
+            sql = _body(cursor, "code.f_object_map_edge_evidence(bigint[], bigint[])")
             for name, columns in tables.items():
                 cursor.execute(f"CREATE TEMP TABLE evidence_{name} ({columns}) ON COMMIT DROP")
                 sql = sql.replace("code." + name, "pg_temp.evidence_" + name)
@@ -39,15 +45,15 @@ def test_only_canonical_region_call_sites_support_the_selected_link():
                     site(9, None, 99), site(10, 10, target=21)]
             cursor.executemany("INSERT INTO pg_temp.evidence_relationship_vw VALUES (" +
                                ",".join(["%s"] * 15) + ")", rows)
-            sql = re.sub(r"(?<!:):(\w+)", r"%(\1)s", sql)
-            cursor.execute(sql, {"sources": 1, "targets": 2})
+            sql = re.sub(r"\bp_(sources|targets)\b", r"%(\1)s", sql)
+            cursor.execute(sql, {"sources": [1], "targets": [2]})
             names = [column.name for column in cursor.description]
             found = [dict(zip(names, row)) for row in cursor.fetchall()]
             assert [row["code_relationship_id"] for row in found] == [1, 2, 8]
             assert all(row["source_line"] == 42 for row in found)
-            cursor.execute(sql, {"sources": 3, "targets": 2})
+            cursor.execute(sql, {"sources": [3], "targets": [2]})
             assert [row[names.index("code_relationship_id")] for row in cursor.fetchall()] == [3]
-            cursor.execute(sql, {"sources": 1, "targets": 99})
+            cursor.execute(sql, {"sources": [1], "targets": [99]})
             assert cursor.fetchall() == []
     finally:
         connection.rollback()

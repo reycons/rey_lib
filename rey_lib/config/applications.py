@@ -533,8 +533,11 @@ class Application:
         if "flow" not in self._maps:
             from rey_lib.db.connection import shared_connection
             from rey_lib.inferred_architecture.object_map import ObjectMap
-            self._maps["flow"] = ObjectMap.for_application(shared_connection(ctx, "tree"), self.name)
-            self._maps["flow"].bind_layout(getattr(ctx, "shared_control", None))
+            from rey_lib.config.bootstrap import open_shared_control
+            control = open_shared_control(ctx).shared_control
+            self._maps["flow"] = ObjectMap.for_application(shared_connection(ctx, "tree"), self.name,
+                                                           control)
+            self._maps["flow"].bind_layout(control)
         return self._maps["flow"]
 
     def map_action(self, ctx: Any, action: str = "open", **given: Any) -> Any:

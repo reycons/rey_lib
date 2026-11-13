@@ -1,18 +1,23 @@
-"""What the tree data object is, and how it reads (backlog 1054, 1207).
+"""What the tree data object is, and how it reads (backlog 1054, 1207, #1360).
 
 The object is the shared database view specialized rather than a parallel
-abstraction; it asks for its own connection; it reads through one packaged,
-parameterized statement over tree.f_tree_rows and names no relation itself; and
-the identities the producing SQL composed arrive unread.
+abstraction; it reads through the runtime's one Control, as the governed binding
+get_tree_rows over tree.f_tree_rows_ordered, and holds no statement and names no
+relation itself; and the identities the producing SQL composed arrive unread.
+The Tree's presentation order is the routine's (tree.f_tree_rows_ordered,
+#1360): Python neither states nor re-applies it.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from rey_lib.config import bootstrap
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tree.persisted import (
     TREE_CONNECTION,
     TREE_SCHEMA,
@@ -27,7 +32,7 @@ FORBIDDEN = (
     "persisted_tvw", "run_history_tvw", "file_manifest_tvw",
 )
 
-#: Every value the statement binds, each present on every read.
+#: Every value the governed read binds, each present on every read.
 BOUND = {"expansion_tvw", "row_type", "tree_group_id", "tree_root_id",
          "parent_node_key", "row_limit"}
 
@@ -45,44 +50,36 @@ def tree_object() -> TreeDataObject:
 
 
 class Spy:
-    """Stands in for the connection and the row query, and records what was asked.
+    """Stands in for the runtime's shared Control, and records what was asked.
 
     It answers with rows rather than reaching a database, because what is under
-    test is which datasource was named and what came back unaltered -- not
-    whether Postgres works.
+    test is what the object asked the governed read for and what came back
+    unaltered -- not whether Postgres works.
     """
 
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
-        self.asked_for: list[str] = []
-        self.statements: list[str] = []
+        self.contexts: list[Any] = []
         self.params: list[dict[str, Any]] = []
         self.answer = rows or []
 
-    def shared_connection(self, _ctx: Any, name: str) -> "Spy":
-        self.asked_for.append(name)
-        return self
+    def open_shared_control(self, ctx: Any) -> SimpleNamespace:
+        self.contexts.append(ctx)
+        return SimpleNamespace(shared_control=self)
 
-    def handle(self) -> str:
-        return "handle"
+    def tree_rows(self, **params: Any) -> list[dict[str, Any]]:  # Control.tree_rows
+        self.params.append(dict(params))
+        return [dict(row) for row in self.answer]
 
-    def __call__(self, statement: str, params: Any = None) -> "Spy":  # DatabaseQuery(...)
-        self.statements.append(statement)
-        self.params.append(dict(params or {}))
-        return self
 
-    def rows(self, handle: Any) -> tuple[dict[str, Any], ...]:
-        assert handle == "handle"
-        return tuple(dict(row) for row in self.answer)
+def _watch(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]] | None = None) -> Spy:
+    watcher = Spy(rows)
+    monkeypatch.setattr(bootstrap, "open_shared_control", watcher.open_shared_control)
+    return watcher
 
 
 @pytest.fixture
 def spy(monkeypatch: pytest.MonkeyPatch) -> Spy:
-    watcher = Spy()
-    monkeypatch.setattr(
-        "rey_lib.tree.persisted.shared_connection", watcher.shared_connection,
-    )
-    monkeypatch.setattr("rey_lib.tree.persisted.DatabaseQuery", watcher)
-    return watcher
+    return _watch(monkeypatch)
 
 
 def test_it_is_the_shared_database_view_specialized() -> None:
@@ -99,25 +96,37 @@ def test_it_is_the_shared_database_view_specialized() -> None:
         assert hasattr(obj, field)
 
 
-def test_it_reads_through_its_own_connection(spy: Spy) -> None:
-    """The tree connection, never control's -- they are separate identities."""
-    tree_object().rows(ctx=object())
+def test_it_reads_through_the_runtimes_shared_control(spy: Spy) -> None:
+    """The runtime's one Control, as the governed get_tree_rows read (#1360)."""
+    ctx = object()
+    tree_object().rows(ctx=ctx)
 
-    assert spy.asked_for == ["tree"]
-    assert "control" not in spy.asked_for
+    assert spy.contexts == [ctx]
+    assert len(spy.params) == 1
 
 
-def test_it_reads_through_the_dispatch_function_and_names_no_relation(spy: Spy) -> None:
-    """One packaged statement over tree.f_tree_rows; no table, provider or union named."""
-    tree_object().rows(ctx=object())
+def test_a_runtime_with_no_control_database_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No control database, no Tree read -- refused, never answered empty."""
+    monkeypatch.setattr(bootstrap, "open_shared_control",
+                        lambda ctx: SimpleNamespace(shared_control=None))
+    with pytest.raises(ConfigError, match="no control database"):
+        tree_object().rows(ctx=object())
 
-    statement = spy.statements[0]
-    assert "tree.f_tree_rows(" in statement
-    # Qualified, not bare: "tree_group" also matches the ordering column
-    # tree_group_id, and a substring test over SQL cannot tell a table from a
-    # column that shares its prefix.
-    for relation in FORBIDDEN:
-        assert f"tree.{relation}" not in statement, f"the loader named {relation}"
+
+def test_it_holds_no_statement_and_names_no_relation() -> None:
+    """The read is the routine's: no SQL, no table, provider or union named here (#1360)."""
+    from pathlib import Path
+
+    from rey_lib.tree import persisted
+
+    source = Path(persisted.__file__).read_text(encoding="utf-8")
+    for keyword in ("SELECT", "ORDER BY", "LIMIT"):
+        assert keyword not in source, f"persisted.py holds SQL ({keyword})"
+    # Qualified, not bare: "tree_group" also matches the column tree_group_id.
+    # tree.tree_vw is excepted: it is this object's own identity, which its
+    # docstrings name; it is never read from here.
+    for relation in (one for one in FORBIDDEN if one != "tree_vw"):
+        assert f"tree.{relation}" not in source, f"the loader named {relation}"
 
 
 def test_identities_arrive_unread(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,11 +137,7 @@ def test_identities_arrive_unread(monkeypatch: pytest.MonkeyPatch) -> None:
         "parent_node_key": "5:6:6:4325",
         "label": "Pipelines",
     }
-    watcher = Spy(rows=[emitted])
-    monkeypatch.setattr(
-        "rey_lib.tree.persisted.shared_connection", watcher.shared_connection,
-    )
-    monkeypatch.setattr("rey_lib.tree.persisted.DatabaseQuery", watcher)
+    _watch(monkeypatch, [emitted])
 
     (row,) = tree_object().rows(ctx=object())
 
@@ -145,55 +150,26 @@ def test_a_scoped_read_binds_its_group(spy: Spy) -> None:
     """A tab's roots are asked for by group, and the id is bound."""
     tree_object().rows(ctx=object(), row_type="root", tree_group_id=1)
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert ":tree_group_id" in statement
-    assert params["tree_group_id"] == 1
-
-
-def _order_by(statement: str) -> list[str]:
-    """The ORDER BY terms of one statement, one per entry."""
-    clause = statement.split("ORDER BY", 1)[1].split("LIMIT", 1)[0]
-    return [" ".join(term.split()) for term in clause.split(",")]
-
-
-def test_a_root_read_is_ordered_by_the_roots_declared_sort_order(spy: Spy) -> None:
-    """Backlog 569: a root's row declares its position, and the read honours it."""
-    tree_object().rows(ctx=object(), row_type="root", tree_group_id=1)
-
-    terms = _order_by(spy.statements[0])
-    assert terms[0] == "tree_group_id"
-    # The root's declared position, applied for a root read only.
-    assert terms[1] == ("CASE WHEN CAST(:row_type AS character varying) = 'root' "
-                        "THEN sort_order END NULLS LAST")
-    assert terms[2] == "tree_root_id NULLS FIRST"
+    assert spy.params[0]["tree_group_id"] == 1
     assert spy.params[0]["row_type"] == "root"
 
 
-def test_a_child_read_keeps_the_projections_own_order(spy: Spy) -> None:
-    """Only roots changed: every other level is ordered exactly as before."""
-    tree_object().rows(ctx=object(), row_type="node", parent_node_key="1:1:9")
+def test_rows_keep_the_routines_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The presentation order is tree.f_tree_rows_ordered's; nothing here re-sorts it."""
+    emitted = [{"row_type": "root", "node_key": key, "sort_order": order}
+               for key, order in (("1:9", 3), ("1:2", 1), ("1:5", None))]
+    _watch(monkeypatch, emitted)
 
-    assert _order_by(spy.statements[0]) == [
-        "tree_group_id",
-        "CASE WHEN CAST(:row_type AS character varying) = 'root' THEN sort_order END NULLS LAST",
-        "tree_root_id NULLS FIRST",
-        "sort_rank NULLS LAST",
-        "sort_ts DESC NULLS LAST",
-        "sort_number NULLS LAST",
-        "sort_text NULLS LAST",
-        "node_key NULLS FIRST",
-    ]
+    rows = tree_object().rows(ctx=object(), row_type="root", tree_group_id=1)
+
+    assert [row["node_key"] for row in rows] == ["1:9", "1:2", "1:5"]
 
 
 def test_a_child_read_binds_the_parent_key(spy: Spy) -> None:
-    """Children are asked for by the edge the view declares, bound not spliced."""
+    """Children are asked for by the edge the view declares, bound as a value."""
     tree_object().rows(ctx=object(), row_type="node", parent_node_key="1:1:9")
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert ":parent_node_key" in statement
-    assert params["parent_node_key"] == "1:1:9"
-    # The key is carried whole: it is bound, never spliced into the statement.
-    assert "1:1:9" not in statement
+    assert spy.params[0]["parent_node_key"] == "1:1:9"
 
 
 def test_every_value_is_bound_and_an_omitted_filter_is_null(spy: Spy) -> None:
@@ -212,10 +188,7 @@ def test_a_scoped_read_binds_its_root(spy: Spy) -> None:
     """A root is a predicate like a group: optional, and bound."""
     tree_object().rows(ctx=object(), row_type="node", tree_root_id=35)
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert ":tree_root_id" in statement
-    assert params["tree_root_id"] == 35
-    assert "35" not in statement
+    assert spy.params[0]["tree_root_id"] == 35
 
 
 def test_a_child_read_carries_the_parents_own_scope(spy: Spy) -> None:
@@ -256,12 +229,7 @@ def test_a_record_without_scope_is_read_by_its_key_alone(spy: Spy) -> None:
 
 def test_row_types_are_preserved_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
     """group, root and node arrive as the view spelled them."""
-    emitted = [{"row_type": kind} for kind in ("group", "root", "node")]
-    watcher = Spy(rows=emitted)
-    monkeypatch.setattr(
-        "rey_lib.tree.persisted.shared_connection", watcher.shared_connection,
-    )
-    monkeypatch.setattr("rey_lib.tree.persisted.DatabaseQuery", watcher)
+    _watch(monkeypatch, [{"row_type": kind} for kind in ("group", "root", "node")])
 
     rows = tree_object().rows(ctx=object())
 
@@ -272,26 +240,15 @@ def test_one_kind_and_a_bound_are_asked_for_rather_than_filtered(spy: Spy) -> No
     """The database restricts and limits. Python does not read then discard."""
     tree_object().rows(ctx=object(), row_type="node", limit=50)
 
-    statement, params = spy.statements[0], spy.params[0]
-    assert ":row_type" in statement
-    assert "LIMIT CAST(:row_limit AS bigint)" in statement
-    assert params["row_type"] == "node" and params["row_limit"] == 50
-    # Bound, never interpolated.
-    assert "'node'" not in statement
-    assert "50" not in statement
+    assert spy.params[0]["row_type"] == "node" and spy.params[0]["row_limit"] == 50
 
 
 def test_repeated_rows_for_one_node_are_not_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
     """A node carrying two actions is two rows, because the view says so."""
-    emitted = [
+    _watch(monkeypatch, [
         {"row_type": "node", "node_key": "1:1:9", "action_object_id": "open_query"},
         {"row_type": "node", "node_key": "1:1:9", "action_object_id": "open_rollback"},
-    ]
-    watcher = Spy(rows=emitted)
-    monkeypatch.setattr(
-        "rey_lib.tree.persisted.shared_connection", watcher.shared_connection,
-    )
-    monkeypatch.setattr("rey_lib.tree.persisted.DatabaseQuery", watcher)
+    ])
 
     rows = tree_object().rows(ctx=object())
 
@@ -300,7 +257,7 @@ def test_repeated_rows_for_one_node_are_not_hidden(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_persisted_tree_does_not_reach_dbadapter() -> None:
-    """Its fixed statements run through DatabaseQuery, never DBAdapter (backlog 730)."""
+    """No DBAdapter (backlog 730), and no statement runner of its own either (#1360)."""
     from pathlib import Path
 
     from rey_lib.tree import persisted
@@ -308,4 +265,24 @@ def test_the_persisted_tree_does_not_reach_dbadapter() -> None:
     source = Path(persisted.__file__).read_text(encoding="utf-8")
     assert "DBAdapter" not in source
     assert "execute_sql" not in source
-    assert "from rey_lib.db.database_query import DatabaseQuery" in source
+    assert "DatabaseQuery" not in source
+    assert "read_text_file" not in source
+
+
+def test_the_read_is_the_governed_binding() -> None:
+    """Control.tree_rows calls get_tree_rows with every value, required (#1360)."""
+    from unittest.mock import patch
+
+    from rey_lib.control.control import Control
+
+    rows = [{"row_type": "root", "node_key": "1:2"}]
+    with patch.object(Control, "_call_rows", return_value=rows) as called:
+        answered = Control.__new__(Control).tree_rows(
+            expansion_tvw=None, row_type="root", tree_group_id=1, tree_root_id=None,
+            parent_node_key=None, row_limit=None)
+
+    called.assert_called_once_with("get_tree_rows", {
+        "expansion_tvw": None, "row_type": "root", "tree_group_id": 1,
+        "tree_root_id": None, "parent_node_key": None, "row_limit": None,
+    }, required=True)
+    assert answered == rows and answered[0] is not rows[0]

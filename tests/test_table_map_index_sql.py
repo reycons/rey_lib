@@ -3,7 +3,13 @@ import os
 import re
 
 import pytest
-from rey_lib.inferred_architecture.object_map import _SQL_DIR
+
+
+def _body(cursor, function):
+    """The statement, now the database function's own body (#1360)."""
+    cursor.execute("SELECT pg_get_functiondef(to_regprocedure(%s))", (function,))
+    return cursor.fetchone()[0].split("$function$")[1]
+
 
 pytestmark = pytest.mark.skipif(not os.environ.get("REY_TEST_POSTGRES_DSN"),
                                 reason="Requires an explicit PostgreSQL TEMP-fixture test connection")
@@ -11,7 +17,6 @@ pytestmark = pytest.mark.skipif(not os.environ.get("REY_TEST_POSTGRES_DSN"),
 
 def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
     psycopg = pytest.importorskip("psycopg")
-    sql=(_SQL_DIR / 'object_map_table_context.sql').read_text()
     tables={
     'db_object_vw':'db_node_id bigint, db_source_id bigint, catalog_name text, provider text, schema_name text, object_name text, object_type text, signature text',
     'db_source':'db_source_id bigint, catalog_name text, provider text',
@@ -27,6 +32,8 @@ def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
     c=psycopg.connect(os.environ['REY_TEST_POSTGRES_DSN'])
     try:
      with c.cursor() as q:
+      sql=_body(q,'code.f_object_map_table_context(character varying, character varying, '
+                  'character varying, character varying, text, character varying)')
       q.execute("SET LOCAL statement_timeout = '20s'")
       for table,cols in tables.items():
        q.execute(f'CREATE TEMP TABLE ctx_{table} ({cols}) ON COMMIT DROP')
@@ -44,7 +51,7 @@ def test_the_actual_sql_bounds_views_code_and_tables_and_scopes_the_bridge():
       q.execute("INSERT INTO pg_temp.ctx_db_binding_vw VALUES (1,'use_routine','control','admin',7,true),(2,'direct','control','admin',1,true),(3,'direct','wrong_map','admin',999,true),(4,'direct','control','other_installation',999,true)")
       q.execute("INSERT INTO pg_temp.ctx_db_code_reference VALUES (1,10,100,'app','main.py','routine_user','control_dispatch','use_routine'),(2,20,100,'app','main.py','direct','control_dispatch','direct')")
       q.execute("INSERT INTO pg_temp.ctx_relationship_vw VALUES (1,21,20,NULL,true,false,'call'),(2,22,21,NULL,true,false,'call')")
-      sql=re.sub(r'(?<!:):(\w+)',r'%(\1)s',sql)
+      sql=re.sub(r'\bp_(catalog|provider|schema|table|node|installation)\b',r'%(\1)s',sql)
       params={'catalog':'fixture','provider':'postgres','schema':'public','table':'root','installation':'admin','node':None}
       q.execute(sql,params)
       count,root,nodes,edges=q.fetchone()

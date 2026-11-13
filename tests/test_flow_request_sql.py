@@ -2,7 +2,13 @@
 import os
 
 import pytest
-from rey_lib.inferred_architecture.object_map import _SQL_DIR
+
+
+def _body(cursor, function):
+    """The statement, now the database function's own body (#1360)."""
+    cursor.execute("SELECT pg_get_functiondef(to_regprocedure(%s))", (function,))
+    return cursor.fetchone()[0].split("$function$")[1]
+
 
 pytestmark = pytest.mark.skipif(not os.environ.get('REY_TEST_POSTGRES_DSN'),
                                 reason='Requires an explicit PostgreSQL TEMP-fixture connection')
@@ -42,19 +48,19 @@ def test_request_inventory_inherits_only_the_proved_host_and_never_becomes_cli()
                 ('rey_lib','other.py',False,'call',None,None),
             ])
             cursor.execute("INSERT INTO pg_temp.object_map_flow_command_vw VALUES ('ai_app',1,'serve',NULL,1)")
-            def read(name):
-                sql = (_SQL_DIR / name).read_text().replace('code.', 'pg_temp.')
+            def read(function):
+                sql = _body(cursor, function).replace('code.', 'pg_temp.')
                 cursor.execute(sql)
                 names = [column.name for column in cursor.description]
                 return [dict(zip(names, row)) for row in cursor.fetchall()]
-            rows = read('object_map_flow_requests.sql')
+            rows = read('code.f_object_map_flow_requests()')
             inputs = [r for r in rows if r['application_name'] == 'ai_app']
             assert sorted(r['request_name'] for r in inputs) == ['close','projection','run','task']
             assert next(r for r in inputs if r['request_name']=='task')['request_branch'] == 'false'
             assert next(r for r in inputs if r['request_name']=='task')['application_request_id'] == '11:task'
             assert next(r for r in inputs if r['request_name']=='projection')['repository_key'] == 'rey_lib'
             assert not any(r['application_name'] in ('plain_app','test_app') for r in rows)
-            commands = read('object_map_flow_commands.sql')
+            commands = read('code.f_object_map_flow_commands()')
             assert [(r['application_name'],r['command_name']) for r in commands] == [('ai_app','serve')]
     finally:
         connection.rollback()

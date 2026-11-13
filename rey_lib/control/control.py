@@ -1352,6 +1352,70 @@ class Control:
             "expected_revision": expected_revision,
         }, required=True)
 
+    def object_map_claims(self) -> list[dict[str, Any]]:
+        """ObjectMap's claims read (#1360): code.f_object_map_claims, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_claims", {}, required=True)]
+
+    def object_map_relationships(self) -> list[dict[str, Any]]:
+        """ObjectMap's relationships read (#1360): code.f_object_map_relationships, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_relationships", {},
+                                                     required=True)]
+
+    def object_map_placements(self) -> list[dict[str, Any]]:
+        """ObjectMap's placements read (#1360): code.f_object_map_placements, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_placements", {},
+                                                     required=True)]
+
+    def object_map_areas(self) -> list[dict[str, Any]]:
+        """ObjectMap's areas read (#1360): code.f_object_map_areas, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_areas", {}, required=True)]
+
+    def object_map_area_links(self) -> list[dict[str, Any]]:
+        """ObjectMap's area links read (#1360): code.f_object_map_area_links, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_area_links", {},
+                                                     required=True)]
+
+    def object_map_flows(self) -> list[dict[str, Any]]:
+        """ObjectMap's flows read (#1360): code.f_object_map_flows, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_flows", {}, required=True)]
+
+    def object_map_flow_commands(self) -> list[dict[str, Any]]:
+        """ObjectMap's flow commands read (#1360): code.f_object_map_flow_commands."""
+        return [dict(row) for row in self._call_rows("get_object_map_flow_commands", {},
+                                                     required=True)]
+
+    def object_map_flow_operations(self) -> list[dict[str, Any]]:
+        """ObjectMap's flow operations read (#1360): code.f_object_map_flow_operations."""
+        return [dict(row) for row in self._call_rows("get_object_map_flow_operations", {},
+                                                     required=True)]
+
+    def object_map_flow_requests(self) -> list[dict[str, Any]]:
+        """ObjectMap's flow requests read (#1360): code.f_object_map_flow_requests."""
+        return [dict(row) for row in self._call_rows("get_object_map_flow_requests", {},
+                                                     required=True)]
+
+    def object_map_flow_steps(self, symbol_id: int) -> list[dict[str, Any]]:
+        """One symbol's flow steps (#1360): code.f_object_map_flow_steps, in its order."""
+        return [dict(row) for row in self._call_rows("get_object_map_flow_steps", {
+            "symbol_id": symbol_id,
+        }, required=True)]
+
+    def object_map_edge_evidence(self, sources: list[int],
+                                 targets: list[int]) -> list[dict[str, Any]]:
+        """The call sites supporting one mapped link (#1360): code.f_object_map_edge_evidence."""
+        return [dict(row) for row in self._call_rows("get_object_map_edge_evidence", {
+            "sources": list(sources), "targets": list(targets),
+        }, required=True)]
+
+    def object_map_table_context(self, catalog: str, provider: str, schema: str,
+                                 table: Optional[str], node: Optional[str],
+                                 installation: str) -> list[dict[str, Any]]:
+        """An indexed object's neighbourhood (#1360): code.f_object_map_table_context."""
+        return [dict(row) for row in self._call_rows("get_object_map_table_context", {
+            "catalog": catalog, "provider": provider, "schema": schema, "table": table,
+            "node": node, "installation": installation,
+        }, required=True)]
+
     def update_workflow(self, workflow_id: int, definition: dict[str, Any],
                         required: bool = True) -> dict[str, list[int]]:
         """Save a Workflow's complete definition; answer the saved ids in order (#1325).
@@ -1632,6 +1696,22 @@ class Control:
             }, required=required) or [])
         ]
 
+    def experience_indexed_object(self, schema: str, name: str,
+                                  required: bool = True) -> list[dict[str, Any]]:
+        """One database object as the database index holds it (#1344, #1360).
+
+        code.f_experience_indexed_object: every indexed object of that schema and
+        name, in every source -- ``code_db_object_id``, ``source_key`` -- with each
+        ``member_name`` (None when it has none). The experience verifier decides
+        from these rows; nothing here resolves them.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_experience_indexed_object", {
+                "schema": str(schema),
+                "name": str(name),
+            }, required=required) or [])
+        ]
+
     def analysis_contract(self, name: str) -> Optional[dict[str, Any]]:
         """This installation's stored analysis contract ``name``, or None.
 
@@ -1713,6 +1793,46 @@ class Control:
             "subject_key": str(subject_key),
         }, required=required) or []
         return dict(rows[0]) if rows else None
+
+    def tree_tabs(self, installation: str, placement: str,
+                  required: bool = True) -> list[dict[str, Any]]:
+        """The governed Tree groups ``installation`` surfaces in ``placement`` (#1218, #1360).
+
+        tree.f_tree_tabs: each group's ``tree_group_id``, ``tree_group_key``,
+        ``label``, ``icon``, ``panel_key`` and ``panel_configuration``, in the
+        routine's display order. Which groups, and their order, are the
+        routine's answer; nothing here decides them. composition.tree_groups is
+        the only reader.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_tree_tabs", {
+                "installation": str(installation),
+                "placement": str(placement),
+            }, required=required) or [])
+        ]
+
+    def tree_rows(self, expansion_tvw: Optional[str], row_type: Optional[str],
+                  tree_group_id: Optional[int], tree_root_id: Optional[int],
+                  parent_node_key: Optional[str], row_limit: Optional[int],
+                  required: bool = True) -> list[dict[str, Any]]:
+        """The Tree rows one expansion owns, in the Tree's presentation order (#1207, #1360).
+
+        tree.f_tree_rows_ordered: tree.f_tree_rows, unchanged, ordered and
+        bounded. Which provider answers, every filter and every refusal are the
+        database's; a None filter binds as NULL and applies no predicate, and a
+        None ``row_limit`` is no limit. The rows are carried as the routine
+        emitted them. TreeDataObject.rows is the only reader.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_tree_rows", {
+                "expansion_tvw": expansion_tvw,
+                "row_type": row_type,
+                "tree_group_id": tree_group_id,
+                "tree_root_id": tree_root_id,
+                "parent_node_key": parent_node_key,
+                "row_limit": row_limit,
+            }, required=required) or [])
+        ]
 
     def data_profile_for_key(self, data_profile_key: str,
                              required: bool = True) -> Optional[int]:

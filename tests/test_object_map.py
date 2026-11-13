@@ -69,32 +69,39 @@ def _ids(items: list[dict[str, Any]]) -> list[str]:
 
 # -- reading ------------------------------------------------------------------
 
-def test_the_architecture_map_reads_its_five_statements_on_the_hosts_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_architecture_map_reads_its_five_reads_through_the_shared_control() -> None:
+    """#1360: the five reads are Control's governed get_object_map_* reads, in order."""
     ran: list[str] = []
 
-    class _Query:
-        def __init__(self, statement: str) -> None:
-            self.statement = statement
+    class _Control:
+        def __getattr__(self, name: str) -> Callable[[], list[dict[str, Any]]]:
+            if not name.startswith("object_map_"):
+                raise AttributeError(name)
+            read = name.removeprefix("object_map_")
+            return lambda: ran.append(read) or [dict(row) for row in READ[read]]
 
-        def rows(self, handle: Any) -> tuple[dict[str, Any], ...]:
-            assert handle == "handle"
-            ran.append(self.statement)
-            return ()
-
-    monkeypatch.setattr(module, "DatabaseQuery", _Query)
     connection = SimpleNamespace(handle=lambda: "handle")
 
-    held = ObjectMap.for_architecture(connection, "admin")
+    held = ObjectMap.for_architecture(connection, "admin", _Control())
 
     assert held.subject == {"kind": "inferred_architecture", "installation": "admin"}
     assert held.projection_kind == OBJECT_PROJECTION
-    assert [view for statement in ran for view in (
-        "object_map_claim_vw", "object_map_relationship_vw", "object_map_placement_vw",
-        "object_map_area_vw", "object_map_area_link_vw") if view in statement] == [
-        "object_map_claim_vw", "object_map_relationship_vw", "object_map_placement_vw",
-        "object_map_area_vw", "object_map_area_link_vw"]
+    assert ran == ["claims", "relationships", "placements", "areas", "area_links"]
+    assert held._read == {name: [dict(r) for r in rows] for name, rows in READ.items()}
+
+
+def test_the_five_reads_are_the_governed_bindings() -> None:
+    """Control.object_map_<name> calls get_object_map_<name>, required, no inputs (#1360)."""
+    from unittest.mock import patch
+
+    from rey_lib.control.control import Control
+
+    for name in ("claims", "relationships", "placements", "areas", "area_links"):
+        rows = [dict(row) for row in READ[name]]
+        with patch.object(Control, "_call_rows", return_value=rows) as called:
+            answered = getattr(Control.__new__(Control), f"object_map_{name}")()
+        called.assert_called_once_with(f"get_object_map_{name}", {}, required=True)
+        assert answered == rows and (not rows or answered[0] is not rows[0])
 
 
 def test_a_schema_map_reads_the_schema_as_the_database_domains_objects(
@@ -607,15 +614,11 @@ def test_drill_enters_exact_resolved_callee_and_breadcrumb_returns(monkeypatch):
     held=_with_flows()
     held._index_connection=SimpleNamespace(handle=lambda:"existing-index")
     calls=[]
-    class Query:
-        def __init__(self,statement,params):
-            assert "code.control_flow_node_vw" in statement
-            self.params=params
-        def rows(self,handle):
-            assert handle=="existing-index"
-            calls.append(self.params["symbol_id"])
-            return _flow_rows(self.params["symbol_id"])
-    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    class Control:  # the shared Control's governed flow-steps read (#1360)
+        def object_map_flow_steps(self,symbol_id):
+            calls.append(symbol_id)
+            return _flow_rows(symbol_id)
+    held._control=Control()
     held.focus(reading="flow",flow="example")
     held.double_click("control:100:call")
     focus = held.projection()["focus"]
@@ -658,10 +661,9 @@ def test_failed_flow_read_keeps_previous_focus(monkeypatch):
     held=_with_flows();held.focus(reading="flow",flow="example")
     before=held.projection()
     held._index_connection=SimpleNamespace(handle=lambda:"handle")
-    class Query:
-        def __init__(self,*args): pass
-        def rows(self,handle): raise module.AppError("read refused")
-    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    class Control:
+        def object_map_flow_steps(self,symbol_id): raise module.AppError("read refused")
+    held._control=Control()
     with pytest.raises(module.AppError,match="read refused"):
         held.double_click("control:100:call")
     assert held.projection()["focus"]==before["focus"]
@@ -698,10 +700,10 @@ def test_call_sites_to_same_callee_remain_distinct_with_their_return_paths(monke
     second = {**first,"node_key":"second","to_key":"exit","code_edge_id":43,"source_line":11,"end_line":11}
     caller = [_flow_rows()[0] | {"to_key":"first"},first,second,_flow_rows()[-1]]
     held._read["flow_steps"] = caller
-    class Query:
-        def __init__(self, statement, params): self.symbol = params["symbol_id"]
-        def rows(self, handle): return caller if self.symbol == 100 else _flow_rows(200)
-    monkeypatch.setattr(module,"DatabaseQuery",Query)
+    class Control:
+        def object_map_flow_steps(self, symbol_id):
+            return caller if symbol_id == 100 else _flow_rows(200)
+    held._control = Control()
     held._index_connection = SimpleNamespace(handle=lambda:"index")
     held.focus(reading="flow",flow="example")
     held.double_click("control:100:first")
@@ -793,12 +795,11 @@ def test_operation_uses_registered_index_binding_and_reads_exact_callable(monkey
         "operation_name":"export", "description":"Export database DDL", "ordinal":1,
         "code_symbol_id":200}]
     reads = []
-    class Query:
-        def __init__(self, statement, params):
-            reads.append(params)
-        def rows(self, handle):
+    class Control:
+        def object_map_flow_steps(self, symbol_id):
+            reads.append({"symbol_id": symbol_id})
             return _flow_rows(200)
-    monkeypatch.setattr(module, "DatabaseQuery", Query)
+    held._control = Control()
     held._index_connection = SimpleNamespace(handle=lambda: "handle")
     held.focus(reading="flow", application="example")
     held.double_click("operation:8")
@@ -902,13 +903,12 @@ def test_flow_input_right_click_opens_the_bound_handler_at_its_indexed_line():
 
 def test_application_map_is_scoped_and_has_no_estate_navigation(monkeypatch):
     flows = _with_flows()._read['flows']
-    class Query:
-        def __init__(self, statement): self.statement = statement
-        def rows(self, handle):
-            assert handle == 'index'
-            return flows if 'FROM\tcode.object_map_flow_vw' in self.statement else []
-    monkeypatch.setattr(module, 'DatabaseQuery', Query)
-    held = ObjectMap.for_application(SimpleNamespace(handle=lambda:'index'), 'example')
+    class Control:  # the shared Control's governed flow reads (#1360)
+        def object_map_flows(self): return flows
+        def object_map_flow_commands(self): return []
+        def object_map_flow_operations(self): return []
+        def object_map_flow_requests(self): return []
+    held = ObjectMap.for_application(SimpleNamespace(handle=lambda:'index'), 'example', Control())
     assert held.projection()['subject'] == {'kind':'application', 'application':'example'}
     assert held.projection()['focus'] == {'flow':None, 'application':'example'}
     assert all(s['label'] != 'Applications' for s in held.projection()['path'])
@@ -920,16 +920,17 @@ def test_application_map_is_scoped_and_has_no_estate_navigation(monkeypatch):
         held.focus(flow='missing')
 
 
-def test_architecture_factory_holds_only_the_object_reading(monkeypatch):
-    statements = []
-    class Query:
-        def __init__(self, statement): statements.append(statement)
-        def rows(self, handle): return []
-    monkeypatch.setattr(module, 'DatabaseQuery', Query)
-    held = ObjectMap.for_architecture(SimpleNamespace(handle=lambda:None), 'local')
+def test_architecture_factory_holds_only_the_object_reading():
+    reads = []
+    class Control:
+        def __getattr__(self, name):
+            if not name.startswith('object_map_'):
+                raise AttributeError(name)
+            return lambda: reads.append(name) or []
+    held = ObjectMap.for_architecture(SimpleNamespace(handle=lambda:None), 'local', Control())
     assert held.projection()['readings'] == ['object']
-    assert len(statements) == 5
-    assert not any('object_map_flow' in statement for statement in statements)
+    assert len(reads) == 5
+    assert not any(name.startswith('object_map_flow') for name in reads)
 
 
 def test_process_backbone_keeps_alternatives_and_never_claims_run_frequencies():

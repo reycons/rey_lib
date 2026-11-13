@@ -21,21 +21,14 @@ and is refused when absent rather than left blank.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Final, Mapping
 
-from rey_lib.db.connection import shared_connection
-from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files import read_text_file
 import rey_lib.tree as _tree
-from rey_lib.tree.persisted import TREE_CONNECTION, persisted_tree
+from rey_lib.tree.persisted import persisted_tree
 from rey_lib.tree.traversal import Assemble, TreeTraversal
 
 __all__ = ["RUNTIME_BINDINGS", "tree_children", "tree_group_selection", "tree_groups", "tree_roots"]
-
-#: The packaged statements this module reads (package data, like inferred_architecture/sql).
-_SQL_DIR: Final = Path(__file__).parent / "sql"
 
 #: The configuration values a caller may supply when a Tree is composed.
 #:
@@ -50,13 +43,14 @@ def tree_groups(ctx: Any, placement: str) -> list[dict[str, Any]]:
     """The governed Tree groups the context's installation surfaces in one placement.
 
     Which groups, whether each is enabled, and their display order are the
-    routine's answer (``tree.f_tree_tabs``); nothing here decides them again. Zero
+    routine's answer (``tree.f_tree_tabs``, read through the runtime's one
+    Control as ``get_tree_tabs`` -- #1360); nothing here decides them again. Zero
     groups is an ordinary answer -- an installation may surface none there.
 
     Args:
         ctx: The installation context the Tree runs under; its installation
             (``ctx.installation.name``) is whose groups these are, and it
-            resolves the Tree connection.
+            carries the runtime's shared Control.
         placement: Where the Tree is asked for (``explorer``, ``loader_source``,
             ...). The vocabulary is the database's.
 
@@ -66,19 +60,22 @@ def tree_groups(ctx: Any, placement: str) -> list[dict[str, Any]]:
         ``panel_configuration`` (an empty mapping when none is declared).
 
     Raises:
-        ConfigError: When no placement is named, or the context names no
-            installation.
+        ConfigError: When no placement is named, the context names no
+            installation, or the runtime has no control database.
     """
     if not placement:
         raise ConfigError("A Tree's groups are asked for in a named placement.")
     installation = str(getattr(getattr(ctx, "installation", None), "name", "") or "")
     if not installation:
         raise ConfigError("A Tree's groups belong to an installation, and this context names none.")
-    handle = shared_connection(ctx, TREE_CONNECTION).handle()
-    rows = DatabaseQuery(read_text_file(_SQL_DIR / "tree_groups.sql"), {
-        "installation": installation,
-        "placement": placement,
-    }).rows(handle)
+    # Imported here, as load/source.py does: the bootstrap reaches the tree package.
+    from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+    control = open_shared_control(ctx).shared_control
+    if control is None:
+        raise ConfigError("A Tree's groups are read through Control, and this runtime has no "
+                          "control database.")
+    rows = control.tree_tabs(installation, placement)
     return [
         {**dict(row), "panel_configuration": dict(row.get("panel_configuration") or {})}
         for row in rows
