@@ -166,6 +166,11 @@ class DatabaseQuery:
     _acting: threading.RLock = field(
         default_factory=threading.RLock, init=False, repr=False, compare=False,
     )
+    _opened_statement: str = field(default="", init=False, repr=False, compare=False)
+    _result: Optional[dict[str, Any]] = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._opened_statement = self.text()
 
     # -- the live query -------------------------------------------------------
 
@@ -220,6 +225,9 @@ class DatabaseQuery:
                 "order_by": list(self.order_by),
                 "filters": list(self.filters),
                 "connection": self.connection.name if self.connection is not None else None,
+                "navigation": {"modified": self.text() != self._opened_statement,
+                               "can_close": self.text() == self._opened_statement},
+                **({"result": self._result} if self._result is not None else {}),
             }
 
     def lint(self, ctx: Any) -> dict[str, Any]:
@@ -305,7 +313,7 @@ class DatabaseQuery:
                     order_by=list(self.order_by) or None,
                     filters=list(self.filters) or None,
                 )
-                return {
+                self._result = {
                     "pageable": True,
                     "columns": _columns(page.columns, page.column_kinds),
                     "rows": list(page.rows),
@@ -316,8 +324,9 @@ class DatabaseQuery:
                     **({"max_page_size": page.max_page_size}
                        if page.max_page_size is not None else {}),
                 }
+                return self._result
             results = as_written.run(handle, limit=RESULT_ROW_LIMIT)
-            return {
+            self._result = {
                 "pageable": False,
                 "results": [
                     {
@@ -330,6 +339,7 @@ class DatabaseQuery:
                 ],
                 "row_limit": RESULT_ROW_LIMIT,
             }
+            return self._result
 
     # -- the four ways to run -------------------------------------------------
 

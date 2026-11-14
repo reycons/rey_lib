@@ -82,6 +82,11 @@ sqlserver = [
     # libraries (unixODBC) and the Microsoft ODBC Driver 18 for SQL Server.
     "pyodbc>=5.0.0",
 ]
+bigquery = [
+    # BigQuery backend (rey_lib/db/bigquery_utils.py, backlog 1365). Authenticates
+    # through Application Default Credentials.
+    "google-cloud-bigquery>=3.47.0",
+]
 artifacts = [
     # Artifact post-processing (rey_lib/artifacts). SQLFluff is the first SQL
     # formatting/linting engine adapter.

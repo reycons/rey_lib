@@ -206,6 +206,7 @@ class Source:
         # ONE ACT AT A TIME: an operation and the snapshot answering it are taken
         # under this, so the snapshot is the state that operation produced.
         self._acting = threading.RLock()
+        self._query_result: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -572,6 +573,20 @@ class Source:
             statement = str(self.value("statement") or "")
             path = str(self.value("file") or "")
         return statement.replace(_FILE_PATH_TOKEN, path) if path else statement
+
+    def query_projection(self) -> dict[str, Any]:
+        """The existing Source statement's navigation/read state; nothing is resolved or run."""
+        with self._acting:
+            return {"statement": self.resolved_statement(),
+                    "connection": str(self.value("source-connection") or "") or None,
+                    "navigation": {"label": "Source query", "modified": self.saves_query(),
+                                   "can_close": True, "shared": True},
+                    **({"result": self._query_result} if self._query_result is not None else {})}
+
+    def remember_query_result(self, result: dict[str, Any]) -> None:
+        """Keep this Source's last query answer while the Source remains live."""
+        with self._acting:
+            self._query_result = result
 
     def query(self, ctx: Any) -> DatabaseQuery:
         """This Source's statement as a live query on its own connection (#1151).

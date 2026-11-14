@@ -85,6 +85,8 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # from (backlog 722). A provider missing either cannot empty or drop a
     # destination, and the load must be told which primitive is missing, by name.
     "quote_identifier": ("quote_identifier", ("name",)),
+    # How a statement names one relation, where its provider writes its own (1365).
+    "relation_reference": ("relation_reference", ("catalog", "schema", "name")),
     "execute_statement": ("execute_statement", ("DELETE FROM t",)),
     # What a catalog says about one table, for DatabaseTable.read_ddl (backlog 695).
     "table_column_catalog": ("table_column_catalog", ("schema", "table")),

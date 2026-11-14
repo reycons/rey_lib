@@ -306,6 +306,7 @@ class TestTheLiveQuery:
         assert query.projection() == {
             "statement": "SELECT 1", "pageable": True, "rows_per_page": 50,
             "current_page": 0, "order_by": [], "filters": [], "connection": "rey apps",
+            "navigation": {"modified": False, "can_close": True},
         }
         assert connection.handed == []
 
@@ -332,6 +333,10 @@ class TestTheLiveQuery:
             "total_row_count": None, "offset": 20, "limit": 10, "next_offset": 30,
         }
         assert connection.closed is False
+        # Reattaching reads this same owner's result without executing again.
+        assert query.projection()["result"] == answer
+        assert len(executor.asked) == 1
+        assert query.connection is connection
 
     def test_a_provider_that_cannot_page_says_so_to_the_caller(
         self, monkeypatch: pytest.MonkeyPatch,

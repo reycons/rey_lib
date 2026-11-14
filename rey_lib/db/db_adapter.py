@@ -61,6 +61,7 @@ _REGISTRY: dict[str, str] = {
 	"duckdb":    "rey_lib.db.duckdb_utils",
 	"mysql":     "rey_lib.db.mysql_utils",
 	"postgres":  "rey_lib.db.postgres_utils",
+	"bigquery":  "rey_lib.db.bigquery_utils",
 }
 
 # Maps connection object module prefix → provider name.
@@ -76,6 +77,8 @@ _MODULE_PREFIXES: dict[str, str] = {
 	# a live process, or an environment that has not been reinstalled. It costs
 	# one entry and removes a way for provider inference to answer nothing.
 	"psycopg2":        "postgres",
+	# The provider's own DB-API handle, BigQueryConnection (backlog 1365).
+	"rey_lib.db.bigquery_utils": "bigquery",
 }
 
 _METADATA_CAPABILITIES = frozenset(
@@ -110,6 +113,8 @@ _PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
     "duckdb": frozenset({"catalogs", "schemas", "tables", "views"}),
     # Schemas from its inventory (backlog 723), as DuckDB's are.
     "sqlserver": frozenset({"schemas", "procedures", "functions"}),
+    # Datasets from its inventory, as DuckDB's schemas are (backlog 1365).
+    "bigquery": frozenset({"catalogs", "schemas", "tables", "views", "columns"}),
 }
 
 # The provider contract: the methods this adapter publishes and fulfils by
@@ -146,6 +151,11 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # without them fails the contract test rather than a load.
         "quote_identifier",
         "execute_statement",
+        # How a statement names one relation, where the provider writes it
+        # differently from schema.name (backlog 1365): BigQuery resolves a
+        # dataset.table against the execution project, not the data project.
+        # Optional: a provider without it keeps the name written as read.
+        "relation_reference",
         # What a provider's catalog says about one table (backlog 695): its
         # columns, for a provider whose table DDL the table composes; or the
         # complete definition the server itself supplies. Each is implemented
@@ -1066,6 +1076,17 @@ class DBAdapter:
             UnsupportedDatabaseCapabilityError: If the provider cannot.
         """
         return self._require_provider_capability(conn, "quote_identifier")(name)
+
+    def relation_reference(self, conn: Any, catalog: str, schema: str, name: str) -> str:
+        """One relation as a statement names it, written the way this provider writes it.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider writes no reference
+                of its own.
+        """
+        return self._require_provider_capability(conn, "relation_reference")(
+            catalog, schema, name,
+        )
 
     def execute_statement(self, conn: Any, sql_text: str) -> int:
         """Run one statement on the connection; the provider's affected count. No commit.

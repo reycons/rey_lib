@@ -2705,7 +2705,7 @@ def _table(
         ddl=_table_ddl(
             adapter, handle, connection, catalog, schema, name, database_name,
         ),
-        initial_select=_initial_select(schema, name, columns),
+        initial_select=_initial_select(adapter, handle, catalog, schema, name, columns),
     )
 
 
@@ -2736,7 +2736,7 @@ def _view(
         # The view's DDL is DatabaseView.read_ddl's alone (backlog 725): no
         # second definition from the structure read stands in for it.
         ddl=_view_ddl(adapter, handle, connection, catalog, schema, name),
-        initial_select=_initial_select(schema, name, columns),
+        initial_select=_initial_select(adapter, handle, catalog, schema, name, columns),
     )
 
 
@@ -3135,18 +3135,37 @@ def _names(value: Any) -> tuple[str, ...]:
     return tuple(str(name) for name in value if name)
 
 
-def _initial_select(schema: str, name: str, columns: tuple[DatabaseColumn, ...]) -> str:
+def _initial_select(
+    adapter: Any, handle: Any, catalog: str, schema: str, name: str,
+    columns: tuple[DatabaseColumn, ...],
+) -> str:
     """The statement that opens this object.
 
     Written from the columns read in the same pass, so opening it asks nothing
-    further. Names are written as they were read.
+    further. Names are written as they were read -- except the relation itself,
+    where its provider writes its own reference (backlog 1365).
     """
-    qualified = f"{schema}.{name}" if schema else name
+    qualified = _relation_reference(adapter, handle, catalog, schema, name)
     projection = [column.name for column in columns if column.name]
     if not projection:
         return f"SELECT * FROM {qualified};"
     listed = ",\n    ".join(projection)
     return f"SELECT\n    {listed}\nFROM {qualified};"
+
+
+def _relation_reference(
+    adapter: Any, handle: Any, catalog: str, schema: str, name: str,
+) -> str:
+    """How a statement names the relation: its provider's reference, or schema.name.
+
+    Optional, asked first and asked optionally: a provider that writes no
+    reference of its own -- or an adapter that cannot be asked -- keeps the name
+    exactly as it was always written.
+    """
+    supports = getattr(adapter, "supports_provider_capability", None)
+    if callable(supports) and supports(handle, "relation_reference"):
+        return adapter.relation_reference(handle, catalog, schema, name)
+    return f"{schema}.{name}" if schema else name
 
 
 def _view_ddl(
