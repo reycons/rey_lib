@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import pytest
 
-from rey_lib.ai.application import ApplicationAI
+from rey_lib.ai.application import AIAcceptance, ApplicationAI
 from rey_lib.ai.errors import AIConfigurationError, AIRequestError, AIUnavailableError
 from rey_lib.errors.error_utils import ConfigError
 
@@ -494,3 +494,266 @@ def test_a_conversation_is_read_only_for_an_owning_application_and_a_subject(
     with pytest.raises(AIRequestError, match=refusal):
         ai.conversation(object(), subject)
     assert transports.launched == []
+
+
+# -- the one AI lifecycle every application uses (#1369) -----------------------------
+
+#: What the subject's live object holds, as its context.
+_HELD = {"definition": "the object's own"}
+
+
+class _Lifecycle(ApplicationAI):
+    """ApplicationAI with only ai_app's side standing in: what each call was given,
+    and the messages ai_app would emit about the task. ``answer``, ``seat``,
+    ``origin`` and ``run_to_end`` are the real ones."""
+
+    def __init__(self, ends: str = "completed", answer: Any = None,
+                 refuses: Exception | None = None, chose: str = "",
+                 tasks: tuple[str, ...] = ("comment_code", "analyze_data")) -> None:
+        super().__init__(tasks, None,  # type: ignore[arg-type]
+                         engines=("local", "remote"),
+                         destinations={"query.statement": ["text/x-sql"]},
+                         task_destinations={"comment_code": "query.statement"})
+        self.ends = ends
+        self.answer_given = answer if answer is not None else {
+            "text": "the commented statement", "media_type": "text/x-sql"}
+        self.refuses = refuses
+        self.chose = chose
+        self.calls: list[dict[str, Any]] = []
+        self.silent = False
+
+    def call(self, runtime: Any, task_key: str, text: str, relay: Any,
+             context: Any = None, origin: Any = None, *, subject_reference: Any = None,
+             coordinates: Any = None, engine: Any = None) -> None:
+        self.calls.append({"task_key": task_key, "text": text, "context": context,
+                           "origin": origin, "subject_reference": subject_reference,
+                           "coordinates": coordinates, "engine": engine})
+        if self.refuses is not None:
+            raise self.refuses
+        if self.silent:
+            return
+        relay({"opened": {"object": "t1"}})
+        relay({"projection": {"status": "running"}, "object": "t1"})
+        relay({"projection": {"status": self.ends, "run_id": 42, "error": "",
+                              "answer": self.answer_given if self.ends == "completed" else None,
+                              **({"task_key": self.chose} if self.chose else {})},
+               "object": "t1"})
+
+    def conversation(self, runtime: Any, subject_reference: Any) -> dict[str, Any]:
+        return {"subject": dict(subject_reference)}
+
+
+class _Subject:
+    """An application's AI subject: what it supplies, and what it was asked to accept."""
+
+    def __init__(self, reference: Any = None, refuses_input: bool = False,
+                 applies: bool = True) -> None:
+        self.reference = reference if reference is not None else {"kind": "views", "name": "v"}
+        self.refuses_input = refuses_input
+        self.applies = applies
+        self.accepted: list[tuple[str, str]] = []
+
+    def subject_reference(self) -> Any:
+        return self.reference
+
+    def context(self) -> dict[str, Any]:
+        return dict(_HELD)
+
+    def default_input(self, task_key: str) -> str:
+        if self.refuses_input:
+            raise ConfigError("Enter what you want.")
+        return f"the statement, for {task_key}"
+
+    def accept(self, destination: str, text: str) -> AIAcceptance:
+        self.accepted.append((destination, text))
+        return AIAcceptance(True, text=text) if self.applies else AIAcceptance(
+            False, reason="not here")
+
+
+class _Place:
+    def __init__(self, parent: Any = 9) -> None:
+        self.parent = parent
+
+    def parent_context(self) -> dict[str, Any]:
+        return {"run_id": 1, "parent_run_log_id": self.parent}
+
+
+@pytest.fixture
+def _quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ConfigError, "report", lambda self, *_a, **_k: None)
+    monkeypatch.setattr(AIRequestError, "report", lambda self, *_a, **_k: None)
+
+
+def _asked(ai: _Lifecycle, command: dict[str, Any], subject: _Subject | None = None,
+           run_log: Any = None, coordinates: Any = None) -> tuple[list[dict[str, Any]], int]:
+    """``answer`` once: what it emitted, and how many times it published."""
+    emitted: list[dict[str, Any]] = []
+    published = [0]
+
+    def publish() -> None:
+        published[0] += 1
+
+    ai.answer(object(), {"request_id": "r1", **command}, emitted.append,
+              subject or _Subject(), publish, run_log, coordinates)
+    return emitted, published[0]
+
+
+def test_the_seat_carries_tasks_and_engines_and_no_disposition_before_any_run() -> None:
+    assert _Lifecycle().seat() == {"ai_tasks": ["comment_code", "analyze_data"],
+                                   "ai_engines": ["local", "remote"]}
+    assert ApplicationAI((), None).seat() == {}  # type: ignore[arg-type]
+
+
+def test_an_accepted_answer_is_offered_to_the_subject_and_recorded_applied() -> None:
+    ai, subject = _Lifecycle(), _Subject()
+    emitted, published = _asked(ai, {"command": "ai", "task_key": "comment_code",
+                                     "text": "add comments", "engine": "remote"}, subject,
+                                _Place(), {"connection": "holder"})
+
+    # Every message relayed as ai_app emitted it, under the asking request.
+    assert [one["request_id"] for one in emitted] == ["r1"] * 3
+    assert emitted[-1]["ai"]["projection"]["status"] == "completed"
+    assert ai.calls == [{"task_key": "comment_code", "text": "add comments",
+                         "context": _HELD,
+                         "origin": {"run_id": 1, "parent_run_log_id": 9},
+                         "subject_reference": {"kind": "views", "name": "v"},
+                         "coordinates": {"connection": "holder"}, "engine": "remote"}]
+    assert subject.accepted == [("query.statement", "the commented statement")]
+    assert ai.seat()["ai_disposition"] == {"task_key": "comment_code", "run_id": 42,
+                                           "applied": True, "reason": None}
+    assert published == 1
+
+
+def test_without_text_the_subjects_default_input_is_the_tasks() -> None:
+    ai = _Lifecycle()
+    _asked(ai, {"command": "ai", "task_key": "comment_code"})
+
+    assert ai.calls[0]["text"] == "the statement, for comment_code"
+
+
+def test_an_answer_the_declaration_refuses_is_never_offered_and_is_declined() -> None:
+    ai = _Lifecycle(answer={"text": "# notes", "media_type": "text/markdown"})
+    subject = _Subject()
+    _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "x"}, subject)
+
+    assert subject.accepted == []
+    assert ai.seat()["ai_disposition"] == {
+        "task_key": "comment_code", "run_id": 42, "applied": False,
+        "reason": "text/markdown is not accepted for query.statement (accepts text/x-sql)."}
+
+
+def test_the_subject_may_decline_an_accepted_answer_with_its_reason() -> None:
+    ai = _Lifecycle()
+    _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "x"},
+           _Subject(applies=False))
+
+    assert ai.seat()["ai_disposition"]["applied"] is False
+    assert ai.seat()["ai_disposition"]["reason"] == "not here"
+
+
+@pytest.mark.parametrize("ends", ["failed", "cancelled"])
+def test_a_task_that_does_not_complete_records_nothing(ends: str) -> None:
+    ai, subject = _Lifecycle(ends=ends), _Subject()
+    _, published = _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "x"},
+                          subject)
+
+    assert subject.accepted == [] and "ai_disposition" not in ai.seat() and published == 0
+
+
+def test_a_task_with_no_destination_records_nothing() -> None:
+    ai, subject = _Lifecycle(), _Subject()
+    _asked(ai, {"command": "ai", "task_key": "analyze_data", "text": "how many"}, subject)
+
+    assert subject.accepted == [] and "ai_disposition" not in ai.seat()
+
+
+def test_the_task_the_ai_chose_is_the_one_disposed_of() -> None:
+    ai = _Lifecycle(chose="comment_code")
+    _asked(ai, {"command": "ai", "text": "x"})
+
+    assert ai.calls[0]["task_key"] == ""
+    assert ai.seat()["ai_disposition"]["task_key"] == "comment_code"
+
+
+def test_a_new_run_clears_the_previous_disposition_first() -> None:
+    ai = _Lifecycle()
+    _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "x"})
+    ai.ends = "failed"
+
+    _, published = _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "y"})
+
+    # Cleared and published before the run, so it is never read as this run's.
+    assert "ai_disposition" not in ai.seat() and published == 1
+
+
+def test_a_refusal_is_answered_on_its_request_and_nothing_runs(_quiet: None) -> None:
+    ai = _Lifecycle()
+    emitted, published = _asked(ai, {"command": "ai", "task_key": "comment_code"},
+                                _Subject(refuses_input=True))
+
+    assert emitted == [{"error": "Enter what you want.", "command": "ai", "request_id": "r1"}]
+    assert ai.calls == [] and published == 0
+
+
+def test_a_refused_call_is_answered_on_its_request(_quiet: None) -> None:
+    ai = _Lifecycle(refuses=AIRequestError("AI task 'x' is not available."))
+    emitted, _ = _asked(ai, {"command": "ai", "task_key": "x", "text": "y"})
+
+    assert emitted == [{"error": "AI task 'x' is not available.", "command": "ai",
+                        "request_id": "r1"}]
+
+
+def test_a_subject_with_no_reference_is_run_without_one_or_a_route_back() -> None:
+    ai = _Lifecycle()
+    _asked(ai, {"command": "ai", "task_key": "comment_code", "text": "x"},
+           _Subject(reference={}), coordinates={"connection": "holder"})
+
+    assert ai.calls[0]["subject_reference"] is None and ai.calls[0]["coordinates"] is None
+
+
+def test_the_conversation_is_read_for_the_subject(_quiet: None) -> None:
+    ai = _Lifecycle()
+    emitted, _ = _asked(ai, {"command": "ai_conversation"})
+    assert emitted == [{"ai_conversation": {"subject": {"kind": "views", "name": "v"}},
+                        "request_id": "r1"}]
+
+    refused, _ = _asked(ai, {"command": "ai_conversation"}, _Subject(reference={}))
+    assert refused[0]["command"] == "ai_conversation"
+    assert "no AI conversation" in refused[0]["error"]
+
+
+@pytest.mark.parametrize("parent, origin", [
+    ("none", None),
+    (9, {"run_id": 1, "parent_run_log_id": 9}),
+    (None, None),
+], ids=["no-run", "nested", "top-level"])
+def test_the_origin_is_the_runs_place_and_never_a_made_up_parent(parent: Any,
+                                                                 origin: Any) -> None:
+    run_log = None if parent == "none" else _Place(parent)
+    assert ApplicationAI.origin(run_log) == origin
+
+
+def test_running_to_the_end_returns_the_ended_projection_and_observes_each_message() -> None:
+    ai, seen = _Lifecycle(), []
+    ended = ai.run_to_end(object(), "comment_code", "x", observe=seen.append)
+
+    assert ended is not None and ended["status"] == "completed" and ended["run_id"] == 42
+    assert len(seen) == 3
+
+
+def test_running_to_the_end_answers_a_refusal_as_failed() -> None:
+    class _Refused(_Lifecycle):
+        def call(self, runtime: Any, task_key: str, text: str, relay: Any,
+                 context: Any = None, origin: Any = None, **_: Any) -> None:
+            relay({"error": "the engine refused"})
+
+    assert _Refused().run_to_end(object(), "comment_code", "x") == {
+        "status": "failed", "error": "the engine refused"}
+
+
+def test_running_to_the_end_gives_up_when_the_wait_passes_or_an_application_stops() -> None:
+    ai = _Lifecycle()
+    ai.silent = True
+
+    assert ai.run_to_end(object(), "comment_code", "x", wait_seconds=0.05) is None
+    assert ai.run_to_end(object(), "comment_code", "x", alive=lambda: False) is None

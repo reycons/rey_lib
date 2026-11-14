@@ -30,9 +30,10 @@ from __future__ import annotations
 import json
 
 import threading
+import time
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from rey_lib.ai.errors import AIConfigurationError, AIRequestError, AIUnavailableError
 from rey_lib.artifacts.envelope import permitted_artifact_types
@@ -41,12 +42,16 @@ from rey_lib.logs import AppLogger
 from rey_lib.run.app_channel import IO_REQUEST_SECONDS
 from rey_lib.run.app_transports import Answerer, AppTransport, AppTransports
 
-__all__ = ["AIAcceptance", "ApplicationAI", "Relay"]
+__all__ = ["AIAcceptance", "ApplicationAI", "ApplicationAISubject", "Relay"]
 
 logger = AppLogger(__name__)
 
 #: Where one task's messages go: the calling application's own channel.
 Relay = Callable[[dict[str, Any]], None]
+
+#: How often a wait for a task's ending asks whether the applications it depends on
+#: are still running (``ApplicationAI.run_to_end``).
+_ALIVE_POLL_SECONDS = 1.0
 
 #: ai_app's published serve, and the governed AI subject it opens: the
 #: installation's one live AI.
@@ -83,6 +88,36 @@ class AIAcceptance:
     accepted: bool
     text: str = ""
     reason: str = ""
+
+
+class ApplicationAISubject(Protocol):
+    """What an application supplies for its AI: its subject, its context, its input
+    and its handling of accepted output (#1369).
+
+    The application implements it over its own live object. It owns none of the AI
+    lifecycle: ``ApplicationAI.answer`` runs that, asking the application only these.
+    """
+
+    def subject_reference(self) -> Optional[Mapping[str, Any]]:
+        """The governed subject the AI's task and conversation are about; None for none."""
+
+    def context(self) -> Optional[Mapping[str, Any]]:
+        """What the live object holds now, given beside the task's input; None for none."""
+
+    def default_input(self, task_key: str) -> str:
+        """The task's input when the command gives no text.
+
+        Raises:
+            AppError: When the application has no input to give ``task_key``:
+                refused before anything launches.
+        """
+
+    def accept(self, destination: str, text: str) -> AIAcceptance:
+        """Apply an accepted artifact to ``destination``, or say why not.
+
+        Called only for an artifact the governed declaration accepts for
+        ``destination``; whether and how it is applied is the application's.
+        """
 
 
 class ApplicationAI:
@@ -129,6 +164,10 @@ class ApplicationAI:
         self._opened = threading.Event()
         # Where each held task's messages go, by the object id ai_app holds it under.
         self._relays: dict[str, Relay] = {}
+        # The application's decision about the last completed task's output, where it
+        # made one: {task_key, run_id, applied, reason}. Never the task's status,
+        # which is the AITask's own.
+        self._disposition: dict[str, Any] | None = None
 
     @classmethod
     def at_load(cls, control: Any, installation: str, installation_id: int | None,
@@ -374,6 +413,177 @@ class ApplicationAI:
         transport.send({"command": "edit", "object": object_id, "changes": changes})
         transport.send({"command": "run", "object": object_id,
                         **({"coordinates": dict(coordinates)} if coordinates is not None else {})})
+
+    def seat(self) -> dict[str, Any]:
+        """This application's AI facts, for its projection (#1369).
+
+        ``ai_tasks`` and ``ai_engines`` where it has tasks, and ``ai_disposition``
+        where it decided about a completed task's output. Nothing where neither.
+        """
+        seat: dict[str, Any] = {}
+        if self._task_keys:
+            seat["ai_tasks"] = list(self._task_keys)
+            # The engines the reader may choose to run this session's AI on, the
+            # installation's default first (#1341).
+            seat["ai_engines"] = list(self._engines)
+        with self._guard:
+            if self._disposition is not None:
+                seat["ai_disposition"] = dict(self._disposition)
+        return seat
+
+    def answer(self, runtime: Any, command: Mapping[str, Any], emit: Relay,
+               subject: ApplicationAISubject, publish: Callable[[], None],
+               run_log: Any = None, coordinates: Mapping[str, Any] | None = None) -> None:
+        """Answer one ``ai`` or ``ai_conversation`` command the application received.
+
+        ``ai``: the task's input is the command's ``text``, else the subject's
+        ``default_input``; beside it go the subject's ``context``, its
+        ``subject_reference`` -- with ``coordinates``, the route back to it, where it
+        names one -- and this run's ``origin``. The previous disposition is cleared
+        first, so it is never read as this run's. Every message ai_app emits about
+        the task goes to ``emit`` as ``{"ai": <the message>, "request_id"}``. When the
+        task completes with an answer its governed declaration gives a destination,
+        the answer is offered to the subject (``accept``) only if ``acceptance``
+        accepts it, the application's decision is recorded as ``ai_disposition`` and
+        ``publish`` is called. A task with no destination, or one that ends
+        otherwise, records nothing: its status is the AITask's.
+
+        ``ai_conversation``: the AI's conversation about the subject, read
+        (``conversation``), as ``{"ai_conversation", "request_id"}``.
+
+        A refusal is reported once and answered ``{"error", "command",
+        "request_id"}``. Blocks only for the opening; call it off the thread reading
+        commands.
+        """
+        name = str(command.get("command") or "")
+        request_id = command.get("request_id")
+        try:
+            if name == "ai_conversation":
+                reference = subject.subject_reference()
+                if not reference:
+                    raise AIRequestError("This application has no AI conversation to read.")
+                emit({"ai_conversation": self.conversation(runtime, reference),
+                      "request_id": request_id})
+                return
+            if name != "ai":
+                raise AIRequestError(f"An application's AI answers ai and ai_conversation, "
+                                     f"not {name!r}.")
+            task_key = str(command.get("task_key") or "")
+            text = str(command.get("text") or "") or subject.default_input(task_key)
+            reference = subject.subject_reference()
+            with self._guard:
+                cleared, self._disposition = self._disposition is not None, None
+            if cleared:
+                publish()
+
+            def relay(message: dict[str, Any]) -> None:
+                emit({"ai": message, "request_id": request_id})
+                self._disposed(message, task_key, subject, publish)
+
+            # The engine the reader chose for the session, where one is; with no task
+            # named, the application's AI chooses the task (#1341).
+            self.call(runtime, task_key, text, relay, context=subject.context(),
+                      origin=self.origin(run_log),
+                      engine=str(command.get("engine") or "") or None,
+                      **({"subject_reference": dict(reference)} if reference else {}),
+                      **({"coordinates": dict(coordinates)}
+                         if reference and coordinates is not None else {}))
+        except AppError as refusal:
+            # Answered to the application's launcher, so reported here (rule 79).
+            refusal.report(f"ApplicationAI: {name}", source=__name__)
+            emit({"error": str(refusal), "command": name, "request_id": request_id})
+
+    def _disposed(self, message: Mapping[str, Any], task_key: str,
+                  subject: ApplicationAISubject, publish: Callable[[], None]) -> None:
+        """Record the application's decision about a completed task's output, if any.
+
+        Only the task's own completed projection is acted on; the task that ran is
+        the one it names (the one asked, or the one chosen, #1341). A task with no
+        destination records nothing.
+        """
+        projection = message.get("projection")
+        if not isinstance(projection, Mapping) or projection.get("status") != "completed":
+            return
+        ran = str(projection.get("task_key") or task_key)
+        destination = self.destination_of(ran)
+        if destination is None:
+            return
+        delivered = self.acceptance(destination, projection.get("answer"))
+        if delivered.accepted:
+            delivered = subject.accept(destination, delivered.text)
+        with self._guard:
+            self._disposition = {"task_key": ran, "run_id": projection.get("run_id"),
+                                 "applied": delivered.accepted,
+                                 "reason": None if delivered.accepted else delivered.reason}
+        publish()
+
+    @staticmethod
+    def origin(run_log: Any) -> dict[str, Any] | None:
+        """This run's place for the task's evidence (#1305), or None where it has none.
+
+        A run at its top level has no record to parent the task's evidence to, and an
+        origin naming none is refused before the task runs; then no origin is sent,
+        and ai_app records the evidence under its own run (#1323). No parent is ever
+        made up.
+        """
+        if run_log is None:
+            return None
+        place = run_log.parent_context()
+        if place.get("run_id") in (None, "") or place.get("parent_run_log_id") in (None, ""):
+            return None
+        return place
+
+    def run_to_end(self, runtime: Any, task_key: str, text: str, *,
+                   context: Mapping[str, Any] | None = None,
+                   origin: Mapping[str, Any] | None = None,
+                   subject_reference: Mapping[str, Any] | None = None,
+                   coordinates: Mapping[str, Any] | None = None,
+                   wait_seconds: float | None = None,
+                   observe: Relay | None = None,
+                   alive: Callable[[], bool] | None = None) -> dict[str, Any] | None:
+        """Run one task (``call``) and wait for it to end; how it ended.
+
+        Returns the task's own ended projection, or ``{"status": "failed", "error"}``
+        for a refusal ai_app answered. Each message also goes to ``observe``, where
+        given. Returns None when no ending was heard: ``wait_seconds`` passed, or --
+        where ``alive`` is given -- this AI's application or one ``alive`` answers for
+        stopped running.
+
+        Raises:
+            AIRequestError: As ``call`` refuses.
+            AIUnavailableError: When ai_app cannot be launched or does not attach.
+        """
+        ended = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def relay(message: dict[str, Any]) -> None:
+            if "error" in message and "projection" not in message:
+                outcome.update(status="failed", error=str(message.get("error") or ""))
+                ended.set()
+            else:
+                projection = message.get("projection")
+                if isinstance(projection, Mapping) and \
+                        str(projection.get("status") or "") not in ("", "idle", "running"):
+                    outcome.update(projection)
+                    ended.set()
+            if observe is not None:
+                observe(message)
+
+        self.call(runtime, task_key, text, relay, context=context, origin=origin,
+                  **({"subject_reference": subject_reference}
+                     if subject_reference is not None else {}),
+                  **({"coordinates": coordinates} if coordinates is not None else {}))
+        deadline = None if wait_seconds is None else time.monotonic() + wait_seconds
+        while not ended.is_set():
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                return None
+            poll = left if alive is None else min(_ALIVE_POLL_SECONDS, left or _ALIVE_POLL_SECONDS)
+            if ended.wait(poll):
+                break
+            if alive is not None and (self.ended() or not alive()):
+                return None
+        return dict(outcome)
 
     def answer_requests(self, answer: Answerer) -> str:
         """Answer, as this application, what the ai_app it launches asks of its live object.
