@@ -226,6 +226,7 @@ class CollectionDataObject:
         node_type = str(entry.get("node_type") or "") or _MEMBER_TYPE[collection]
         return {
             "row_type": "node",
+            "source_id": {"collection": collection, "id": entry["id"]},
             # What the member published, or what its collection's members are:
             # a published node type is the member's own (backlog 1098).
             "node_type": node_type,

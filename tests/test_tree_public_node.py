@@ -47,3 +47,28 @@ def test_a_public_node_is_plain_json() -> None:
 
 def test_a_field_the_record_lacks_is_stated_as_absent() -> None:
     assert public_node({"node_key": "1:1"})["tone"] is None
+
+
+def test_source_identity_is_internal_and_keys_never_target_a_different_entity_after_refresh():
+    from rey_lib.tree import TreeProjection
+    projection = TreeProjection()
+    root = {'node_key': 'root'}
+    projection.seed([root])
+    before = projection.append([{'source_id': 'a', 'node_type': 'item', 'label': 'A'}], 'root')[0]
+    projection.seed([root])
+    after = projection.append([{'source_id': 'b', 'node_type': 'item', 'label': 'B'}], 'root')[0]
+    assert before['node_key'] != after['node_key']
+    assert projection.record(before['node_key']) is None
+    assert 'source_id' not in public_node(after)
+    projection.seed([root])
+    again = projection.append([{'source_id': 'a', 'node_type': 'item', 'label': 'Renamed'}], 'root')[0]
+    assert again['node_key'] == before['node_key']
+
+
+def test_an_unidentified_generated_key_is_not_recycled_after_seed():
+    from rey_lib.tree import TreeProjection
+    projection = TreeProjection()
+    first = projection.append([{'label': 'A'}], 'root')[0]['node_key']
+    projection.seed([{'node_key': 'root'}])
+    second = projection.append([{'label': 'B'}], 'root')[0]['node_key']
+    assert first != second

@@ -13,6 +13,7 @@ records rather than reading them as persisted.
 from __future__ import annotations
 
 __all__ = [
+    "LIVE_OBJECTS_SOURCE",
     "APPLICATION_SOURCE",
     "DATABASE_SOURCE",
     "DECLARED_SOURCES",
@@ -21,6 +22,7 @@ __all__ = [
     "TOOL_SOURCE",
 ]
 
+LIVE_OBJECTS_SOURCE = "live_objects"
 FOLDER_SOURCE = "folder"
 DATABASE_SOURCE = "database"
 JSONL_SOURCE = "jsonl"
@@ -30,4 +32,5 @@ TOOL_SOURCE = "tools"
 #: Every declared non-persisted source.
 DECLARED_SOURCES = frozenset({
     FOLDER_SOURCE, DATABASE_SOURCE, JSONL_SOURCE, APPLICATION_SOURCE, TOOL_SOURCE,
+    LIVE_OBJECTS_SOURCE,
 })

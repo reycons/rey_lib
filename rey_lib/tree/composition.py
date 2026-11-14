@@ -21,7 +21,7 @@ and is refused when absent rather than left blank.
 
 from __future__ import annotations
 
-from typing import Any, Final, Mapping
+from typing import Any, Callable, Final, Mapping
 
 from rey_lib.errors.error_utils import ConfigError
 import rey_lib.tree as _tree
@@ -148,6 +148,8 @@ def tree_children(
     projection: Any = None,
     fresh: bool = False,
     assemble: Assemble | None = None,
+    *,
+    source_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The enabled children of one node, whatever its source.
 
@@ -168,7 +170,8 @@ def tree_children(
     Returns:
         The enabled children, in the order their source gave them.
     """
-    traversal = TreeTraversal(persisted_tree(), _tree.rey_lib_sources())
+    sources = _tree.rey_lib_sources(source_request) if source_request is not None else _tree.rey_lib_sources()
+    traversal = TreeTraversal(persisted_tree(), sources)
     return [
         child for child in traversal.children(ctx, record, projection, fresh, assemble)
         if _true(child.get("is_enabled"))

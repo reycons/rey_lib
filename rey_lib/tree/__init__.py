@@ -18,8 +18,9 @@ browser (rey_bff), and drawing the Tree (rey_console).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
+from rey_lib.tree.live_objects import LiveObjectsDataObject
 from rey_lib.tree.collection import CollectionDataObject
 from rey_lib.tree.composition import RUNTIME_BINDINGS, tree_children, tree_group_selection, tree_groups, tree_roots
 from rey_lib.tree.database import DatabaseDataObject
@@ -50,6 +51,7 @@ from rey_lib.tree.persisted import (
 )
 from rey_lib.tree.projection import PUBLIC_NODE_FIELDS, TreeProjection, public_node
 from rey_lib.tree.sources import (
+    LIVE_OBJECTS_SOURCE,
     APPLICATION_SOURCE,
     DATABASE_SOURCE,
     DECLARED_SOURCES,
@@ -60,7 +62,7 @@ from rey_lib.tree.sources import (
 from rey_lib.tree.traversal import TreeTraversal
 
 
-def rey_lib_sources() -> dict[str, Any]:
+def rey_lib_sources(source_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
     """The declared tree sources rey_lib implements, by name (backlog 1056, D3).
 
     The one statement of which sources have crossed into rey_lib: a consumer
@@ -70,6 +72,7 @@ def rey_lib_sources() -> dict[str, Any]:
     """
     collections = CollectionDataObject()
     return {
+        LIVE_OBJECTS_SOURCE: LiveObjectsDataObject(source_request),
         FOLDER_SOURCE: FileDataObject(),
         DATABASE_SOURCE: DatabaseDataObject(),
         JSONL_SOURCE: JsonlDataObject(),
@@ -81,6 +84,8 @@ def rey_lib_sources() -> dict[str, Any]:
 
 
 __all__ = [
+    "LIVE_OBJECTS_SOURCE",
+    "LiveObjectsDataObject",
     "APPLICATION_SOURCE",
     "CollectionDataObject",
     "DATABASE_SOURCE",

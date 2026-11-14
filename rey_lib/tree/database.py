@@ -451,6 +451,7 @@ class DatabaseDataObject:
         """
         return {
             "row_type": "node",
+            "source_id": self._addressed(configured, entry, collection),
             "node_type": _MEMBER_TYPE.get(collection, collection),
             "label": self._object_label(entry) + suffix,
             # No longer terminal: an object offers what it depends on and what
@@ -908,6 +909,7 @@ class DatabaseDataObject:
         """
         return {
             "row_type": "node",
+            "source_id": configuration,
             "node_type": node_type,
             "label": label,
             "has_children": True,

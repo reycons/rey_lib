@@ -268,6 +268,7 @@ def test_refresh_is_offered_at_the_configured_root_only(asked) -> None:
 
 
 def test_rey_lib_implements_the_folder_source() -> None:
+    from rey_lib.tree.sources import LIVE_OBJECTS_SOURCE
     sources = rey_lib_sources()
 
     # The exact set: a source rey_lib starts implementing must be added here on
@@ -275,6 +276,7 @@ def test_rey_lib_implements_the_folder_source() -> None:
     # applications and tools #1059).
     assert set(sources) == {
         FOLDER_SOURCE, DATABASE_SOURCE, JSONL_SOURCE, APPLICATION_SOURCE, TOOL_SOURCE,
+        LIVE_OBJECTS_SOURCE,
     }
     assert isinstance(sources[FOLDER_SOURCE], FileDataObject)
 

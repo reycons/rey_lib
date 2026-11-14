@@ -148,6 +148,7 @@ class FileDataObject:
         directory = str(entry.get("kind") or "") == FOLDER_SOURCE
         return {
             "row_type": "node",
+            "source_id": {"root": root, "path": entry.get("path")},
             # Its icon is its node type's alias (#1326).
             "node_type": _FOLDER_TYPE if directory else _FILE_TYPE,
             "label": entry.get("label"),

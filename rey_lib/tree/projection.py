@@ -31,6 +31,8 @@ group; an AI inspection run holds one for as long as it runs.
 
 from __future__ import annotations
 
+import json
+
 from typing import Any, Iterable
 
 __all__ = ["PUBLIC_NODE_FIELDS", "TreeProjection", "public_node"]
@@ -52,6 +54,7 @@ PUBLIC_NODE_FIELDS = (
     "has_children",
     "is_enabled",
     "selectable",
+    "selected",
     "text_click",
     "buttons",
     "panel_controls",
@@ -79,6 +82,7 @@ class TreeProjection:
     def __init__(self) -> None:
         self._records: dict[str, dict[str, Any]] = {}
         self._minted = 0
+        self._source_keys: dict[tuple[str, str, str], str] = {}
         self._source_state: dict[str, Any] = {}
 
     def seed(self, rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -89,7 +93,8 @@ class TreeProjection:
         not an addition to the old one.
         """
         self._records = {}
-        self._minted = 0
+        # A refresh is still the same reader. Never recycle a generated key
+        # for another entity while an old click may still be in flight.
         self._source_state = {}
         held = [dict(row) for row in rows]
         for record in held:
@@ -141,14 +146,26 @@ class TreeProjection:
         created keeps the key it was created with even as siblings arrive beside
         it.
 
-        Composed here and nowhere else, and read nowhere at all: parentage is
-        written as its own field below rather than recovered from the key.
+        A source may declare its existing JSON-compatible ``source_id``. Its
+        occurrence under this parent keeps its key across reorder, rename and
+        refresh. That identity stays internal; it is never a Tree node key.
+
+        Composed here and nowhere else: parentage is explicit, never parsed.
         """
         held: list[dict[str, Any]] = []
         for record in records:
-            self._minted += 1
             made = dict(record)
-            made["node_key"] = f"{parent_key}:{self._minted}"
+            source_id = record.get("source_id")
+            identity = ((parent_key, str(record.get("node_type") or ""),
+                         json.dumps(source_id, sort_keys=True, separators=(",", ":")))
+                        if source_id is not None else None)
+            key = self._source_keys.get(identity) if identity is not None else None
+            if key is None:
+                self._minted += 1
+                key = f"{parent_key}:{self._minted}"
+                if identity is not None:
+                    self._source_keys[identity] = key
+            made["node_key"] = key
             made["parent_node_key"] = parent_key
             self._records[made["node_key"]] = made
             held.append(made)

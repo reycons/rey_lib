@@ -194,6 +194,8 @@ class JsonlDataObject:
             },
             **row,
             "row_type": "node",
+            **({"source_id": row[str(declared["id_field"])]}
+               if declared.get("id_field") and str(declared["id_field"]) in row else {}),
             "node_type": str(self._declared(row, declared, "node_type_field") or ""),
             "label": str(row.get(str(declared["label_field"])) or ""),
             # No icon: a record's icon is its node type's alias (#1326).
