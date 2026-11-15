@@ -325,7 +325,7 @@ class TestTheLiveQuery:
         assert executor.asked == [("execute_page", connection.handed[0], "SELECT 1", {
             "offset": 20, "limit": 10, "order_by": order_by, "filters": None,
         })]
-        assert answer == {
+        assert {k: v for k, v in answer.items() if k not in ("output", "statistics")} == {
             "pageable": True,
             "columns": [{"name": "a"}, {"name": "doc", "kind": "document"}],
             # The provider's own values: making them JSON-safe is the sending boundary's.
@@ -360,7 +360,7 @@ class TestTheLiveQuery:
 
         assert executor.asked[0][0] == "execute_statements"
         assert executor.asked[0][3] == {"limit": module.RESULT_ROW_LIMIT}
-        assert answer == {
+        assert {k: v for k, v in answer.items() if k not in ("output", "statistics")} == {
             "pageable": False,
             "results": [
                 {"columns": [{"name": "a"}], "rows": [{"a": 1}], "row_count": 1,
@@ -369,6 +369,47 @@ class TestTheLiveQuery:
             ],
             "row_limit": 1_000,
         }
+
+    def test_execution_content_describes_actual_results_without_another_execution(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Executor(results=[StatementResult(columns=[], rows=[], row_count=3),
+                                     StatementResult(columns=["a"], rows=[{"a": 1}])])
+        monkeypatch.setattr(module, "_adapter", lambda _: executor)
+        ticks = iter([1.0, 1.125])
+        monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks))
+        query = DatabaseQuery("the caller's text", connection=_Connection(), pageable=False)
+
+        answer = query.execute()
+
+        assert answer["output"]["text"] == "Result 1: 3 rows affected.\nResult 2: 1 rows returned."
+        assert answer["output"]["language"] == "text"
+        assert len(answer["statistics"]) == 2
+        assert "Execution time (all results): 125.000 ms" in answer["statistics"][0]["text"]
+        assert "Rows affected: 3" in answer["statistics"][0]["text"]
+        assert "Rows affected: not reported" in answer["statistics"][1]["text"]
+        assert query.projection()["result"] is answer
+        assert len(executor.asked) == 1
+
+    def test_failed_execution_replaces_successful_result_without_swallowing_the_failure(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Executor(results=[StatementResult(columns=["a"], rows=[{"a": 1}])])
+        monkeypatch.setattr(module, "_adapter", lambda _: executor)
+        query = DatabaseQuery("the caller's text", connection=_Connection(), pageable=False)
+        query.execute()
+        failure = DatabaseError("database refused this run")
+        executor.raises = failure
+
+        with pytest.raises(DatabaseError) as raised:
+            query.execute()
+
+        assert raised.value is failure
+        result = query.projection()["result"]
+        assert result["results"] == []
+        assert result["output"]["text"] == str(failure)
+        assert "Execution failed." in result["statistics"][0]["text"]
+        assert len(executor.asked) == 2
 
     @pytest.mark.parametrize("query, refusal", [
         (DatabaseQuery("SELECT 1"), "bound to no connection"),

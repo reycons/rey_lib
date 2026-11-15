@@ -632,8 +632,8 @@ class Source:
                        if self._query_save_ctx is not None else {}),
                     **({"result": self._query_result} if self._query_result is not None else {})}
 
-    def remember_query_result(self, result: dict[str, Any]) -> None:
-        """Keep this Source's last query answer while the Source remains live."""
+    def remember_query_result(self, result: Optional[dict[str, Any]]) -> None:
+        """Keep this Source's query answer, including failure Content, while it lives."""
         with self._acting:
             self._query_result = result
 

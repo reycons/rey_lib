@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
 from rey_lib.errors.error_utils import AppError, DatabaseError
+from rey_lib.content import Content
 
 if TYPE_CHECKING:
     from rey_lib.db.connection import Connection
@@ -385,48 +387,96 @@ class DatabaseQuery:
                 provider cannot page this text.
         """
         with self._acting:
-            if self.connection is None:
-                raise DatabaseError("DatabaseQuery is bound to no connection.")
-            written = self.text()
-            if not written.strip():
-                raise DatabaseError("DatabaseQuery has no statement to execute.")
-            handle = self.connection.handle()
-            as_written = DatabaseQuery(written)
-            if self.pageable:
-                page = as_written.page(
-                    handle,
-                    offset=int(self.current_page) * int(self.rows_per_page),
-                    limit=int(self.rows_per_page),
-                    order_by=list(self.order_by) or None,
-                    filters=list(self.filters) or None,
-                )
+            started = time.monotonic()
+            self._result = None
+            try:
+                self._result = self._execute_result()
+            except AppError as failure:
                 self._result = {
-                    "pageable": True,
-                    "columns": _columns(page.columns, page.column_kinds),
-                    "rows": list(page.rows),
-                    "total_row_count": page.total_row_count,
-                    "offset": page.offset,
-                    "limit": page.limit,
-                    "next_offset": page.next_offset,
-                    **({"max_page_size": page.max_page_size}
-                       if page.max_page_size is not None else {}),
+                    "pageable": False, "results": [],
+                    "output": Content("Output", str(failure), "text").projection()["content"],
+                    "statistics": [Content("Execution", (
+                        f"Execution failed.\nElapsed time: {(time.monotonic() - started) * 1000:.3f} ms"
+                    ), "text").projection()["content"]],
                 }
-                return self._result
-            results = as_written.run(handle, limit=RESULT_ROW_LIMIT)
-            self._result = {
-                "pageable": False,
-                "results": [
-                    {
-                        "columns": _columns(result.columns, result.column_kinds),
-                        "rows": list(result.rows),
-                        "row_count": result.row_count,
-                        "at_row_limit": len(result.rows) >= RESULT_ROW_LIMIT,
-                    }
-                    for result in results
-                ],
-                "row_limit": RESULT_ROW_LIMIT,
-            }
+                raise
+            self._result.update(self._execution_content((time.monotonic() - started) * 1000))
             return self._result
+
+    def _execute_result(self) -> dict[str, Any]:
+        """The existing run/page operation, while this query's act is held."""
+        if self.connection is None:
+            raise DatabaseError("DatabaseQuery is bound to no connection.")
+        written = self.text()
+        if not written.strip():
+            raise DatabaseError("DatabaseQuery has no statement to execute.")
+        handle = self.connection.handle()
+        as_written = DatabaseQuery(written)
+        if self.pageable:
+            page = as_written.page(
+                handle,
+                offset=int(self.current_page) * int(self.rows_per_page),
+                limit=int(self.rows_per_page),
+                order_by=list(self.order_by) or None,
+                filters=list(self.filters) or None,
+            )
+            return {
+                "pageable": True,
+                "columns": _columns(page.columns, page.column_kinds),
+                "rows": list(page.rows),
+                "total_row_count": page.total_row_count,
+                "offset": page.offset,
+                "limit": page.limit,
+                "next_offset": page.next_offset,
+                **({"max_page_size": page.max_page_size}
+                   if page.max_page_size is not None else {}),
+            }
+        results = as_written.run(handle, limit=RESULT_ROW_LIMIT)
+        return {
+            "pageable": False,
+            "results": [
+                {
+                    "columns": _columns(result.columns, result.column_kinds),
+                    "rows": list(result.rows),
+                    "row_count": result.row_count,
+                    "at_row_limit": len(result.rows) >= RESULT_ROW_LIMIT,
+                }
+                for result in results
+            ],
+            "row_limit": RESULT_ROW_LIMIT,
+        }
+
+    def _execution_content(self, elapsed_ms: float) -> dict[str, Any]:
+        """Describe only facts this execution established, using canonical Content."""
+        result = self._result
+        assert result is not None
+        summaries = []
+        statistics = []
+        results = [result] if result["pageable"] else result["results"]
+        for at, one in enumerate(results, 1):
+            facts = [f"Execution time (all results): {elapsed_ms:.3f} ms",
+                     f"Rows returned: {len(one['rows'])}"]
+            summary = f"Result {at}: {len(one['rows'])} rows returned."
+            if result["pageable"]:
+                total = one["total_row_count"]
+                facts.extend([f"Total rows: {total if total is not None else 'not reported'}",
+                              f"Page offset: {one['offset']}", f"Page size: {one['limit']}"])
+            else:
+                count = one["row_count"]
+                facts.append(f"Rows affected: {count if count is not None else 'not reported'}")
+                if not one["columns"]:
+                    summary = (f"Result {at}: {count} rows affected." if count is not None
+                               else f"Result {at}: completed; affected row count not reported.")
+                if one["at_row_limit"]:
+                    facts.append(f"Row limit reached: {RESULT_ROW_LIMIT}; more rows unknown")
+                    summary += f" Row limit reached ({RESULT_ROW_LIMIT}); more rows unknown."
+            summaries.append(summary)
+            statistics.append(Content(f"Result {at}", "\n".join(facts), "text").projection()["content"])
+        return {
+            "output": Content("Output", "\n".join(summaries) or "Execution completed.",
+                              "text").projection()["content"],
+            "statistics": statistics,
+        }
 
     # -- the four ways to run -------------------------------------------------
 
