@@ -422,6 +422,8 @@ class TestAnAppErrorIsOneErrorRecord:
         assert line["level"] == logging.getLevelName(level)
         assert "the transform could not be created" in row["message"]
         assert row["error_message"]["error_type"] == "_Refused"
+        # The error's own text, not the log line's.
+        assert row["error_message"]["error_message"] == "the transform could not be created"
         assert "the transform could not be created" in line["exception"]
 
 

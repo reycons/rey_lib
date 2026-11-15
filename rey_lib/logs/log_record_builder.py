@@ -220,6 +220,9 @@ class LogRecordBuilder:
             error_fields: dict[str, Any] = {"logger": record.name}
             if record.exc_info and record.exc_info[0] is not None:
                 error_fields["error_type"] = record.exc_info[0].__name__
+                # The error's own text, sanitized with the payload; the message is
+                # the operational context only.
+                error_fields["error_message"] = str(record.exc_info[1])
             if dump_stack_trace and exception is not None:
                 error_fields["sanitized_exception"] = exception
             built = build_error_record_payload(message=message, **error_fields)

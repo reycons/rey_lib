@@ -1088,9 +1088,12 @@ class AI:
                 if outcome.is_error:
                     if outcome.subtype == "error_max_turns":
                         raise AIExecutionError(f"AI task '{key}' reached a usage limit.")
+                    # The engine's own reason is its result text; it is the diagnosis.
+                    reason = f": {outcome.result}" if outcome.result else ""
                     raise AIProviderError(
                         f"The engine for AI task '{key}' refused or could not be reached "
-                        f"({outcome.subtype})."
+                        f"({outcome.subtype}){reason}",
+                        cause=outcome.result,
                     )
                 answer = (
                     outcome.structured_output

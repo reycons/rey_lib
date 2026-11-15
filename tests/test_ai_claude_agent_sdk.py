@@ -393,3 +393,18 @@ class TestFailures:
             _ai(_Sessions(fails=fails), monkeypatch).execute_task(task)
 
         assert task.status == AITask.FAILED
+
+    def test_a_refusal_keeps_the_engines_own_reason(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An error the engine reports as its result text is the diagnosis; it is kept."""
+        refused = ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=True, num_turns=1,
+            session_id="s", usage={}, result="Invalid API key · Please run /login",
+        )
+
+        with pytest.raises(AIProviderError) as raised:
+            _ai(_Sessions([refused]), monkeypatch).execute_task(_task())
+
+        assert "Invalid API key · Please run /login" in str(raised.value)
+        assert raised.value.cause == "Invalid API key · Please run /login"
