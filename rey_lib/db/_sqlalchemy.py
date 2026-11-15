@@ -89,13 +89,17 @@ class ReyConnection:
 
         Nothing is given back while a cursor is open on it or a transaction has
         been begun on it: those are the two ways a caller still holds it.
+
+        The session is closed back to the pool inside the guard (#1394): a checkout
+        (``_session``) waits on the guard, never on the pool for a session that is
+        being given back.
         """
         with self._guard:
             session = self._active
             if session is None or self._open_cursors > 0 or _has_transaction(session):
                 return None
             self._active = None
-        session.close()
+            session.close()
         return session
 
     def release_idle(self) -> bool:
@@ -104,10 +108,21 @@ class ReyConnection:
         Returns True when a session was ended. The Engine stays; the next
         operation checks a fresh session out. Never ends a session a cursor or
         a transaction still holds.
+
+        The give-back and the dispose are one step under the guard (#1394). A
+        checkout begun inside that step waited the pool's whole checkout bound
+        (30 s) for a session the dispose had already taken; now a checkout either
+        completes before the release or begins after it, on the fresh pool.
+
+        This coordinates checkout with release only. A statement executing on the
+        session (taken through ``core_connection``, used outside the guard) is not
+        tracked as holding it, so releasing while a statement runs is not made safe
+        here (#1394 limitation).
         """
-        if self._closed or self._give_back() is None:
-            return False
-        self._engine.dispose()
+        with self._guard:
+            if self._closed or self._give_back() is None:
+                return False
+            self._engine.dispose()
         return True
 
     def close(self) -> None:

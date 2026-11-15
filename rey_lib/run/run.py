@@ -64,7 +64,6 @@ the same parent reads.
 from __future__ import annotations
 
 import codecs
-import logging as _logging
 import contextlib
 import os
 import sys
@@ -244,9 +243,6 @@ class AppExecute:
         """
         if parent is not None:
             parent_run_id = parent.run_id
-        # TEMPORARY timing (user, 2026-11-04): step the 30 s before the manifest.
-        _t_start = time.monotonic()
-        _logging.getLogger(__name__).debug("run timing: AppExecute.start entered")
         run_id = control.create_run_manifest(
             subject_type=subject_type,
             subject_id=subject_id,
@@ -256,8 +252,6 @@ class AppExecute:
             settings=settings,
             required=True,
         )
-        _logging.getLogger(__name__).debug(
-            "run timing: create_run_manifest %.3fs", time.monotonic() - _t_start)
         run = cls(
             run_id=int(run_id),
             control=control,
