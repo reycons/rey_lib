@@ -137,6 +137,62 @@ class TestRehydration:
         assert dict(second.choices) == {}
         assert second.profile_key == "local_testing"
 
+    def test_a_cleared_turn_choice_takes_the_chosen_tasks_own_governed_budget(self) -> None:
+        """#1390: the Workbench's Default scope holds its max_turns as a choice; select_task
+        rehydrates into the chosen task with max_turns None, and that task's own row wins."""
+        ai, control = _ai(), _Control()
+        for row in control.configuration:
+            row["default_max_turns"] = 8
+            if row["task_key"] == "search_index":
+                # As ai.ai_installation_vw carries it: the task's own value, resolved.
+                row["task_max_turns"] = row["max_turns"] = 100
+        held = ai.hydrate_task(control, "local", task_key="explain", max_turns=8)
+
+        chosen = ai.rehydrate_task(control, held.id, {"task_key": "search_index",
+                                                      "max_turns": None})
+
+        assert held.max_turns == 8
+        assert chosen.max_turns == 100
+        assert "max_turns" not in dict(chosen.choices)
+
+    def test_an_explicit_session_turn_edit_for_the_chosen_task_is_kept(self) -> None:
+        """#1390 ruling 3: a max_turns the reader set in Settings for the chosen task, unsaved,
+        survives select_task's rebuild into that task."""
+        ai, control = _ai(), _Control()
+        for row in control.configuration:
+            row["default_max_turns"] = 8
+            if row["task_key"] == "search_index":
+                # As ai.ai_installation_vw carries it: the task's own value, resolved.
+                row["task_max_turns"] = row["max_turns"] = 100
+        held = ai.hydrate_task(control, "local", task_key="explain", max_turns=8)
+        ai.set_setting(control, "local", "search_index", "max_turns", 40)
+
+        chosen = ai.rehydrate_task(control, held.id, {"task_key": "search_index",
+                                                      "max_turns": None})
+
+        assert chosen.max_turns == 40
+
+    def test_a_default_scope_turn_edit_does_not_override_the_chosen_tasks_own_value(
+            self) -> None:
+        """A Default-scope edit is what every task inherits -- not a value for a task that
+        states its own, exactly as Settings shows that task's effective value."""
+        ai, control = _ai(), _Control()
+        for row in control.configuration:
+            row["default_max_turns"] = 8
+            if row["task_key"] == "search_index":
+                # As ai.ai_installation_vw carries it: the task's own value, resolved.
+                row["task_max_turns"] = row["max_turns"] = 100
+        held = ai.hydrate_task(control, "local", task_key="explain", max_turns=8)
+        ai.set_setting(control, "local", "default", "max_turns", 50)
+
+        chosen = ai.rehydrate_task(control, held.id, {"task_key": "search_index",
+                                                      "max_turns": None})
+        inheriting = ai.rehydrate_task(control, held.id, {"task_key": "explain",
+                                                          "max_turns": None})
+
+        assert chosen.max_turns == 100
+        assert inheriting.max_turns == 50
+
     def test_an_unchosen_value_follows_a_governed_change(self) -> None:
         ai, control = _ai(), _Control()
         first = ai.hydrate_task(control, "local", task_key="explain", temperature=0.5)

@@ -1416,6 +1416,16 @@ class AI:
             **current.choices,
             **{name: value for name, value in changes.items() if name in AITask.CHOICES},
         }
+        task_key = changes.get("task_key")
+        if task_key is not None and task_key != current.task_key:
+            # BECOMING ANOTHER TASK (#1390): a choice the caller cleared takes this
+            # session's unsaved edit for that task, as a new task does (#1191,
+            # hydrate_task); with no edit it stays cleared and the task's governed
+            # value applies.
+            for name, value in self._unsaved_choices(current.installation,
+                                                     str(task_key)).items():
+                if name in changes and changes[name] in ("", None):
+                    choices[name] = value
         facts = {name: changes.get(name, getattr(current, name)) for name in self._TASK_FACTS}
         task = AITask.from_governed(
             control, current.installation, task_id=current.id, **facts, **choices,
