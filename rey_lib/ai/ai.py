@@ -66,8 +66,10 @@ _CLAUDE_TOOL_SERVER = "rey"
 
 #: How many times a tool call the model got wrong is handed back to it.
 _MAX_TOOL_CORRECTIONS = 2
-#: How many times an answer that fails its contract is handed back to the model.
-_MAX_OUTPUT_CORRECTIONS = 0
+#: How many times an answer that fails its contract is handed back to the model, in
+#: the same session (#1396): one correction, so a formatting fault does not throw away
+#: a completed investigation; a second invalid answer fails.
+_MAX_OUTPUT_CORRECTIONS = 1
 
 #: The two representations a configured engine may be permitted to receive.
 _ACCESS_MODES = frozenset({"redacted", "unredacted"})

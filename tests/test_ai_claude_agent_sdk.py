@@ -247,6 +247,85 @@ class TestStructuredAndCorrection:
         assert task.status == AITask.FAILED
 
 
+#: The answer run 7322 gave (#1396): a valid envelope behind narration, in a code fence.
+_NARRATED = ("I have enough from my queries. Let me compose it.\n\n```json\n"
+             + enveloped("# Slides") + "\n```")
+
+
+def _envelope_result(raw: str) -> ResultMessage:
+    """A ResultMessage whose text answer is ``raw``, exactly as the model sent it."""
+    return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                         num_turns=1, session_id="s",
+                         usage={"input_tokens": 3, "output_tokens": 2}, result=raw)
+
+
+def _investigation() -> list[Any]:
+    """One tool call and its result, as the CLI reports them, before the answer."""
+    return [
+        AssistantMessage(content=[ToolUseBlock(id="t1", name="mcp__rey__run_query",
+                                               input={"sql": "select 1"})],
+                         model="claude-sonnet-4-6"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="1 row")]),
+    ]
+
+
+class TestEnvelopeCorrection:
+    """#1396: one correction of a malformed envelope, in the same session."""
+
+    def test_the_governed_allowance_is_one_correction(self) -> None:
+        assert ai_module._MAX_OUTPUT_CORRECTIONS == 1
+
+    def test_a_malformed_envelope_then_a_valid_one_completes_in_one_session(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sessions = _Sessions([*_investigation(), _envelope_result(_NARRATED)],
+                             [_envelope_result(enveloped("# Slides"))])
+        task = _task()
+
+        result = _ai(sessions, monkeypatch,
+                     corrections=ai_module._MAX_OUTPUT_CORRECTIONS).execute_task(task)
+
+        assert result.text == "# Slides"
+        assert task.status == AITask.COMPLETED
+        # One session: the correction is a second query in it, not a new run.
+        assert len(sessions.options) == 1 and len(sessions.queries) == 2
+        # What the model is told names the fault and what to return.
+        assert "Return only the JSON envelope: nothing before or after it, and no code " \
+               "fence around it." in sessions.queries[1]
+        # The investigation is not repeated: the one tool call, from the first answer.
+        assert [call.name for call in result.tool_calls] == ["run_query"]
+        # Both tries recorded: the refused one with its raw output, then the accepted one.
+        attempts = result.execution.attempts
+        assert [one.failed for one in attempts] == [True, False]
+        assert attempts[0].raw_output == _NARRATED
+        assert "Expected a JSON envelope" in attempts[0].error
+        assert attempts[1].raw_output == enveloped("# Slides")
+        assert result.output.raw == enveloped("# Slides")
+
+    def test_two_malformed_envelopes_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sessions = _Sessions([_envelope_result(_NARRATED)], [_envelope_result(_NARRATED)])
+        task = _task()
+
+        with pytest.raises(AIOutputError, match="satisfies its contract") as raised:
+            _ai(sessions, monkeypatch,
+                corrections=ai_module._MAX_OUTPUT_CORRECTIONS).execute_task(task)
+
+        assert task.status == AITask.FAILED
+        assert len(sessions.queries) == 2
+        assert [one.failed for one in raised.value.attempts] == [True, True]
+
+    def test_validation_is_unchanged_a_corrected_answer_must_still_be_an_envelope(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The correction is validated exactly as the first answer: prose is refused.
+        sessions = _Sessions([_envelope_result(_NARRATED)],
+                             [_envelope_result("Here are your slides.")])
+
+        with pytest.raises(AIOutputError):
+            _ai(sessions, monkeypatch,
+                corrections=ai_module._MAX_OUTPUT_CORRECTIONS).execute_task(_task())
+
+
 class TestEvents:
     def test_sdk_messages_are_told_as_canonical_events(
         self, monkeypatch: pytest.MonkeyPatch,

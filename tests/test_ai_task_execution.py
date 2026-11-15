@@ -268,3 +268,90 @@ def test_pydantic_execution_receives_the_task_budget(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(Agent, "run_sync", run)
     _ai(_Engine(enveloped("ready")), monkeypatch).execute_task(_task(max_turns=limit))
     assert observed == [limit]
+
+
+#: The answer run 7322 gave (#1396): a valid envelope behind narration, in a code fence.
+_NARRATED = ("I have enough from my queries. Let me compose it.\n\n```json\n"
+             + enveloped("# Slides") + "\n```")
+
+
+class _Investigating:
+    """A FunctionModel that calls a tool once, then answers in turn (#1396)."""
+
+    def __init__(self, *answers: str) -> None:
+        self._answers = list(answers)
+        self.requests = 0
+        self.retry_prompts: list[str] = []
+        self.model = FunctionModel(self._answer)
+
+    def _answer(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        self.requests += 1
+        for part in messages[-1].parts:
+            if type(part).__name__ == "RetryPromptPart":
+                self.retry_prompts.append(str(part.content))
+        if self.requests == 1:
+            return ModelResponse(parts=[ToolCallPart("run_query", {"sql": "select 1"})])
+        return ModelResponse(parts=[TextPart(self._answers.pop(0))])
+
+
+class TestEnvelopeCorrection:
+    """#1396 on the Pydantic AI path: one correction, the tool call not repeated."""
+
+    @staticmethod
+    def _prepared(engine: _Investigating, monkeypatch: pytest.MonkeyPatch,
+                  **facts: Any) -> tuple[AI, list[dict[str, Any]], AITask, dict[str, Any]]:
+        from rey_lib.ai.tools import AITool  # noqa: PLC0415
+
+        tool = AITool(name="run_query", description="Run one read query.",
+                      input_schema={"type": "object",
+                                    "properties": {"sql": {"type": "string"}},
+                                    "required": ["sql"]},
+                      replay_safe=False, capability_key="database.query")
+        calls: list[dict[str, Any]] = []
+        ai = AI()
+        monkeypatch.setattr(ai, "_model", lambda *engine_facts: engine.model)
+        operations = {"database.query":
+                      lambda arguments, tool: calls.append(dict(arguments)) or {"rows": 1}}
+        return ai, calls, _task(tools=(tool,), **facts), operations
+
+    def test_a_malformed_envelope_then_a_valid_one_completes(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = _Investigating(_NARRATED, enveloped("# Slides"))
+        ai, calls, task, operations = self._prepared(engine, monkeypatch)
+
+        result = ai.execute_task(task, operations)
+
+        assert result.text == "# Slides"
+        assert task.status == AITask.COMPLETED
+        assert calls == [{"sql": "select 1"}]          # the tool call is not repeated
+        assert engine.requests == 3                    # tool, refused answer, correction
+        assert any("Return only the JSON envelope: nothing before or after it, and no code "
+                   "fence around it." in prompt for prompt in engine.retry_prompts)
+        attempts = result.execution.attempts
+        assert [one.failed for one in attempts] == [True, False]
+        assert attempts[0].raw_output == _NARRATED
+        assert attempts[1].raw_output == enveloped("# Slides")
+
+    def test_two_malformed_envelopes_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _Investigating(_NARRATED, _NARRATED)
+        ai, calls, task, operations = self._prepared(engine, monkeypatch)
+
+        with pytest.raises(AIOutputError):
+            ai.execute_task(task, operations)
+
+        assert task.status == AITask.FAILED
+        assert calls == [{"sql": "select 1"}]
+
+    def test_a_correction_counts_against_the_governed_turn_limit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Two requests allowed: the tool call and the refused answer use both, so the
+        # correction would be a third and the run stops at its budget.
+        engine = _Investigating(_NARRATED, enveloped("# Slides"))
+        ai, _calls, task, operations = self._prepared(engine, monkeypatch, max_turns=2)
+
+        with pytest.raises(AIExecutionError, match="usage limit"):
+            ai.execute_task(task, operations)
+
+        assert engine.requests == 2

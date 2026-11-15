@@ -394,7 +394,11 @@ def extract_declared_artifact(raw_response: str, permitted: Sequence[str] = (),
         raise ArtifactEnvelopeError(
             "LLM response extraction failed. Expected a JSON envelope declaring its "
             f"'{ARTIFACT_TYPE_FIELD}'. The raw response was preserved for review. "
-            f"JSON parse error: {exc}"
+            f"JSON parse error: {exc}. "
+            # What a correction must return (#1396): the observed fault was a valid
+            # envelope behind narration and inside a code fence.
+            "Return only the JSON envelope: nothing before or after it, and no code "
+            "fence around it."
         ) from exc
     if not isinstance(envelope, dict):
         raise ArtifactEnvelopeError(
