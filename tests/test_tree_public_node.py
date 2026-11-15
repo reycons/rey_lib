@@ -33,6 +33,11 @@ def test_a_public_node_is_exactly_the_declared_fields() -> None:
     assert public_node(_RECORD)["buttons"] == [{**_DECLARATION, "sort_order": 1}]
 
 
+def test_right_click_is_carried_to_the_existing_domain_projection():
+    right = {**_DECLARATION, "target": {"kind": "database_schema"}}
+    assert public_node({**_RECORD, "right_click": right})["right_click"] == right
+
+
 def test_traversal_and_ordering_internals_stay_inside_the_tree() -> None:
     shown = public_node(_RECORD)
     for internal in ("tree_object_key", "tree_configuration", "expansion_tvw",

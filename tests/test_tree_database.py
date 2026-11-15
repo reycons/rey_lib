@@ -163,11 +163,51 @@ def test_an_object_carries_the_declaration_it_already_held() -> None:
 
     assert made[0]["label"] == "tree_node"
     assert made[0]["connection"] == "rey_apps"
+    assert made[0]["catalog"] == "rey_apps"
     assert made[0]["schema_name"] == "tree"
     assert made[0]["name"] == "tree_node"
     assert made[0]["statement"]
     assert "reference" not in made[0]
     assert "text_click" not in made[0]
+
+
+def test_a_table_map_target_uses_the_held_record_and_preserves_its_workbench_identity() -> None:
+    from rey_lib.tree.declarations import declared_fact
+
+    record = DatabaseDataObject().children(
+        object(), scoped(catalog="rey_apps", schema="tree", collection="tables"),
+        SCHEMA_OBJECTS,
+    )[0]
+    map_target = {"kind": "database_schema", "fields": {
+        "connection": "connection", "catalog": "catalog", "schema": "schema_name", "table": "name",
+    }}
+    assert declared_fact({"target": map_target}, record) == {
+        "kind": "database_schema", "connection": "rey_apps", "catalog": "rey_apps",
+        "schema": "tree", "table": "tree_node",
+    }
+    assert record["subject_key"] == "database.table"
+    assert record["statement"] == "SELECT * FROM tree.tree_node"
+
+
+@pytest.mark.parametrize("kind,signature", [("view", ""), ("function", "integer"), ("procedure", "bigint")])
+def test_view_and_routine_map_targets_keep_the_complete_identity(kind, signature) -> None:
+    from rey_lib.tree.declarations import declared_fact
+
+    collection = kind + "s"
+    entry = {"identity": {"name": "sample", "signature": signature},
+             "connection": "rey_apps", "schema_name": "tree", "name": "sample", "signature": signature}
+    record = DatabaseDataObject().children(
+        object(), scoped(catalog="rey_apps", schema="tree", collection=collection), {collection: [entry]},
+    )[0]
+    target = {"kind": "database_schema", "object_type": kind, "fields": {
+        "connection": "connection", "catalog": "catalog", "schema": "schema_name",
+        "object_name": "name", "signature": "signature",
+    }}
+    assert declared_fact({"target": target}, record) == {
+        "kind": "database_schema", "object_type": kind, "connection": "rey_apps", "catalog": "rey_apps",
+        "schema": "tree", "object_name": "sample", "signature": signature,
+    }
+    assert record["subject_key"] == "database." + kind
 
 
 def test_an_object_given_no_action_is_given_none_here() -> None:

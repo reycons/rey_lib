@@ -63,7 +63,7 @@ def test_declarations_are_grouped_by_node_type_and_placement(monkeypatch) -> Non
     assert [b["action_key"] for b in found["run"]["buttons"]] == ["open_rollback"]
     assert found["run"]["buttons"][0]["sort_order"] == 1
     assert [c["action_key"] for c in found["run"]["panel_controls"]] == ["refresh"]
-    assert found["folder"] == {"selectable": True, "icon": "folder", "text_click": None,
+    assert found["folder"] == {"selectable": True, "icon": "folder", "text_click": None, "right_click": None,
                                "buttons": [], "panel_controls": []}
     assert found["run"]["icon"] is None  # a type declaring no alias has no icon (#1326)
 
@@ -153,6 +153,7 @@ _DECLARED = {
         "selectable": True,
         "icon": "run",
         "text_click": {"action_key": "open_database_object", "requires_state": None},
+        "right_click": None,
         "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
         "panel_controls": [{"action_key": "refresh", "requires_state": None}],
     },
@@ -198,6 +199,7 @@ def test_a_record_offers_what_its_type_declares_in_its_state() -> None:
         "selectable": True,
         "icon": "run",
         "text_click": {"action_key": "open_database_object", "requires_state": None},
+        "right_click": None,
         "buttons": [{"action_key": "open_rollback", "requires_state": "rollbackable"}],
         "panel_controls": [{"action_key": "refresh", "requires_state": None}],
     }
@@ -210,9 +212,37 @@ def test_a_declaration_needing_another_state_is_absent() -> None:
     assert offers["text_click"]["action_key"] == "open_database_object"
 
 
+@pytest.mark.parametrize("gesture,kind", [("text_click", "database_object"),
+                                         ("right_click", "database_schema")])
+def test_both_clicks_read_their_existing_target_through_the_same_resolver(monkeypatch, gesture, kind):
+    reader = _reader(monkeypatch, [
+        _row("table", "text_click", "open_database_object", target={
+            "kind": "database_object", "fields": {"name": "name"}}),
+        _row("table", "right_click", "open_map", target={
+            "kind": "database_schema", "fields": {"schema": "schema_name"}}),
+    ])
+    declared = reader.declarations(object())
+    record = {"node_type": "table", "name": "orders", "schema_name": "sales"}
+    clicked = interacted_declaration(declared, record, interaction=gesture)
+    assert clicked == offered_actions(declared, record)[gesture]
+    identity = declared_fact(clicked, record)
+    assert identity == ({"kind": kind, "name": "orders"} if gesture == "text_click"
+                        else {"kind": kind, "schema": "sales"})
+
+
+def test_right_click_state_gate_and_absence_do_not_fall_back_to_left_click():
+    declared = {"run": {**_DECLARED["run"], "right_click": {
+        "action_key": "open_map", "requires_state": "ready", "target": {"kind": "database_schema"}}}}
+    record = {"node_type": "run", "actionable_in": "done"}
+    assert offered_actions(declared, record)["right_click"] is None
+    assert interacted_declaration(declared, record, interaction="right_click") is None
+    assert interacted_declaration(_DECLARED, record, interaction="right_click") is None
+    assert interacted_declaration(declared, record, interaction="text_click") is not None
+
+
 def test_an_undeclared_type_offers_nothing() -> None:
     assert offered_actions(_DECLARED, {"node_type": "area"}) == {
-        "selectable": False, "icon": None, "text_click": None, "buttons": [],
+        "selectable": False, "icon": None, "text_click": None, "right_click": None, "buttons": [],
         "panel_controls": []}
 
 

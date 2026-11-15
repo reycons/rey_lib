@@ -56,6 +56,7 @@ PUBLIC_NODE_FIELDS = (
     "selectable",
     "selected",
     "text_click",
+    "right_click",
     "buttons",
     "panel_controls",
 )

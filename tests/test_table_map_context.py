@@ -13,10 +13,12 @@ def _index(monkeypatch, rows):
     calls = []
 
     class Control:
-        def object_map_table_context(self, catalog, provider, schema, table, node, installation):
+        def object_map_table_context(self, catalog, provider, schema, table, node, installation,
+                                     object_type="table", signature=""):
             calls.append(("object_map_table_context", {
                 "catalog": catalog, "provider": provider, "schema": schema, "table": table,
-                "node": node, "installation": installation}))
+                "node": node, "installation": installation,
+                "object_type": object_type, "signature": signature}))
             return rows
 
     held = _schema()
@@ -51,7 +53,8 @@ def test_context_projects_the_index_graph_and_returns_to_the_same_schema(monkeyp
     assert routine["label"] == "control.rate"
     assert routine["identity"]["signature"] == "bigint"
     assert calls[0][1] == {"catalog": "rey_apps", "provider": "postgres",
-                           "schema": "control", "table": "run", "node": None, "installation": "admin"}
+                           "schema": "control", "table": "run", "node": None, "installation": "admin",
+                           "object_type": "table", "signature": ""}
     assert {e["id"] for e in held.inspect()["elements"]} == {n["id"] for n in projected["nodes"]}
     held.click("symbol:4")
     assert held.projection()["selected"] == "symbol:4"
@@ -80,6 +83,44 @@ def _graph(root, nodes):
     return {"root_count": 1, "root_id": root,
             "nodes": [{"id": key, "kind": kind, "label": key} for key, kind in nodes],
             "edges": []}
+
+
+@pytest.mark.parametrize("kind,signature", [("view", ""), ("function", "integer"), ("procedure", "bigint")])
+def test_initial_view_or_routine_focus_uses_exact_identity_and_existing_breadcrumbs(monkeypatch, kind, signature):
+    rows = [_graph("db:80", [("db:80", "view" if kind == "view" else "code"), ("symbol:4", "code")])]
+    held, calls = _index(monkeypatch, rows)
+    identity = {"name": "named_object", "object_type": kind, "signature": signature}
+    held._read = {**held._read, kind + "s": [
+        {"identity": {"name": "named_object", "signature": signature}},
+        {"identity": {"name": "named_object", "signature": "text"}},
+    ]}
+
+    held.focus(object=identity)
+    projected = held.projection()
+    assert projected["focus"] == {"opened": [], "object": identity}
+    assert projected["path"][-1]["value"] == "db:80"
+    assert calls[-1][1] == {"catalog": "rey_apps", "provider": "postgres", "schema": "control",
+                             "table": "named_object", "node": None, "installation": "admin",
+                             "object_type": kind, "signature": signature}
+    object_focus = projected["path"][-1]["focus"]
+    assert {node["id"] for node in projected["nodes"]} == {"db:80", "symbol:4"}
+    rows[:] = [_graph("symbol:4", [("symbol:4", "code")])]
+    held.double_click("symbol:4")
+    rows[:] = [_graph("db:80", [("db:80", "code")])]
+    held.focus(**object_focus)
+    assert held.projection()["focus"]["object"] == identity
+    held.focus(opened=[])
+    assert [step["value"] for step in held.projection()["path"]] == ["schema"]
+
+
+def test_an_unknown_routine_overload_refuses_before_reading_or_changing_focus(monkeypatch):
+    held, calls = _index(monkeypatch, [])
+    held._read = {**held._read, "functions": [{"identity": {"name": "rate", "signature": "integer"}}]}
+    before = held.projection()
+    with pytest.raises(AppError, match="matching view or routine"):
+        held.focus(object={"name": "rate", "object_type": "function", "signature": "text"})
+    assert held.projection() == before
+    assert not calls
 
 
 def test_double_clicks_continue_from_view_to_code_and_breadcrumbs_keep_the_path(monkeypatch):

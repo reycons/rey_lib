@@ -1434,11 +1434,13 @@ class Control:
 
     def object_map_table_context(self, catalog: str, provider: str, schema: str,
                                  table: Optional[str], node: Optional[str],
-                                 installation: str) -> list[dict[str, Any]]:
+                                 installation: str, object_type: str = "table",
+                                 signature: str = "") -> list[dict[str, Any]]:
         """An indexed object's neighbourhood (#1360): code.f_object_map_table_context."""
         return [dict(row) for row in self._call_rows("get_object_map_table_context", {
             "catalog": catalog, "provider": provider, "schema": schema, "table": table,
             "node": node, "installation": installation,
+            "object_type": object_type, "signature": signature,
         }, required=True)]
 
     def update_workflow(self, workflow_id: int, definition: dict[str, Any],

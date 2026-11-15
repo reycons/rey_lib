@@ -36,10 +36,12 @@ from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "BUTTON_PLACEMENT",
+    "CLICK_PLACEMENTS",
     "FIELD_REFERENCE",
     "NODE_TYPE_ACTION_VIEW_NAME",
     "NodeTypeActionDataObject",
     "PANEL_PLACEMENT",
+    "RIGHT_CLICK_PLACEMENT",
     "TEXT_CLICK_PLACEMENT",
     "declaration",
     "declared_fact",
@@ -51,10 +53,12 @@ __all__ = [
 #: The view the declarations are read from, in the tree schema.
 NODE_TYPE_ACTION_VIEW_NAME = "node_type_action_vw"
 
-#: The three placements a node type can give an action. The database enforces
+#: The placements a node type can give an action. The database enforces
 #: the vocabulary; these are the words for reading it back. ``panel`` is the
 #: panel header, where a control acting on the selection once belongs.
 TEXT_CLICK_PLACEMENT = "text_click"
+RIGHT_CLICK_PLACEMENT = "right_click"
+CLICK_PLACEMENTS = (TEXT_CLICK_PLACEMENT, RIGHT_CLICK_PLACEMENT)
 BUTTON_PLACEMENT = "button"
 PANEL_PLACEMENT = "panel"
 
@@ -104,8 +108,8 @@ class NodeTypeActionDataObject(DatabaseView):
             (whether the node takes the selection -- a local behaviour, not an
             action), ``icon`` (the node type's icon alias, which the Console's
             resolveIcon resolves; None where the type declares none -- #1326),
-            ``text_click`` (the one declaration a click on the row
-            means, or None), ``buttons`` and ``panel_controls`` (in declared
+            ``text_click`` and ``right_click`` (one declaration per gesture,
+            or None), ``buttons`` and ``panel_controls`` (in declared
             order, each with its ``sort_order``). Each declaration is
             :func:`declaration`'s. A disabled placement or action is absent
             rather than present and off.
@@ -120,12 +124,13 @@ class NodeTypeActionDataObject(DatabaseView):
                 "selectable": bool(row.get("selectable")),
                 "icon": row.get("node_type_icon_alias") or None,
                 "text_click": None,
+                "right_click": None,
                 "buttons": [],
                 "panel_controls": [],
             })
             placement = row.get("placement")
-            if placement == TEXT_CLICK_PLACEMENT:
-                entry["text_click"] = declaration(row)
+            if placement in CLICK_PLACEMENTS:
+                entry[placement] = declaration(row)
             elif placement == BUTTON_PLACEMENT:
                 entry["buttons"].append({**declaration(row), "sort_order": row.get("sort_order")})
             elif placement == PANEL_PLACEMENT:
@@ -189,16 +194,16 @@ def offered_actions(
 
     Returns:
         ``selectable``, ``icon`` (the type's alias, where the record carries no
-        published mark), ``text_click`` (one declaration or None), ``buttons`` and
+        published mark), each click declaration or None, ``buttons`` and
         ``panel_controls``.
     """
     declared = declarations.get(str(record.get("node_type") or "")) or {}
     state = str(record.get("actionable_in") or "")
-    clicked = declared.get("text_click")
     return {
         "selectable": bool(declared.get("selectable")),
         **({} if record.get("icon") else {"icon": declared.get("icon")}),
-        "text_click": clicked if offered(clicked, state) else None,
+        **{click: declared.get(click) if offered(declared.get(click), state) else None
+           for click in CLICK_PLACEMENTS},
         "buttons": [button for button in declared.get("buttons") or []
                     if offered(button, state)],
         "panel_controls": [control for control in declared.get("panel_controls") or []
@@ -214,8 +219,8 @@ def interacted_declaration(
 ) -> dict[str, Any] | None:
     """The declaration a reported interaction with one record names (#1218).
 
-    The Tree-domain meaning of an interaction: a click on the record's text names
-    its type's ``text_click`` declaration; a pressed control names the button or
+    The Tree-domain meaning of an interaction: either click gesture names
+    its type's matching declaration; a pressed control names the button or
     panel control its type declares under that ``action_key``. Either applies only
     where :func:`offered` says it does in the record's state (``actionable_in``),
     so a control never offered for this record matches nothing. What the matched
@@ -226,7 +231,7 @@ def interacted_declaration(
         declarations: Every node type's declarations
             (:meth:`NodeTypeActionDataObject.declarations`).
         record: The record interacted with, which names its ``node_type``.
-        interaction: :data:`TEXT_CLICK_PLACEMENT` where the record's text was clicked.
+        interaction: One of :data:`CLICK_PLACEMENTS` for a direct click.
         control: The ``action_key`` a pressed control was offered under.
 
     Returns:
@@ -241,8 +246,8 @@ def interacted_declaration(
             if str(candidate.get("action_key")) == control:
                 return candidate if offered(candidate, state) else None
         return None
-    if interaction == TEXT_CLICK_PLACEMENT:
-        clicked = declared.get("text_click")
+    if interaction in CLICK_PLACEMENTS:
+        clicked = declared.get(interaction)
         return clicked if offered(clicked, state) else None
     return None
 

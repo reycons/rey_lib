@@ -461,6 +461,7 @@ class DatabaseDataObject:
             "refreshable": False,
             "tree_object_key": DATABASE_SOURCE,
             "tree_configuration": self._addressed(configured, entry, collection),
+            "catalog": configured.get("catalog"),
             **self._identity(entry),
             # The row's tree.subject_panel key (#1240): what this object opens as.
             **({"subject_key": f"database.{_MEMBER_TYPE[collection]}"}

@@ -302,8 +302,27 @@ class ObjectMap:
                 raise ConfigError(f"This schema holds no table {unknown}.")
             table = str(focus.get("table") or "")
             node = str(focus.get("node") or "")
+            object_focus = focus.get("object")
             step = None
-            if table:
+            if object_focus is not None:
+                if not isinstance(object_focus, dict):
+                    raise ConfigError("A database-object focus must be an identity.")
+                object_focus = {"name": str(object_focus.get("name") or ""),
+                                "object_type": str(object_focus.get("object_type") or ""),
+                                "signature": str(object_focus.get("signature") or "")}
+                kind = object_focus["object_type"]
+                entries = self._read.get(kind + "s", []) if kind in ("view", "function", "procedure") else []
+                matches = [entry for entry in entries
+                           if entry["identity"]["name"] == object_focus["name"]
+                           and str(entry["identity"].get("signature") or "") == object_focus["signature"]]
+                if len(matches) != 1:
+                    raise AppError("This schema does not hold exactly one matching view or routine.")
+                context = self._read_table_context(object_focus["name"], object_type=kind,
+                                                   signature=object_focus["signature"])
+                step = {"value": context["root_id"],
+                        "label": matches[0].get("label") or object_focus["name"],
+                        "focus": {"object": object_focus}}
+            elif table:
                 if table not in self._table_names():
                     raise AppError(f"This schema holds no table {table!r}.")
                 context = self._read_table_context(table)
@@ -334,7 +353,8 @@ class ObjectMap:
             else:
                 self._context_path = []
             self._focus = {"opened": opened, **({"table": table} if table else {}),
-                           **({"node": node} if node else {})}
+                           **({"node": node} if node else {}),
+                           **({"object": object_focus} if object_focus is not None else {})}
             self._edge_inspection = None
             return
         level = str(focus.get("level") or "")
@@ -1683,7 +1703,7 @@ class ObjectMap:
 
     def _holds_schema_node(self, node_id: str) -> bool:
         """Whether this schema holds the table, or references the external table, a node names."""
-        if (self._focus.get("table") or self._focus.get("node")) and self._table_context:
+        if any(self._focus.get(key) for key in ("table", "node", "object")) and self._table_context:
             return any(node["id"] == node_id for node in self._table_context["nodes"])
         if node_id.startswith(_TABLE):
             return node_id[len(_TABLE):] in self._table_names()
@@ -1699,18 +1719,19 @@ class ObjectMap:
         self.focus(**target, opened=self._focus.get("opened", []))
 
     def _read_table_context(self, table: str | None = None, *, node: str | None = None,
-                            schema: str | None = None, alias: str | None = None) -> dict[str, Any]:
+                            schema: str | None = None, alias: str | None = None,
+                            object_type: str = "table", signature: str = "") -> dict[str, Any]:
         """The existing index's bounded graph, on the host's shared index connection."""
         if self._control is None or not self._index_installation:
             raise AppError("This map has no configured index connection/installation for table context.")
         rows = list(self._control.object_map_table_context(
             self.subject["catalog"], self._database_provider, schema or self.subject["schema"],
-            table, node, self._index_installation))
+            table, node, self._index_installation, object_type, signature))
         if len(rows) != 1 or rows[0]["root_count"] != 1:
             raise AppError("The index does not identify exactly one table/object for this context.")
         read = dict(rows[0])
         root = read["root_id"]
-        root_id = alias or node or f"{_TABLE}{table}"
+        root_id = alias or node or (f"{_TABLE}{table}" if object_type == "table" else root)
         nodes = [dict(node) for node in read.get("nodes") or []]
         for node in nodes:
             if (node.get("identity") or {}).get("object_type"):
@@ -1719,13 +1740,13 @@ class ObjectMap:
                 node["role"] = "file"
             if node["id"] == root:
                 node.update(id=root_id)
-                if table is not None and alias is None:
+                if table is not None and alias is None and object_type == "table":
                     node["table"] = table
         edges = [{**edge,
                   "source": root_id if edge["source"] == root else edge["source"],
                   "target": root_id if edge["target"] == root else edge["target"]}
                  for edge in read.get("edges") or []]
-        return {"nodes": nodes, "edges": edges}
+        return {"root_id": root_id, "nodes": nodes, "edges": edges}
 
     def _schema_scope(self) -> tuple[list[_Mapped], list[_Mapped]]:
         """The schema's tables, the external tables its foreign keys reach, and those keys.
@@ -1733,7 +1754,7 @@ class ObjectMap:
         A foreign key to a table outside this schema is related to that table as
         an external element. Each table and key is beside the row it maps.
         """
-        if (self._focus.get("table") or self._focus.get("node")) and self._table_context:
+        if any(self._focus.get(key) for key in ("table", "node", "object")) and self._table_context:
             tables = {str(t["identity"]["name"]): t for t in self._read.get("tables", [])}
             return ([(dict(n), tables.get(n.get("table", ""))) for n in self._table_context["nodes"]],
                     [(dict(e), None) for e in self._table_context["edges"]])
