@@ -378,6 +378,31 @@ def test_a_schema_map_has_no_claims_to_open() -> None:
         _schema().context_click("claim:1")
 
 
+def test_trigger_opening_keeps_the_parent_from_its_indexed_relation() -> None:
+    from rey_lib.db.database_objects import DatabaseObjectListing
+
+    held = _schema()
+    held._focus = {"node": "db:trigger"}
+    held._table_context = {"nodes": [
+        {"id": "db:trigger", "kind": "code", "identity": {
+            "schema": "code", "name": "refuse_change", "object_type": "trigger", "signature": ""}},
+        {"id": "db:parent", "kind": "table", "identity": {
+            "schema": "code", "name": "generation", "object_type": "table", "signature": ""}},
+    ], "edges": [{"id": "reference:owns", "source": "db:trigger", "target": "db:parent",
+                  "kind": "trigger"}]}
+    opened = held.context_click("db:trigger")["identity"]
+    assert opened == {"kind": "database_object", "subject_kind": "triggers",
+                      "connection": "rey apps", "catalog": "rey_apps", "schema": "code",
+                      "name": "refuse_change", "table": "generation"}
+    owner = DatabaseObjectListing.object_type(opened["subject_kind"])
+    identified = owner.identify(**{k: v for k, v in opened.items() if k not in ("kind", "subject_kind")})
+    assert identified.table.name == "generation"
+    assert identified.table.schema == "code"
+    held._table_context["edges"] = []
+    with pytest.raises(module.AppError, match="parent table"):
+        held.context_click("db:trigger")
+
+
 @pytest.mark.parametrize("held, screen", [(_architecture, "object"), (_schema, "schema")])
 def test_a_map_states_no_presentation_and_carries_its_own_subject_and_screen(
     held: Callable[[], ObjectMap], screen: str,

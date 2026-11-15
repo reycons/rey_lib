@@ -46,7 +46,7 @@ from rey_lib.files.data_file import DataFile
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
-from rey_lib.errors.error_utils import StateError
+from rey_lib.errors.error_utils import AppError, StateError
 from rey_lib.logs import AppLogger
 
 __all__ = ["Source", "SOURCE_FIELD_METADATA", "SOURCE_FIELDS", "SOURCE_PARAMETERS", "SOURCE_KINDS"]
@@ -207,6 +207,10 @@ class Source:
         # under this, so the snapshot is the state that operation produced.
         self._acting = threading.RLock()
         self._query_result: Optional[dict[str, Any]] = None
+        self._query_save_ctx: Any = None
+        self._saved_query_id: Optional[int] = None
+        self._saved_query_state: Optional[tuple[str, str]] = None
+        self._query_save_error: Optional[str] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -363,10 +367,14 @@ class Source:
         # SELECTING IS NOT DESTROYING. Which kind is in force is chosen here; the
         # governed context -- like every kind's values -- stays with the object
         # for its lifetime.
-        self._selected = kind
+        with self._acting:
+            self._selected = kind
 
     def update(self, name: str, value: Any) -> None:
         """Say something about one field.
+
+        Editing changes working state only. Repository Save and the governed
+        transform-template :meth:`save_query` remain explicit operations.
 
         Raises:
             ValueError: If the field is not a Source field. A destination or a
@@ -383,11 +391,12 @@ class Source:
         # statement's {file_path} resolves to when it runs. The statement is the
         # reader's and stays as written. The governed context stays for the
         # object's lifetime.
-        self._values[name] = value
-        if name == "file-mutation-id":
-            chosen = self._mutation_choice(value)
-            if chosen is not None:
-                self._values["file"] = chosen.get("path") or ""
+        with self._acting:
+            self._values[name] = value
+            if name == "file-mutation-id":
+                chosen = self._mutation_choice(value)
+                if chosen is not None:
+                    self._values["file"] = chosen.get("path") or ""
 
     def apply_selection(self, ctx: Any, identity: Mapping[str, Any]) -> None:
         """Become the file the reader selected in this Source's tree (#1323).
@@ -441,6 +450,37 @@ class Source:
     def saves_query(self) -> bool:
         """Whether this source's statement can be saved as a governed template."""
         return (self._governed or {}).get("transform_query_id") is not None
+
+    def save(self, ctx: Any) -> Optional[int]:
+        """Retain this Workbench's SQL in Saved Queries, not its transform template.
+
+        The Source keeps the saved identity: its execution queries are temporary.
+        This operation is explicit; opening, selecting and editing a Source
+        do not write to the query repository.
+        """
+        with self._acting:
+            self._query_save_ctx = ctx
+            statement = str(self._values.get("statement") or "")
+            if self.selected_kind() != "database" or not statement.strip():
+                self._query_save_error = None
+                return self._saved_query_id
+            try:
+                dialect = (self._saved_query_state[1] if self._saved_query_state is not None
+                           else str(self.definition(ctx).get("provider") or "sql"))
+                state = (statement, dialect)
+                if state == self._saved_query_state:
+                    self._query_save_error = None
+                    return self._saved_query_id
+                saved = _control_of(ctx, "save query").save_query(
+                    self._saved_query_id, "Source query", *state)
+            except AppError as refusal:
+                self._query_save_error = str(refusal)
+                raise
+            self._saved_query_id = int(saved["saved_query_id"])
+            self._values["statement"] = saved["sql_statement"]
+            self._saved_query_state = (saved["sql_statement"], saved["sql_dialect"])
+            self._query_save_error = None
+            return self._saved_query_id
 
     # -- its snapshot --------------------------------------------------------
 
@@ -577,10 +617,19 @@ class Source:
     def query_projection(self) -> dict[str, Any]:
         """The existing Source statement's navigation/read state; nothing is resolved or run."""
         with self._acting:
+            modified = self.saves_query()
+            if self._query_save_ctx is not None:
+                statement = str(self.value("statement") or "")
+                modified = (bool(statement.strip()) if self._saved_query_state is None
+                            else statement != self._saved_query_state[0])
+                modified = modified or self._query_save_error is not None
             return {"statement": self.resolved_statement(),
                     "connection": str(self.value("source-connection") or "") or None,
-                    "navigation": {"label": "Source query", "modified": self.saves_query(),
+                    "navigation": {"label": "Source query", "modified": modified,
                                    "can_close": True, "shared": True},
+                    **({"saved_query_id": self._saved_query_id,
+                        "save_error": self._query_save_error}
+                       if self._query_save_ctx is not None else {}),
                     **({"result": self._query_result} if self._query_result is not None else {})}
 
     def remember_query_result(self, result: dict[str, Any]) -> None:

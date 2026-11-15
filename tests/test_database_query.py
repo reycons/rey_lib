@@ -81,7 +81,7 @@ def test_it_offers_the_four_ways_to_run_and_the_live_query_and_holds_no_sql() ->
         "order_by", "filters",
     } == {"rows", "run", "page", "read", "act", "text", "update", "projection", "execute",
           # Its statement, linted by the artifact engine; read-only (#1252).
-          "lint"}
+          "lint", "save", "from_saved"}
     for sql in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert sql not in code, sql
 

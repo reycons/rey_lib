@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import AppError, DatabaseError
 
 if TYPE_CHECKING:
     from rey_lib.db.connection import Connection
@@ -168,9 +168,43 @@ class DatabaseQuery:
     )
     _opened_statement: str = field(default="", init=False, repr=False, compare=False)
     _result: Optional[dict[str, Any]] = field(default=None, init=False, repr=False, compare=False)
+    _save_control: Any = field(default=None, init=False, repr=False, compare=False)
+    _save_name: str = field(default="Adhoc query", init=False, repr=False, compare=False)
+    _saved_query_id: Optional[int] = field(default=None, init=False, repr=False, compare=False)
+    _saved_state: Optional[tuple[str, str]] = field(default=None, init=False, repr=False, compare=False)
+    _save_error: Optional[str] = field(default=None, init=False, repr=False, compare=False)
+    _saved_definition: dict[str, Any] = field(default_factory=dict, init=False, repr=False,
+                                             compare=False)
 
     def __post_init__(self) -> None:
         self._opened_statement = self.text()
+
+    @classmethod
+    def from_saved(cls, control: Any, saved_query_id: int) -> "DatabaseQuery":
+        """Hydrate a visible saved definition, without executing or saving it.
+
+        The identity is the row's own ID, as ManifestSource.create takes a
+        governed file ID. The host retains the returned object, not another
+        copy of its SQL or settings. Execution connection is deliberately unset.
+        """
+        if isinstance(saved_query_id, bool) or not isinstance(saved_query_id, int) or saved_query_id <= 0:
+            raise DatabaseError("A saved query requires a positive saved_query_id.")
+        saved = control.get_saved_query(saved_query_id)
+        if saved is None:
+            raise DatabaseError("The saved query is unavailable in this installation or to this login.")
+        if (saved.get("saved_query_id") != saved_query_id
+                or not isinstance(saved.get("sql_statement"), str)
+                or not saved["sql_statement"].strip()
+                or not isinstance(saved.get("sql_dialect"), str)
+                or not saved["sql_dialect"].strip()):
+            raise DatabaseError("The saved-query read did not return the requested definition.")
+        query = cls(saved["sql_statement"])
+        query._save_control = control
+        query._saved_query_id = saved_query_id
+        query._save_name = saved["name"]
+        query._saved_state = (saved["sql_statement"], saved["sql_dialect"])
+        query._saved_definition = dict(saved)
+        return query
 
     # -- the live query -------------------------------------------------------
 
@@ -202,6 +236,9 @@ class DatabaseQuery:
         Connection its host supplies, still a reference this query never
         creates or closes. A caller that means the page to move says so.
 
+        Editing changes working state only. Persistence is the explicit
+        :meth:`save` operation; opening, editing and connection changes do not save.
+
         Raises:
             DatabaseError: If a change names anything but a live property.
         """
@@ -214,9 +251,48 @@ class DatabaseQuery:
             if "statement" in changes:
                 self.params = {}
 
+    def save(self, control: Any, name: Optional[str] = None) -> Optional[int]:
+        """Retain this Workbench query through Control's mapped save procedure.
+
+        Calling Save is explicit. Later edits remain working state until
+        Save is called again on the same row. Empty drafts cannot replace stored SQL.
+        """
+        with self._acting:
+            self._save_control = control
+            if name is not None:
+                self._save_name = name
+            if not self.statement.strip():
+                self._save_error = None
+                return self._saved_query_id
+            # Once stored, dialect is query metadata, independent of whichever
+            # execution connection the reader selects next.
+            dialect = (self._saved_state[1] if self._saved_state is not None
+                       else str(getattr(self.connection, "provider", None) or "sql"))
+            state = (self.statement, dialect)
+            if state == self._saved_state:
+                self._save_error = None
+                return self._saved_query_id
+            try:
+                saved = control.save_query(self._saved_query_id, self._save_name, *state)
+            except AppError as refusal:
+                self._save_error = str(refusal)
+                raise
+            self._saved_query_id = int(saved["saved_query_id"])
+            self._saved_definition.update(saved)
+            self._save_name = saved["name"]
+            self.statement = saved["sql_statement"]
+            self._saved_state = (saved["sql_statement"], saved["sql_dialect"])
+            self._save_error = None
+            return self._saved_query_id
+
     def projection(self) -> dict[str, Any]:
         """What this query shows: its text and its reading state. Runs nothing."""
         with self._acting:
+            modified = self.text() != self._opened_statement
+            if self._save_control is not None:
+                modified = (bool(self.statement.strip()) if self._saved_state is None
+                            else self.statement != self._saved_state[0])
+            modified = modified or self._save_error is not None
             return {
                 "statement": self.text(),
                 "pageable": self.pageable,
@@ -225,8 +301,19 @@ class DatabaseQuery:
                 "order_by": list(self.order_by),
                 "filters": list(self.filters),
                 "connection": self.connection.name if self.connection is not None else None,
-                "navigation": {"modified": self.text() != self._opened_statement,
-                               "can_close": self.text() == self._opened_statement},
+                "navigation": {"modified": modified, "can_close": not modified,
+                               **({"label": self._save_name} if self._saved_query_id is not None else {})},
+                **({"saved_query_id": self._saved_query_id, "save_error": self._save_error}
+                   if self._save_control is not None else {}),
+                **({"settings": {
+                    "name": self._save_name,
+                    "sql_dialect": (self._saved_state[1] if self._saved_state is not None
+                                    else str(getattr(self.connection, "provider", None) or "sql")),
+                    **{key: self._saved_definition.get(key) for key in (
+                        "description", "saved_query_collection_id",
+                        "collection_name", "owner_login", "is_public",
+                    )},
+                }} if self._save_control is not None else {}),
                 **({"result": self._result} if self._result is not None else {}),
             }
 

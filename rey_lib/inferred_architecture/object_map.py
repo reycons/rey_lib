@@ -39,7 +39,7 @@ import json
 
 from typing import Any, Callable, Final
 
-from rey_lib.db.database_objects import DatabaseObjectListing, DatabaseSchema
+from rey_lib.db.database_objects import DatabaseChildIdentity, DatabaseObjectListing, DatabaseSchema
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.repository_map.indexed_database_object import IndexedDatabaseObject
 
@@ -578,9 +578,27 @@ class ObjectMap:
                                      "relative_path": f"{identity['repository_key']}/{identity['relative_path']}"}}
             kind = str(identity.get("object_type") or element["kind"])
             owner = DatabaseObjectListing.object_type(f"{kind}s")
+            parent: dict[str, Any] = {}
+            if owner.IDENTITY is DatabaseChildIdentity:
+                if identity.get("table"):
+                    parent = {"schema": identity["schema"], "table": identity["table"]}
+                elif kind == "trigger":
+                    # The index already declares the trigger's owning table by
+                    # its 'trigger' relation. Use that fact, never the focus or
+                    # a name parsed out of a node key/definition.
+                    nodes, edges = self._schema_scope()
+                    targets = {edge["target"] for edge, _ in edges
+                               if edge["source"] == node_id and edge["kind"] == "trigger"}
+                    tables = [dict(node.get("identity") or (row or {}).get("identity") or {})
+                              for node, row in nodes if node["id"] in targets]
+                    if len(tables) == 1 and tables[0].get("object_type") == "table":
+                        parent = {"schema": tables[0]["schema"], "table": tables[0]["name"]}
+                if not parent:
+                    raise AppError("This map object has no unambiguous declared parent table.")
             return {"identity": {"kind": "database_object", "subject_kind": owner.KIND,
                                  "connection": self.subject["connection"], "catalog": self.subject["catalog"],
                                  "schema": identity["schema"], "name": identity["name"],
+                                 **parent,
                                  **({"signature": identity.get("signature", "")}
                                     if kind in ("function", "procedure") else {})}}
         claim = self._claim_keyed(node_id)

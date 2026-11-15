@@ -1316,6 +1316,42 @@ class Control:
             "connection_name": connection_name,
         }, required=required)
 
+    def get_saved_query(self, saved_query_id: int) -> Optional[dict[str, Any]]:
+        """Read one visible saved definition in this Control's installation.
+
+        Like the DataFile defaults read, this uses the owned procedure map;
+        the database returns inherited collection access, never a caller login.
+        """
+        rows = self._call_rows("get_saved_query", {
+            "saved_query_id": saved_query_id,
+        }, required=True)
+        return dict(rows[0]) if rows else None
+
+    def save_query(self, saved_query_id: Optional[int], name: str,
+                   sql_statement: str, sql_dialect: str) -> dict[str, Any]:
+        """Save a query through the control procedure map and return its stored row.
+
+        Installation/run/batch inputs come from this Control's existing map
+        context. The procedure derives ownership from the authenticated login;
+        callers supply neither a login nor an execution connection.
+        """
+        _logger.debug("control: save query id=%s", saved_query_id)
+        saved = self._call("save_query", {
+            "saved_query_id": saved_query_id, "name": name,
+            "sql_statement": sql_statement, "sql_dialect": sql_dialect,
+        }, required=True)
+        if isinstance(saved, str):
+            saved = json.loads(saved)
+        if (not isinstance(saved, Mapping) or not isinstance(saved.get("saved_query_id"), int)
+                or saved["saved_query_id"] <= 0
+                or saved.get("sql_statement") != sql_statement
+                or saved.get("sql_dialect") != sql_dialect
+                or saved_query_id is not None and saved["saved_query_id"] != saved_query_id):
+            _logger.debug("control: saved-query procedure returned an invalid stored row id=%s",
+                          saved_query_id)
+            raise ConfigError("The saved-query procedure did not return its stored row.")
+        return dict(saved)
+
     def update_transform_columns(self, transform_id: int, columns: list[dict[str, Any]],
                                  required: bool = True) -> list[int]:
         """Save a transform's working column mapping; answer the saved ids in order.
