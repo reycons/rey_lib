@@ -25,7 +25,7 @@ def test_registered_source_requires_a_bound_owner():
         rey_lib_sources()[LIVE_OBJECTS_SOURCE].children(SimpleNamespace(), {})
 
 
-def test_application_panel_type_object_hierarchy_uses_canonical_node_identity():
+def test_panel_type_object_hierarchy_uses_canonical_node_identity():
     state = refs()
     asked = []
     def read(command):
@@ -35,10 +35,9 @@ def test_application_panel_type_object_hierarchy_uses_canonical_node_identity():
     root = {'node_key': 'governed-root', 'tree_object_key': LIVE_OBJECTS_SOURCE}
     projection.seed([root])
     traversal = TreeTraversal(None, rey_lib_sources(read))
-    apps = traversal.children(None, root, projection)
-    assert [row['label'] for row in apps] == ['rey_db_admin', 'workflow_app']
-    panels = traversal.children(None, apps[0], projection)
-    assert [row['label'] for row in panels] == ['Data Workbench', 'Loader Panel']
+    panels = traversal.children(None, root, projection)
+    assert [row['label'] for row in panels] == ['Data Workbench', 'Loader Panel', 'Workflow Panel']
+    assert all(row['node_type'] == 'live_panel' for row in panels)
     objects = traversal.children(None, panels[0], projection)
     assert [row['label'] for row in objects] == ['Customer query', 'Orders query *']
     assert [row['subject_id'] for row in objects] == ['customers', 'orders']
@@ -60,20 +59,25 @@ def test_source_returns_unkeyed_records_and_rereads_membership():
     assert source.children(None, {}) == []
 
 
-def test_panel_scope_is_explicit_and_cannot_exist_without_its_application():
-    source = rey_lib_sources(lambda _: refs())[LIVE_OBJECTS_SOURCE]
-    with pytest.raises(ConfigError, match='application scope'):
-        source.children(None, {'tree_configuration': {'panel': 'data_workbench'}})
-    assert source.children(None, {'tree_configuration': {'application': 'ended-app'}}) == []
+def test_same_panel_collects_objects_across_owning_applications_without_changing_references():
+    state = refs()
+    state['references'].append({'id': 'source', 'application': 'data_engine', 'panel': 'data_workbench',
+                                'label': 'Source query', 'modified': False, 'can_close': True})
+    source = rey_lib_sources(lambda _: state)[LIVE_OBJECTS_SOURCE]
+    panels = source.children(None, {})
+    assert sum(row['label'] == 'Data Workbench' for row in panels) == 1
+    assert panels[0]['tree_configuration'] == {'panel': 'data_workbench'}
+    children = source.children(None, panels[0])
+    assert [row['subject_id'] for row in children] == ['customers', 'orders', 'source']
+    assert source.children(None, {'tree_configuration': {'panel': 'ended-panel'}}) == []
 
 
 def test_hierarchy_order_is_declared_alphabetically_not_registration_order():
     state = refs()
     state['references'].reverse()
     source = rey_lib_sources(lambda _: state)[LIVE_OBJECTS_SOURCE]
-    assert [row['label'] for row in source.children(None, {})] == ['rey_db_admin', 'workflow_app']
-    objects = source.children(None, {'tree_configuration': {
-        'application': 'rey_db_admin', 'panel': 'data_workbench'}})
+    assert [row['label'] for row in source.children(None, {})] == ['Data Workbench', 'Loader Panel', 'Workflow Panel']
+    objects = source.children(None, {'tree_configuration': {'panel': 'data_workbench'}})
     assert [row['label'] for row in objects] == ['Customer query', 'Orders query *']
 
 
@@ -84,9 +88,7 @@ def test_reordering_live_objects_keeps_the_clicked_key_bound_to_the_same_referen
     traversal = TreeTraversal(None, rey_lib_sources(lambda _: state))
     def rebuild():
         projection.seed([root])
-        app = next(row for row in traversal.children(None, root, projection)
-                   if row['label'] == 'rey_db_admin')
-        panel = next(row for row in traversal.children(None, app, projection)
+        panel = next(row for row in traversal.children(None, root, projection)
                      if row['label'] == 'Data Workbench')
         return traversal.children(None, panel, projection)
     first = {row['subject_id']: row['node_key'] for row in rebuild()}

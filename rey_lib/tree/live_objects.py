@@ -1,6 +1,6 @@
 """BFF live-reference metadata projected through the canonical Tree source seam.
 
-The source owns application/panel-type grouping. The BFF owns only references;
+The source owns panel-type grouping. The BFF owns only references;
 TreeTraversal owns generated node identities and parentage.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ __all__ = ["LiveObjectsDataObject"]
 
 
 class LiveObjectsDataObject:
-    """Application -> declared panel type -> BFF-exposed live objects."""
+    """Declared panel type -> BFF-exposed live objects, across applications."""
 
     def __init__(self, request: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> None:
         self._request = request
@@ -31,17 +31,10 @@ class LiveObjectsDataObject:
         entries = answer['references']
         selected = answer.get('selected')
         scope = dict(record.get('tree_configuration') or {})
-        application = scope.get('application')
         panel = scope.get('panel')
-        if panel is not None and application is None:
-            raise ConfigError("A live panel type belongs to a declared application scope.")
-        if application is None:
-            return [self._group('live_application', name, {'application': name})
-                    for name in sorted({e['application'] for e in entries}, key=str.casefold)]
-        entries = [entry for entry in entries if entry['application'] == application]
         if panel is None:
             return [self._group('live_panel', str(name).replace('_', ' ').title() or 'No declared panel',
-                               {'application': application, 'panel': name})
+                               {'panel': name})
                     for name in sorted({e['panel'] for e in entries}, key=str.casefold)]
         return [
             {'row_type': 'node', 'node_type': 'live_object', 'source_id': entry['id'],
@@ -56,6 +49,6 @@ class LiveObjectsDataObject:
     def _group(self, node_type: str, label: str, scope: dict[str, Any]) -> dict[str, Any]:
         """Explicit source scope, like a filesystem directory's configuration."""
         return {'row_type': 'node', 'node_type': node_type, 'label': label,
-                'source_id': scope.get('panel', scope['application']),
+                'source_id': scope['panel'],
                 'has_children': True, 'is_enabled': True, 'selectable': False,
                 'tree_object_key': LIVE_OBJECTS_SOURCE, 'tree_configuration': scope}
