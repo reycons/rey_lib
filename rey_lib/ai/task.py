@@ -19,12 +19,16 @@ Immutable facts do not mean an immutable lifecycle. Every field is read-only to
 callers; the transitions below are the only code that writes the lifecycle, so
 AI executes a task and invokes its transitions, and owns none of its state.
 
-It reads nothing, resolves nothing and executes nothing.
+It resolves no configuration and executes no AI. Explicit Save delegates text writing to File.
 """
 
 from __future__ import annotations
 
 import uuid
+import re
+from pathlib import Path
+
+import yaml
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -37,6 +41,8 @@ from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.tools import AITool
 from rey_lib.content import Content
+from rey_lib.files.file import File
+from rey_lib.errors.error_utils import AppError
 from rey_lib.formatting import markdown_to_html
 from rey_lib.logs.app_logger import AppLogger
 from rey_lib.viewers.language import classify_text_language
@@ -175,6 +181,7 @@ class AITask:
 
     status: str = field(default=IDLE, init=False)
     answer: Any = field(default=None, init=False)
+    saved_answer_path: str = field(default="", init=False)
     error: str = field(default="", init=False)
     run_id: str = field(default="", init=False)
 
@@ -668,6 +675,56 @@ class AITask:
         return Content(name=self.label or self.task_key or "answer", text=answer.text,
                        language=language, html=html, html_trusted=bool(html)).projection()["content"]
 
+    def slide_presentation(self) -> dict[str, Any] | None:
+        """The completed, explicitly declared Marp answer, without creating a File."""
+        answer = self.answer
+        if self.status != self.COMPLETED or getattr(answer, "media_type", "") != "text/markdown":
+            return None
+        source = str(getattr(answer, "text", "") or "")
+        front = re.match(r"^\ufeff?---[ \t]*\r?\n([\s\S]*?)\r?\n---(?:[ \t]*\r?\n|[ \t]*$)", source)
+        if front is None:
+            return None
+        # Only a valid, unambiguous explicit YAML declaration establishes a deck.
+        try:
+            node = yaml.compose(front.group(1))
+            if not isinstance(node, yaml.MappingNode):
+                return None
+            if not all(isinstance(key, yaml.ScalarNode) for key, _ in node.value):
+                return None
+            keys = [key.value for key, _ in node.value]
+            if len(keys) != len(set(keys)):
+                return None
+            marker = next((value for key, value in node.value if key.value == "marp"), None)
+            if not isinstance(marker, yaml.ScalarNode) or marker.value.lower() != "true":
+                return None
+            document = yaml.safe_load(front.group(1))
+        except yaml.YAMLError:
+            return None
+        if not isinstance(document, dict) or document.get("marp") is not True:
+            return None
+        return {
+            **Content(name=self.label or self.task_key or "Presentation", text=source, language="markdown").projection(),
+            "actions": ([] if self.saved_answer_path else [{
+                "role": {"act": "save", "on": "content"},
+                "command": {"command": "save_answer"},
+            }]),
+            "saved_path": self.saved_answer_path,
+            "run_id": self.run_id,
+        }
+
+    def save_answer(self, path: Path) -> Path:
+        """Save this answer only on request; the host authorizes the destination."""
+        if self.slide_presentation() is None:
+            raise AppError("This task has no completed slide answer to save.")
+        if self.saved_answer_path:
+            return Path(self.saved_answer_path)
+        try:
+            saved = File.for_path(path).write_text(self.answer.text)
+        except OSError as cause:
+            raise AppError("The presentation could not be saved.") from cause
+        self._become(saved_answer_path=str(saved))
+        return saved
+
     def definition(self) -> dict[str, Any]:
         """What this unit of work is and where it stands (#1199 S6).
 
@@ -725,7 +782,7 @@ class AITask:
         Args:
             run_id: How the execution now under way is addressed.
         """
-        self._become(status=self.RUNNING, answer=None, error="", run_id=str(run_id or ""))
+        self._become(status=self.RUNNING, answer=None, saved_answer_path="", error="", run_id=str(run_id or ""))
 
     def record_run(self, run_id: str) -> None:
         """Name the run executing this task, and change nothing else.
@@ -738,7 +795,7 @@ class AITask:
 
     def answered(self, answer: Any) -> None:
         """Completed, carrying what came back."""
-        self._become(status=self.COMPLETED, answer=answer, error="")
+        self._become(status=self.COMPLETED, answer=answer, saved_answer_path="", error="")
 
     def failed(self, message: str) -> None:
         """Failed, carrying why."""
@@ -755,7 +812,7 @@ class AITask:
         lifecycle is this object's own, so its transitions write it here. A
         governed fact is never written, even from inside.
         """
-        facts = set(lifecycle) - {"status", "answer", "error", "run_id"}
+        facts = set(lifecycle) - {"status", "answer", "saved_answer_path", "error", "run_id"}
         if facts:
             raise AttributeError(f"AITask facts are fixed: {', '.join(sorted(facts))}")
         for name, value in lifecycle.items():
