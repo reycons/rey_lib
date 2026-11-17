@@ -590,7 +590,7 @@ class AppExecute:
             self._stdout.append(str(text))
         self._tell(self)
 
-    def observe(self, observer: Callable[["AppExecute"], None]) -> None:
+    def observe(self, observer: Callable[["AppExecute"], None]) -> Callable[[], None]:
         """Be told after every write to this run or to any child run it owns.
 
         ``observer`` receives the run that was written to. It is told on the
@@ -599,6 +599,12 @@ class AppExecute:
         """
         with self._stdout_guard:
             self._observers.append(observer)
+
+        def release() -> None:
+            with self._stdout_guard:
+                if observer in self._observers:
+                    self._observers.remove(observer)
+        return release
 
     def _tell(self, written: "AppExecute") -> None:
         """Tell this run's observers, then its parent's, that ``written`` changed."""

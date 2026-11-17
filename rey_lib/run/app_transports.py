@@ -283,6 +283,54 @@ class AppTransports:
         # applications have ended (no longer running, until they are closed).
         self._watchers: list[Watcher] = []
         self._finished: set[str] = set()
+        self._starting: set[str] = set()
+        self._started = threading.Condition(self._guard)
+        self._closing = False
+
+    def application(self, runtime: Any, application: str, operation: str,
+                    inputs: Mapping[str, Any] | None = None) -> tuple[str, AppTransport]:
+        """Retain one application instance in this context, across hosted operations.
+
+        Pending startup is coordinated here, beside the existing held transports;
+        unrelated applications and already-held communication remain usable.
+        """
+        deadline = time.monotonic() + IO_REQUEST_SECONDS
+        with self._started:
+            while application in self._starting and not self._closing:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AppError(f"{application} did not finish starting within the IO bound.")
+                self._started.wait(remaining)
+            if self._closing:
+                raise AppError("This application context has ended.")
+            for ref, transport in self._held.items():
+                if transport.application == application and not transport.ended():
+                    return ref, transport
+            self._starting.add(application)
+        ref = ""
+        startup: list[dict[str, Any]] = []
+        release: Callable[[], None] = lambda: None
+        try:
+            ref, transport, release = self.launch(runtime, application, operation,
+                                                  dict(inputs or {}), startup.append)
+            if not transport.connected(timeout=IO_REQUEST_SECONDS):
+                self.close(ref)
+                ref = ""
+                last_line = ""
+                for message in startup:
+                    last_line = _last_line(message.get("stdout"), last_line)
+                raise AppError(f"{application} did not attach (exit code {transport.exit_code})"
+                               + (f": {last_line}" if last_line else "."))
+            return ref, transport
+        except BaseException:
+            if ref:
+                self.close(ref)
+            raise
+        finally:
+            release()
+            with self._started:
+                self._starting.discard(application)
+                self._started.notify_all()
 
     def open(self, app: Any, application: str = "") -> tuple[str, AppTransport]:
         """Hold a new transport for the launched ``app``, not yet started; answer its ref.
@@ -463,7 +511,10 @@ class AppTransports:
         them rather than the sum. Every one is attempted; a failure is raised
         once all have returned.
         """
-        with self._guard:
+        with self._started:
+            self._closing = True
+            while self._starting:
+                self._started.wait(IO_REQUEST_SECONDS)
             held = list(self._held.values())
             self._held.clear()
             self._finished.clear()

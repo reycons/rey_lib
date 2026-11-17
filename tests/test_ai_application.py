@@ -106,8 +106,15 @@ class _Transport:
         return self.has_ended
 
     def request(self, command: dict[str, Any], timeout: float = 0.0) -> dict[str, Any]:
+        if command["command"] == "open":
+            self.root_openings.append(dict(command))
+            return {"object": "ai", "projection": {"the": "AI itself"}}
         self.requested.append(dict(command))
         return dict(self.opened, request_id="made-here")
+
+    def subscribe(self, listener):
+        self.owner.listener = listener
+        return lambda: None
 
     def send(self, command: dict[str, Any]) -> None:
         self.sent.append(dict(command))
@@ -124,6 +131,17 @@ class _Transports:
         self.listener: Callable[[dict[str, Any]], None] | None = None
         self.closed: list[str] = []
         self.closed_all = 0
+        self.transport.owner = self
+        self.transport.root_openings = []
+
+    def application(self, runtime, application, operation):
+        if self.refuses is not None:
+            raise self.refuses
+        self.launched.append((runtime, application, operation, {}))
+        if not self.transport.attaches:
+            self.closed.append(f"ref{len(self.launched)}")
+            raise ConfigError("ai_app did not attach.")
+        return f"ref{len(self.launched)}", self.transport
 
     def launch(self, runtime: Any, application: str, operation: str, inputs: dict[str, Any],
                listener: Callable[[dict[str, Any]], None]) -> tuple[str, _Transport, Any]:
@@ -154,7 +172,9 @@ class TestACallOnAiApp:
         ai.call(runtime, "generate_sql", "/* AI: count */", relayed.append)
 
         # One ai_app for this application, launched through its own transports.
-        assert transports.launched == [(runtime, "ai_app", "serve", {"subject": "ai.settings"})]
+        assert transports.launched == [(runtime, "ai_app", "serve", {})]
+        assert transports.transport.root_openings == [
+            {"command": "open", "subject": "ai.settings", "identity": {"kind": "ai"}}]
         # The task command names the live AI's object, as its opening announced it.
         assert transports.transport.requested == [
             {"command": "task", "task_key": "comment_code", "object": "ai"},

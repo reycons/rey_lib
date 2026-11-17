@@ -161,7 +161,6 @@ class ApplicationAI:
         # The object id ai_app holds its live AI under: its opening's first message,
         # {"object", "projection"} (HostedObjects.serve), and what the task command names.
         self._ai_object = ""
-        self._opened = threading.Event()
         # Where each held task's messages go, by the object id ai_app holds it under.
         self._relays: dict[str, Relay] = {}
         # The application's decision about the last completed task's output, where it
@@ -608,7 +607,6 @@ class ApplicationAI:
             self._transport = None
             self._ref = ""
             self._ai_object = ""
-            self._opened.clear()
             self._relays.clear()
         self._transports.close_all()
 
@@ -626,37 +624,30 @@ class ApplicationAI:
             if self._transport is not None and not self._transport.ended():
                 return self._transport
             self._ai_object = ""
-            self._opened.clear()
             try:
-                ref, transport, _release = self._transports.launch(
-                    runtime, _AI_APPLICATION, _AI_OPERATION, {"subject": _AI_SUBJECT},
-                    self._pushed)
+                ref, transport = self._transports.application(
+                    runtime, _AI_APPLICATION, _AI_OPERATION)
+                transport.subscribe(self._pushed)
             except AppError as refused:
                 raise AIUnavailableError(f"ai_app could not be launched: {refused}") from refused
-            if not transport.connected(timeout=IO_REQUEST_SECONDS):
+            answer = transport.request({"command": "open", "subject": _AI_SUBJECT,
+                                        "identity": {"kind": "ai"}})
+            if answer.get("error") or not answer.get("object") or not isinstance(answer.get("projection"), dict):
                 self._transports.close(ref)
-                raise AIUnavailableError("ai_app did not attach.")
-            if not self._opened.wait(timeout=IO_REQUEST_SECONDS):
-                self._transports.close(ref)
-                raise AIUnavailableError("ai_app opened no AI.")
+                raise AIUnavailableError(str(answer.get("error") or "ai_app opened no AI."))
+            self._ai_object = str(answer["object"])
             self._transport, self._ref = transport, ref
             return transport
 
     def _pushed(self, message: dict[str, Any]) -> None:
-        """One message ai_app pushed: the AI's opening once, else to its task's relay, if any.
+        """Relay only messages of a task this caller opened.
 
-        The first ``{"object", "projection"}`` is the live AI's opening, as
-        HostedObjects.serve announces it: its object id is kept for the task command.
-        Every later message goes to the relay of the task object it carries.
+        The AI's own identity comes exclusively from its correlated open answer.
+        Unrelated objects on the retained application's channel cannot select it.
         """
         if not isinstance(message, Mapping):
             return
         object_id = str(message.get("object") or "")
-        if not self._opened.is_set():
-            if object_id and "projection" in message:
-                self._ai_object = object_id
-                self._opened.set()
-            return
         with self._guard:
             relay = self._relays.get(object_id)
         if relay is not None:
