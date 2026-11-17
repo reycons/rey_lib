@@ -1563,7 +1563,9 @@ def inspect_database_references(
             must stop the run -- publishing it as ``unsupported`` would launder
             a permissions or connection defect into a capability statement.
     """
-    from rey_lib.db.postgres_references import ANALYZABLE_LANGUAGES, analyse_routine
+    from rey_lib.db.postgres_references import (
+        ANALYZABLE_LANGUAGES, analyse_routine, analyse_view,
+    )
 
     objects: list[dict[str, Any]] = []
     members: list[dict[str, Any]] = []
@@ -1587,6 +1589,9 @@ def inspect_database_references(
             "object_type": candidate["object_type"],
             "signature": candidate.get("signature", ""),
         })
+    # Column derivations (#1425): bound against this same snapshot.
+    binder = _DerivationBinder(in_scope, relations, routines)
+    view_inputs = _view_input_columns(conn, schema)
 
     for trigger in triggers:
         objects.append({
@@ -1606,14 +1611,19 @@ def inspect_database_references(
         })
 
     for rel in relations:
+        # A relation's outgoing kinds come from the catalog, so its reference
+        # analysis is complete by construction. A view's definition is also read
+        # for its column derivations (#1425), which can leave it partial.
+        status = "complete"
+        if rel["object_type"] in ("view", "materialized_view") and rel.get("definition"):
+            status = _view_derivations(rel, analyse_view(rel["definition"]), binder,
+                                       view_inputs, members, observations)
         objects.append({
             "schema_name": rel["schema"], "object_name": rel["name"],
             "object_type": rel["object_type"], "signature": "",
             "provider_object_id": str(rel["oid"]),
             "definition_hash": rel["definition_hash"],
-            # A relation has no body to analyze, and its outgoing kinds come
-            # from the catalog, so analysis is complete by construction.
-            "reference_analysis_status": "complete",
+            "reference_analysis_status": status,
             "definition": rel.get("definition", ""),
             # A relation does not return; the columns are stated as members.
             "returns_set": False, "return_type_kind": "",
@@ -1636,12 +1646,19 @@ def inspect_database_references(
             if language in ANALYZABLE_LANGUAGES
             else _unsupported()
         )
+        derived_members, derived, binding_gaps = binder.bind(
+            routine, analysis, "routine_definition", routine["parameters"])
         objects.append({
             "schema_name": routine["schema"], "object_name": routine["name"],
             "object_type": routine["object_type"], "signature": routine["signature"],
             "provider_object_id": str(routine["oid"]),
             "definition_hash": routine["definition_hash"],
-            "reference_analysis_status": analysis.status,
+            # A column derivation not established is a gap in what analysis
+            # established (#1425), published beside the reference gaps.
+            "reference_analysis_status": (
+                "partial" if (binding_gaps or analysis.derivation_gaps)
+                and analysis.status == "complete" else analysis.status
+            ),
             "definition": routine["definition"],
             # The return SHAPE, which the signature cannot carry:
             # pg_get_function_identity_arguments is arguments only. Both are
@@ -1686,6 +1703,14 @@ def inspect_database_references(
                 fact_source="parsed", evidence="analysis_gap",
                 observed_target=gap,
             ))
+        for gap in analysis.derivation_gaps:
+            observations.append(_observation(
+                origin, None, "derivation_input", routine["definition_hash"],
+                fact_source="parsed", evidence="analysis_gap",
+                observed_target=gap,
+            ))
+        members.extend(derived_members)
+        observations.extend(derived)
 
     observations.extend(
         _catalog_observations(conn, schema, in_scope, typed, relations,
@@ -1698,6 +1723,76 @@ def _unsupported() -> Any:
     from rey_lib.db.postgres_references import RoutineAnalysis
 
     return RoutineAnalysis(status="unsupported")
+
+
+def _view_derivations(
+    view: dict[str, Any], analysis: Any, binder: "_DerivationBinder",
+    view_inputs: dict[Any, set[tuple[str, str, str]]],
+    members: list[dict[str, Any]], observations: list[dict[str, Any]],
+) -> str:
+    """One view's column derivations (#1425), its catalog inputs, and its status.
+
+    The catalog supplies dependency evidence -- the input columns the view
+    uses -- as member-level ``read`` observations; the parse supplies which
+    input becomes which output and how. Each difference between the two is an
+    ``analysis_gap``, never hidden (G7).
+    """
+    origin = (view["schema"], view["name"], view["object_type"], "")
+    catalogued = {
+        one for one in view_inputs.get(view["oid"], set())
+        if (one[0], one[1]) != (view["schema"], view["name"])
+    }
+    for schema_name, relation, column in sorted(catalogued):
+        target = _target(f"{schema_name}.{relation}", binder._in_scope, "read")  # noqa: SLF001
+        ordinal = next((c["ordinal"] for c in binder._columns.get(  # noqa: SLF001
+            (schema_name, relation), ()) if c["name"] == column), 0)
+        resolved = target["resolution"] == "exact" and ordinal > 0
+        observations.append({
+            **_catalog_edge(origin, target if resolved else None, "read",
+                            view["definition_hash"], "view_definition"),
+            "to_member_kind": "column" if resolved else "",
+            "to_member_name": column if resolved else "",
+            "to_ordinal": ordinal if resolved else 0,
+            "observed_target": f"{schema_name}.{relation}.{column}",
+        })
+    if analysis.status in ("unparsed", "unsupported"):
+        return analysis.status
+    derived_members, derived, binding_gaps = binder.bind(view, analysis, "view_definition")
+    reasons = list(analysis.derivation_gaps) + binder.view_cross_check(
+        view, analysis, derived, catalogued)
+    for reason in reasons:
+        observations.append(_observation(
+            origin, None, "reference", view["definition_hash"],
+            fact_source="parsed", evidence="analysis_gap", observed_target=reason,
+        ))
+    members.extend(derived_members)
+    observations.extend(derived)
+    return "partial" if binding_gaps or reasons else "complete"
+
+
+def _view_input_columns(conn: Any, schema: str | None) -> dict[Any, set[tuple[str, str, str]]]:
+    """Each view's input columns, as the catalog records them (``pg_depend.refobjsubid``).
+
+    Dependency evidence only: which columns a view's query uses, not which
+    output each becomes.
+    """
+    found: dict[Any, set[tuple[str, str, str]]] = {}
+    for oid, nsp, relation, column in _reference_rows(conn, """
+        SELECT DISTINCT v.oid, tn.nspname, t.relname, a.attname
+        FROM pg_class v
+        JOIN pg_namespace n ON n.oid = v.relnamespace
+        JOIN pg_rewrite rw ON rw.ev_class = v.oid
+        JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid
+                        AND d.refclassid = 'pg_class'::regclass AND d.refobjsubid > 0
+        JOIN pg_class t ON t.oid = d.refobjid
+        JOIN pg_namespace tn ON tn.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+        WHERE v.relkind IN ('v','m') AND v.oid <> t.oid
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+    """, [schema, schema]):
+        found.setdefault(oid, set()).add((nsp, relation, column))
+    return found
 
 
 _UNRESOLVED = {"schema": "", "name": "", "object_type": "", "signature": "",
@@ -1766,6 +1861,315 @@ def _observation(
         "source_line": 0, "source_column": 0,
         "fact_source": fact_source, "evidence": evidence,
     }
+
+
+# -- column derivations (#1425) ------------------------------------------------
+
+#: A member as the index names it: (member_kind, member_name, ordinal).
+_Member = tuple[str, str, int]
+
+
+def _identity(target: dict[str, Any]) -> tuple[str, str, str, str]:
+    """An object's natural key, from a resolved target."""
+    return (target["schema"], target["name"], target["object_type"],
+            target.get("signature", ""))
+
+#: Parameter modes whose values a routine gives back: its output columns.
+_OUTPUT_CAPABLE = ("OUT", "INOUT", "TABLE")
+
+
+class _DerivationBinder:
+    """Binds an object's derivations to indexed members, and says what it could not.
+
+    Columns In -> Transform -> Columns Out (#1425). Each transform becomes a
+    ``transform`` member of the object that contains it; each input, output,
+    condition and user-defined call becomes an observation **from that
+    transform**. Inputs are staged that way -- observed in the object, naming
+    what it read -- and publication stores them in data-flow direction.
+
+    Binding follows :func:`_target`'s rules and adds the column: a relation
+    must resolve exactly and hold the column; an unqualified column is settled
+    at the innermost query level holding it -- one candidate is ``exact``,
+    several ``ambiguous``. Everything that does not bind is an ``analysis_gap``
+    observation, and the object is ``partial``.
+    """
+
+    def __init__(self, in_scope: dict[tuple[str, str], list[dict[str, str]]],
+                 relations: list[dict[str, Any]],
+                 routines: list[dict[str, Any]] | None = None) -> None:
+        self._in_scope = in_scope
+        self._columns = {
+            (rel["schema"], rel["name"]): rel["columns"] for rel in relations
+        }
+        # A function read in FROM yields its output parameters as columns.
+        self._parameters_of = {
+            (one["schema"], one["name"], one["object_type"], one["signature"]):
+                one["parameters"] for one in routines or ()
+        }
+
+    def bind(self, owner: dict[str, Any], analysis: Any, evidence: str,
+             parameters: list[dict[str, Any]] | None = None,
+             ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+        """Members, observations and the number of gaps for one object's derivations."""
+        origin = (owner["schema"], owner["name"], owner["object_type"],
+                  owner.get("signature", ""))
+        self._origin, self._hash, self._evidence = origin, owner["definition_hash"], evidence
+        self._parameters = list(parameters or ())
+        self._variables = getattr(analysis, "variables", frozenset())
+        self._own = {one.key: one for one in analysis.derivations}
+        members: list[dict[str, Any]] = []
+        observations: list[dict[str, Any]] = []
+        gaps = 0
+        for derivation in analysis.derivations:
+            transform = ("transform", derivation.key, derivation.ordinal)
+            output, data_type = self._output(owner, derivation)
+            members.append({
+                "schema_name": origin[0], "object_name": origin[1],
+                "object_type": origin[2], "signature": origin[3],
+                "member_kind": "transform", "member_name": derivation.key,
+                "ordinal": derivation.ordinal, "data_type": data_type,
+                "member_mode": derivation.role, "provider_member_id": derivation.key,
+                "has_default": False, "expression": derivation.expression,
+            })
+            for one in derivation.inputs:
+                for row in self._input(transform, derivation, one):
+                    gaps += row["evidence"] == "analysis_gap"
+                    observations.append(row)
+            if output is not None:
+                gaps += output["evidence"] == "analysis_gap"
+                observations.append(output)
+            for condition in derivation.conditions:
+                observations.append(self._observe(
+                    transform, origin, ("transform", condition, self._own[condition].ordinal),
+                    "reference", "exact", condition, derivation))
+            for called in sorted(derivation.calls):
+                target = _target(called, self._in_scope, "call")
+                if target["resolution"] == "exact":
+                    # User-defined functions only; built-ins stay in the expression.
+                    observations.append(self._observe(
+                        transform, (target["schema"], target["name"],
+                                    target["object_type"], target["signature"]),
+                        None, "call", "exact", called, derivation))
+        return members, observations, gaps
+
+    # -- one input --------------------------------------------------------------
+
+    def _input(self, transform: _Member, derivation: Any, one: Any,
+               ) -> list[dict[str, Any]]:
+        if one.position:
+            inputs = [p for p in self._parameters if p["member_mode"] in _INPUT_CAPABLE]
+            if one.position <= len(inputs):
+                found = inputs[one.position - 1]
+                return [self._observe(transform, self._origin,
+                                      ("parameter", found["member_name"], found["ordinal"]),
+                                      "derivation_input", "exact", one.observed, derivation)]
+            return [self._gap(transform, "derivation_input", "unresolved",
+                              f"{one.observed}: no such parameter", derivation)]
+        levels: dict[int, list[tuple[str, Any]]] = {}
+        unknowable: list[str] = []
+        for kind, ref, level in one.candidates:
+            if kind == "transforms":
+                levels.setdefault(level, []).append(("transforms", ref))
+            elif kind == "unknown":
+                unknowable.append(ref)
+            elif kind == "row":
+                # A whole row read as a value: every column of the relation.
+                target = _target(ref, self._in_scope, "read")
+                if target["resolution"] != "exact":
+                    unknowable.append(ref)
+                    continue
+                return [self._observe(transform, _identity(target),
+                                      ("column", column["name"], column["ordinal"]),
+                                      "derivation_input", "exact", one.observed, derivation)
+                        for column in self._columns.get((target["schema"], target["name"]), ())]
+            elif kind == "function":
+                called, _, renamed = ref.partition("#")
+                found = self._function_column(called, renamed, one.name)
+                if found is None:
+                    unknowable.append(called)
+                elif found:
+                    levels.setdefault(level, []).append(("column", found))
+            else:
+                target = _target(ref, self._in_scope, "read")
+                if target["resolution"] != "exact":
+                    unknowable.append(ref)
+                    continue
+                for column in self._columns.get((target["schema"], target["name"]), ()):
+                    if column["name"] == one.name:
+                        levels.setdefault(level, []).append(
+                            ("column", (target, ("column", column["name"],
+                                                 column["ordinal"]))))
+        for level in sorted(levels):
+            matches = levels[level]
+            if len(matches) > 1 and one.merged:
+                # A JOIN ... USING column: one value, read from every side.
+                return [row for kind, match in matches
+                        for row in self._matched(transform, kind, match, one, derivation)]
+            if len(matches) > 1:
+                return [self._gap(transform, "derivation_input", "ambiguous",
+                                  f"{one.observed}: ambiguous column", derivation)]
+            kind, match = matches[0]
+            return self._matched(transform, kind, match, one, derivation)
+        for parameter in self._parameters:
+            if parameter["member_name"] == one.name:
+                return [self._observe(transform, self._origin,
+                                      ("parameter", parameter["member_name"],
+                                       parameter["ordinal"]),
+                                      "derivation_input", "exact", one.observed, derivation)]
+        if unknowable:
+            reason = f"{one.observed}: from {', '.join(sorted(set(unknowable)))}, not indexed"
+        elif one.name in self._variables:
+            reason = f"{one.observed}: a variable, not traced in v1"
+        else:
+            reason = f"{one.observed}: binds to no column"
+        return [self._gap(transform, "derivation_input", "unresolved", reason, derivation)]
+
+    def _matched(self, transform: _Member, kind: str, match: Any, one: Any,
+                 derivation: Any) -> list[dict[str, Any]]:
+        """The exact input observations for one bound candidate."""
+        if kind == "transforms":
+            return [self._observe(transform, self._origin,
+                                  ("transform", key, self._own[key].ordinal),
+                                  "derivation_input", "exact", one.observed, derivation)
+                    for key in match.split("|") if key in self._own]
+        target, member = match
+        return [self._observe(transform, _identity(target), member,
+                              "derivation_input", "exact", one.observed, derivation)]
+
+    def _function_column(self, called: str, renamed: str, name: str,
+                         ) -> tuple[dict[str, Any], _Member] | None | tuple[()]:
+        """The output parameter a function in FROM yields as column ``name``.
+
+        ``None`` where the function is not one indexed object (a built-in, an
+        overload, out of scope); ``()`` where it is, but yields no such column.
+        """
+        target = _target(called, self._in_scope, "call")
+        if target["resolution"] != "exact":
+            return None
+        outputs = [p for p in self._parameters_of.get(_identity(target), ())
+                   if p["member_mode"] in _OUTPUT_CAPABLE]
+        aliases = [one for one in renamed.split(",") if one]
+        if aliases:
+            position = aliases.index(name) + 1 if name in aliases else 0
+            found = outputs[position - 1] if 0 < position <= len(outputs) else None
+        else:
+            found = next((p for p in outputs if p["member_name"] == name), None)
+        if found is None:
+            return ()
+        return target, ("parameter", found["member_name"], found["ordinal"])
+
+    # -- one output -------------------------------------------------------------
+
+    def _output(self, owner: dict[str, Any], derivation: Any,
+                ) -> tuple[dict[str, Any] | None, str]:
+        """The output observation, and the result's data type where it is stated."""
+        transform = ("transform", derivation.key, derivation.ordinal)
+        kind = derivation.output_kind
+        if kind == "self":
+            columns = owner.get("columns") or []
+            if derivation.output_position <= len(columns):
+                column = columns[derivation.output_position - 1]
+                return (self._observe(transform, self._origin,
+                                      ("column", column["name"], column["ordinal"]),
+                                      "derivation_output", "exact",
+                                      column["name"], derivation), column["data_type"])
+            return (self._gap(transform, "derivation_output", "unresolved",
+                              f"output {derivation.output_position}: no such column",
+                              derivation), "unknown")
+        if kind == "return":
+            outputs = [p for p in self._parameters if p["member_mode"] in _OUTPUT_CAPABLE]
+            if derivation.output_position <= len(outputs):
+                found = outputs[derivation.output_position - 1]
+                return (self._observe(transform, self._origin,
+                                      ("parameter", found["member_name"], found["ordinal"]),
+                                      "derivation_output", "exact",
+                                      found["member_name"], derivation), found["data_type"])
+            return (self._gap(transform, "derivation_output", "unresolved",
+                              f"returned column {derivation.output_position}: "
+                              "the routine's return columns are not catalogued",
+                              derivation), "unknown")
+        if kind == "relation":
+            target = _target(derivation.output_relation, self._in_scope, "write")
+            columns = (self._columns.get((target["schema"], target["name"]), [])
+                       if target["resolution"] == "exact" else [])
+            column = next((c for c in columns if c["name"] == derivation.output_column), None)
+            if column is None and not derivation.output_column \
+                    and derivation.output_position <= len(columns):
+                column = columns[derivation.output_position - 1]
+            if column is not None:
+                return (self._observe(transform, (target["schema"], target["name"],
+                                                  target["object_type"], target["signature"]),
+                                      ("column", column["name"], column["ordinal"]),
+                                      "derivation_output", "exact",
+                                      f"{derivation.output_relation}.{column['name']}",
+                                      derivation), column["data_type"])
+            return (self._gap(transform, "derivation_output", "unresolved",
+                              f"{derivation.output_relation}."
+                              f"{derivation.output_column or derivation.output_position}: "
+                              "not indexed", derivation), "unknown")
+        return None, "unknown"
+
+    # -- rows -------------------------------------------------------------------
+
+    def _observe(self, transform: _Member, target: tuple[str, str, str, str],
+                 member: _Member | None, kind: str, resolution: str, observed: str,
+                 derivation: Any) -> dict[str, Any]:
+        """One observation from a transform of this object."""
+        exact = resolution == "exact"
+        return {
+            "from_schema_name": self._origin[0], "from_object_name": self._origin[1],
+            "from_object_type": self._origin[2], "from_signature": self._origin[3],
+            "from_member_kind": transform[0], "from_member_name": transform[1],
+            "from_ordinal": transform[2],
+            "to_schema_name": target[0] if exact else "",
+            "to_object_name": target[1] if exact else "",
+            "to_object_type": target[2] if exact else "",
+            "to_signature": target[3] if exact else "",
+            "to_member_kind": member[0] if exact and member else "",
+            "to_member_name": member[1] if exact and member else "",
+            "to_ordinal": member[2] if exact and member else 0,
+            "reference_kind": kind, "observed_target": observed,
+            "resolution": resolution,
+            "observed_definition_hash": self._hash,
+            "statement_ordinal": derivation.statement_ordinal,
+            "source_line": 0, "source_column": 0,
+            "fact_source": "parsed",
+            "evidence": self._evidence if exact else "analysis_gap",
+        }
+
+    def _gap(self, transform: _Member, kind: str, resolution: str, reason: str,
+             derivation: Any) -> dict[str, Any]:
+        return self._observe(transform, self._origin, None, kind, resolution, reason,
+                             derivation)
+
+    def view_cross_check(self, view: dict[str, Any], analysis: Any,
+                         observations: list[dict[str, Any]],
+                         catalogued: set[tuple[str, str, str]]) -> list[str]:
+        """G7: the input columns parsed for a view against those the catalog states.
+
+        Parsed inputs are every column a transform reads plus those read only to
+        order the result; the catalog's are ``pg_depend``'s column dependencies.
+        Each difference is a reason, which the caller publishes as a gap.
+        """
+        parsed = {
+            (row["to_schema_name"], row["to_object_name"], row["to_member_name"])
+            for row in observations
+            if row["reference_kind"] == "derivation_input"
+            and row["resolution"] == "exact" and row["to_member_kind"] == "column"
+            and (row["to_schema_name"], row["to_object_name"])
+            != (view["schema"], view["name"])
+        }
+        for one in getattr(analysis, "ordering", ()):
+            for kind, ref, _level in one.candidates:
+                target = _target(ref, self._in_scope, "read") if kind == "relation" else None
+                if target and target["resolution"] == "exact":
+                    parsed.add((target["schema"], target["name"], one.name))
+        missing = sorted(catalogued - parsed)
+        extra = sorted(parsed - catalogued)
+        return ([f"catalog input column {'.'.join(one)} is read by no parsed transform"
+                 for one in missing]
+                + [f"parsed input column {'.'.join(one)} is not a catalog dependency"
+                   for one in extra])
 
 #: Relation kinds the index admits as objects. Indexes and constraints are
 #: deliberately absent: a foreign key is already an edge between members, an

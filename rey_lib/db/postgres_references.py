@@ -36,7 +36,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["RoutineAnalysis", "analyse_routine", "ANALYZABLE_LANGUAGES"]
+__all__ = [
+    "RoutineAnalysis", "analyse_routine", "analyse_view", "ANALYZABLE_LANGUAGES",
+    "Derivation", "DerivationInput",
+]
 
 #: Languages this module can read. A routine in any other language is
 #: ``unsupported`` -- an honest statement that no analyzer applies, never a
@@ -73,6 +76,21 @@ class RoutineAnalysis:
     #: Why completeness could not be asserted. Non-empty exactly when the
     #: status is ``partial``.
     gaps: list[str] = field(default_factory=list)
+    #: Columns In -> Transform -> Columns Out, one per transform, as the
+    #: statements name them (#1425). Binding them to indexed members is the
+    #: caller's, as binding relations is.
+    derivations: list["Derivation"] = field(default_factory=list)
+    #: Why a column derivation could not be established. Kept apart from
+    #: ``gaps``, which -- with ``status`` -- answer for the READ/WRITE/CALL
+    #: analysis exactly as before; the caller publishes both.
+    derivation_gaps: list[str] = field(default_factory=list)
+    #: The PL/pgSQL variables the body declares, parameters included. A name
+    #: that binds to no column may be one of these, which says why it does not.
+    variables: frozenset[str] = frozenset()
+    #: Columns read only to ORDER the result. They shape no value and no row, so
+    #: they are not a transform; they are kept because the catalog counts them
+    #: among a view's input columns, and the two are compared.
+    ordering: list["DerivationInput"] = field(default_factory=list)
 
 
 def analyse_routine(definition: str, language: str) -> RoutineAnalysis:
@@ -114,6 +132,7 @@ def analyse_routine(definition: str, language: str) -> RoutineAnalysis:
             _collect(parse_sql(body), found)
         except Exception:
             return RoutineAnalysis(status="unparsed")
+        _derive_sql_body(body, found)
         return found.as_analysis()
 
     tree = None
@@ -142,6 +161,7 @@ def analyse_routine(definition: str, language: str) -> RoutineAnalysis:
             # Recorded, never skipped. This is the invariant.
             found.gaps.append(f"unparseable fragment: {fragment[:120]}")
 
+    _derive_plpgsql(tree, found)
     return found.as_analysis()
 
 
@@ -172,6 +192,10 @@ class _Found:
     calls: set[str] = field(default_factory=set)
     ctes: set[str] = field(default_factory=set)
     gaps: list[str] = field(default_factory=list)
+    derivations: list["Derivation"] = field(default_factory=list)
+    derivation_gaps: list[str] = field(default_factory=list)
+    variables: frozenset[str] = frozenset()
+    ordering: list["DerivationInput"] = field(default_factory=list)
 
     def as_analysis(self) -> RoutineAnalysis:
         """Settle reads against writes and CTEs, and state the status."""
@@ -184,6 +208,10 @@ class _Found:
             writes=set(self.writes),
             calls=set(self.calls),
             gaps=list(self.gaps),
+            derivations=list(self.derivations),
+            derivation_gaps=list(self.derivation_gaps),
+            variables=self.variables,
+            ordering=list(self.ordering),
         )
 
 
@@ -327,3 +355,612 @@ def _qualified(relation: Any) -> str:
 
 def _dotted(funcname: Any) -> str:
     return ".".join(part.sval for part in funcname)
+
+
+# -- column derivations (#1425) ------------------------------------------------
+#
+# Columns In -> Transform -> Columns Out, read from the same pglast trees the
+# reference analysis walks. A transform is one expression with the columns it
+# reads and where its result goes, or one row-shaping predicate (a join, a
+# filter, a grouping) with the columns it reads. Names are reported as the
+# statement writes them -- an alias resolved to the relation it stands for, an
+# unqualified column given every relation it could come from -- and binding them
+# to indexed members is the caller's, exactly as binding relation names is.
+#
+# The honesty contract holds at column level: what cannot be established is a
+# gap, never a missing transform.
+
+#: The roles a transform plays: what it does to values, or to rows.
+VALUE, JOIN, FILTER, GROUP = "value", "join", "filter", "group"
+
+#: Where a value transform's result goes.
+#:   self         -- the analyzed object's own column at ``output_position`` (a view)
+#:   relation     -- a column of ``output_relation`` (INSERT, UPDATE)
+#:   return       -- the routine's output column at ``output_position``
+#:   intermediate -- read only by other transforms (a CTE, a subquery)
+SELF, RELATION, RETURN, INTERMEDIATE = "self", "relation", "return", "intermediate"
+
+
+@dataclass(frozen=True)
+class DerivationInput:
+    """One value a transform reads, as the statement names it.
+
+    ``candidates`` are where the name could come from, innermost query level
+    first: ``("relation", "schema.name", level)``, ``("transforms", "k1|k2",
+    level)`` for a CTE or subquery column (several keys where a set operation
+    has several branches), or ``("unknown", alias, level)`` for a FROM item
+    whose columns cannot be known. One candidate is a qualified reference;
+    several are an unqualified one, settled by the binder against the catalog.
+    ``position`` is set instead for a positional parameter (``$1``).
+    """
+
+    name: str
+    observed: str
+    candidates: tuple[tuple[str, str, int], ...] = ()
+    position: int = 0
+    #: An unqualified JOIN ... USING column: one value read from every side.
+    merged: bool = False
+
+
+@dataclass
+class Derivation:
+    """One transform: its expression, what it reads, and where its result goes.
+
+    ``key`` is stable while the definition is unchanged:
+    ``<statement>.<query path>.<role>.<ordinal>.<name>``.
+    """
+
+    key: str
+    role: str
+    statement_ordinal: int
+    ordinal: int
+    expression: str
+    inputs: list[DerivationInput] = field(default_factory=list)
+    output_kind: str = ""
+    output_relation: str = ""
+    output_column: str = ""
+    output_position: int = 0
+    #: The row-shaping transforms (join, filter, group) of the same query level.
+    conditions: list[str] = field(default_factory=list)
+    #: Function names the expression calls, as written.
+    calls: set[str] = field(default_factory=set)
+
+
+def analyse_view(definition: str) -> RoutineAnalysis:
+    """Read one view's definition (``pg_get_viewdef``) into its derivations.
+
+    A view is a query without procedural flow; its output columns are the
+    view's own columns, by position. Its relation references come from the
+    catalog, so ``reads`` stays empty here.
+
+    Returns:
+        ``complete`` with derivations, ``partial`` with the gaps that stopped a
+        column being established, or ``unparsed`` where the text does not parse.
+        Never raises for a definition it cannot read.
+    """
+    try:
+        from pglast import parse_sql
+        from pglast.parser import ParseError
+    except ImportError:
+        return RoutineAnalysis(status="unsupported")
+    try:
+        statements = parse_sql(definition)
+    except ParseError:
+        return RoutineAnalysis(status="unparsed")
+    found = _Found()
+    for ordinal, raw in enumerate(statements, start=1):
+        _Deriver(ordinal, found).statement(raw.stmt, SELF)
+    return found.as_analysis()
+
+
+def _derive_sql_body(body: str, found: _Found) -> None:
+    """A SQL-language routine's derivations: its last SELECT is what it returns."""
+    from pglast import ast as A, parse_sql
+    from pglast.parser import ParseError
+
+    try:
+        statements = parse_sql(body)
+    except ParseError:
+        # The reference pass parsed this same body; reaching here means the two
+        # disagree, which must be said rather than shown as no derivations.
+        found.derivation_gaps.append("derivation: body did not parse")
+        return
+    last = len(statements)
+    for ordinal, raw in enumerate(statements, start=1):
+        is_return = ordinal == last and isinstance(raw.stmt, A.SelectStmt)
+        _Deriver(ordinal, found).statement(raw.stmt, RETURN if is_return else "")
+
+
+def _derive_plpgsql(tree: Any, found: _Found) -> None:
+    """A PL/pgSQL body's derivations: its SQL statements and RETURN QUERY.
+
+    Only statements whose results land in columns are derived: INSERT and
+    UPDATE into relations, RETURN QUERY into the routine's output columns. A
+    SELECT INTO feeds a variable, which v1 does not trace; a later statement
+    reading that variable records it as an input that binds to no column.
+    """
+    from pglast import parse_sql
+    from pglast.parser import ParseError
+
+    found.variables = frozenset(_declared_variables(tree))
+    for ordinal, (query, context) in enumerate(_statement_fragments(tree), start=1):
+        try:
+            statements = parse_sql(query)
+        except ParseError:
+            # Already recorded as an unparseable fragment by the reference pass.
+            continue
+        for raw in statements:
+            _Deriver(ordinal, found).statement(
+                raw.stmt, RETURN if context == "return_query" else "")
+
+
+def _declared_variables(tree: Any) -> list[str]:
+    """Every variable a PL/pgSQL function declares, its parameters included."""
+    names: list[str] = []
+    for function in tree if isinstance(tree, list) else [tree]:
+        for datum in (function.get("PLpgSQL_function") or {}).get("datums") or ():
+            for value in datum.values():
+                if isinstance(value, dict) and value.get("refname"):
+                    names.append(str(value["refname"]))
+    return names
+
+
+def _statement_fragments(tree: Any, out: list[tuple[str, str]] | None = None,
+                         ) -> list[tuple[str, str]]:
+    """Each SQL statement in a PL/pgSQL tree, with what holds it.
+
+    ``execsql`` for a statement run in place, ``return_query`` for RETURN QUERY.
+    Expressions and assignments are not statements and are not derived.
+    """
+    out = out if out is not None else []
+    if isinstance(tree, dict):
+        for key, value in tree.items():
+            held = {"PLpgSQL_stmt_execsql": ("sqlstmt", "execsql"),
+                    "PLpgSQL_stmt_return_query": ("query", "return_query")}.get(key)
+            if held and isinstance(value, dict):
+                expr = (value.get(held[0]) or {}).get("PLpgSQL_expr") or {}
+                if expr.get("query"):
+                    out.append((expr["query"], held[1]))
+            _statement_fragments(value, out)
+    elif isinstance(tree, list):
+        for item in tree:
+            _statement_fragments(item, out)
+    return out
+
+
+@dataclass
+class _Scope:
+    """One query level's FROM items: what each alias stands for."""
+
+    relations: dict[str, str] = field(default_factory=dict)
+    derived: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    unknown: set[str] = field(default_factory=set)
+    ctes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: alias -> "function as written#column aliases": a function in FROM, whose
+    #: columns are its output parameters where the index holds it.
+    functions: dict[str, str] = field(default_factory=dict)
+    #: Columns a JOIN ... USING merged: unqualified, each names every side.
+    merged: set[str] = field(default_factory=set)
+    parent: "_Scope | None" = None
+    level: int = 0
+
+    def child(self) -> "_Scope":
+        return _Scope(parent=self, level=self.level + 1)
+
+    def cte(self, name: str) -> dict[str, list[str]] | None:
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.ctes:
+                return scope.ctes[name]
+            scope = scope.parent
+        return None
+
+
+class _Deriver:
+    """Derives one statement's transforms into ``found``."""
+
+    def __init__(self, statement_ordinal: int, found: _Found) -> None:
+        self._ordinal = statement_ordinal
+        self._found = found
+        # Subqueries are numbered in the order the statement is read, so a
+        # transform's key is the same on every run over the same definition.
+        self._subqueries = 0
+
+    def _next_subquery(self) -> int:
+        self._subqueries += 1
+        return self._subqueries
+
+    # -- statements -----------------------------------------------------------
+
+    def statement(self, stmt: Any, sink: str) -> None:
+        """Derive one statement. ``sink`` says where a top-level SELECT's results go."""
+        from pglast import ast as A
+
+        if isinstance(stmt, A.SelectStmt):
+            if sink:
+                self._select(stmt, "q", sink, _Scope(), "")
+        elif isinstance(stmt, A.InsertStmt):
+            self._insert(stmt)
+        elif isinstance(stmt, A.UpdateStmt):
+            self._update(stmt)
+        elif type(stmt).__name__ == "MergeStmt":
+            self._gap("MERGE: column derivations not analysed")
+
+    def _insert(self, stmt: Any) -> None:
+        target = _qualified(stmt.relation)
+        columns = [one.name for one in stmt.cols or ()]
+        scope = _Scope()
+        produced: list[tuple[str, list[str]]] = []
+        if stmt.selectStmt is not None:
+            produced = self._select(stmt.selectStmt, "q", RELATION, scope, target,
+                                    columns=columns)
+        conflict = stmt.onConflictClause
+        if conflict is not None and conflict.targetList:
+            # ON CONFLICT DO UPDATE: EXCLUDED is the row the INSERT proposed.
+            by_name = {name: keys for name, keys in produced if name}
+            alias = stmt.relation.alias.aliasname if stmt.relation.alias else stmt.relation.relname
+            upsert = _Scope(relations={alias: target},
+                            derived={"excluded": by_name})
+            conditions = self._predicate(conflict.whereClause, FILTER, "u", 1, upsert)
+            for position, one in enumerate(conflict.targetList, start=1):
+                self._value(one.val, "u", position, one.name, upsert,
+                            conditions, RELATION, target, one.name)
+
+    def _update(self, stmt: Any) -> None:
+        from pglast import ast as A
+
+        target = _qualified(stmt.relation)
+        scope = _Scope()
+        alias = stmt.relation.alias.aliasname if stmt.relation.alias else stmt.relation.relname
+        scope.relations[alias] = target
+        conditions: list[str] = []
+        for item in stmt.fromClause or ():
+            conditions += self._from(item, "q", scope)
+        conditions += self._predicate(stmt.whereClause, FILTER, "q", 1, scope)
+        for position, one in enumerate(stmt.targetList or (), start=1):
+            if isinstance(one.val, A.MultiAssignRef):
+                self._gap(f"UPDATE ... SET ({one.name}, ...) = (...): not analysed")
+                continue
+            self._value(one.val, "q", position, one.name, scope, conditions,
+                        RELATION, target, one.name)
+
+    # -- queries --------------------------------------------------------------
+
+    def _select(self, stmt: Any, path: str, sink: str, parent: _Scope, target: str,
+                columns: list[str] | None = None) -> list[tuple[str, list[str]]]:
+        """Derive one SELECT; answer its output columns as (name, keys) by position."""
+        from pglast.enums import SetOperation
+
+        if stmt.op not in (None, SetOperation.SETOP_NONE):
+            left = self._select(stmt.larg, path + ".l", sink, parent, target, columns)
+            right = self._select(stmt.rarg, path + ".r", sink, parent, target, columns)
+            return [(name, keys + other) for (name, keys), (_n, other) in zip(left, right)]
+        # Every query is its own level: its FROM items are visible to the queries
+        # nested in it and never to the query that contains it.
+        scope = parent.child()
+        recursive = bool(stmt.withClause and stmt.withClause.recursive)
+        for cte in (stmt.withClause.ctes if stmt.withClause else ()):
+            names = [one.sval for one in cte.aliascolnames or ()]
+            cte_path = f"{path}.cte:{cte.ctename}"
+            query = cte.ctequery
+            if recursive and query.op not in (None, SetOperation.SETOP_NONE):
+                # WITH RECURSIVE: the anchor states the columns; the recursive
+                # term reads the CTE itself, so it is named before that term.
+                anchor = self._select(query.larg, cte_path + ".l", INTERMEDIATE, scope, "")
+                scope.ctes[cte.ctename] = _named(anchor, names)
+                step = self._select(query.rarg, cte_path + ".r", INTERMEDIATE, scope, "")
+                produced = [(name, keys + more)
+                            for (name, keys), (_n, more) in zip(anchor, step)]
+            else:
+                produced = self._select(query, cte_path, INTERMEDIATE, scope, "")
+            scope.ctes[cte.ctename] = _named(produced, names)
+        conditions: list[str] = []
+        for item in stmt.fromClause or ():
+            conditions += self._from(item, path, scope)
+        conditions += self._predicate(stmt.whereClause, FILTER, path, 1, scope)
+        conditions += self._group(stmt, path, scope)
+        conditions += self._predicate(stmt.havingClause, FILTER, path, 2, scope)
+        for one in stmt.sortClause or ():
+            self._found.ordering += self._parts(one, path, scope)[0]
+        produced: list[tuple[str, list[str]]] = []
+        if stmt.valuesLists:
+            for row, values in enumerate(stmt.valuesLists, start=1):
+                for position, value in enumerate(values, start=1):
+                    name = _output_name(columns, position, None)
+                    key = self._value(value, f"{path}.row{row}", position, name, scope,
+                                      conditions, sink, target, name)
+                    if row == 1:
+                        produced.append((name, [key]))
+                    else:
+                        produced[position - 1][1].append(key)
+            return produced
+        for position, one in enumerate(stmt.targetList or (), start=1):
+            name = _output_name(columns, position, one)
+            if name == "*":
+                self._gap(f"SELECT * at {path}: columns not established")
+                produced.append(("", []))
+                continue
+            key = self._value(one.val, path, position, name, scope, conditions,
+                              sink, target, name)
+            produced.append((name, [key]))
+        return produced
+
+    def _from(self, item: Any, path: str, scope: _Scope) -> list[str]:
+        """Bring one FROM item into scope; answer the join transforms it makes."""
+        from pglast import ast as A
+
+        if isinstance(item, A.RangeVar):
+            alias = item.alias.aliasname if item.alias else item.relname
+            columns = None if item.schemaname else scope.cte(item.relname)
+            if columns is not None:
+                scope.derived[alias] = columns
+            else:
+                scope.relations[alias] = _qualified(item)
+            return []
+        if isinstance(item, A.JoinExpr):
+            made = self._from(item.larg, path, scope) + self._from(item.rarg, path, scope)
+            joins = sum(1 for one in self._found.derivations if one.role == JOIN) + 1
+            if item.quals is not None:
+                made += self._predicate(item.quals, JOIN, path, joins, scope)
+            elif item.usingClause:
+                # Each name is a column of BOTH sides, so each side is named.
+                names = [one.sval for one in item.usingClause]
+                scope.merged.update(names)
+                sides = [_alias(item.larg), _alias(item.rarg)]
+                made.append(self._transform(
+                    JOIN, path, joins, "join",
+                    "USING (" + ", ".join(names) + ")",
+                    [self._in(side, name, scope) for name in names for side in sides]))
+            return made
+        if isinstance(item, A.RangeSubselect):
+            alias = item.alias.aliasname if item.alias else f"sub{self._next_subquery()}"
+            produced = self._select(item.subquery, f"{path}.sub:{alias}",
+                                    INTERMEDIATE, scope, "")
+            renamed = [one.sval for one in (item.alias.colnames if item.alias else ()) or ()]
+            scope.derived[alias] = _named(produced, renamed)
+            return []
+        alias = item.alias.aliasname if getattr(item, "alias", None) else type(item).__name__
+        called = _single_function(item)
+        if called:
+            # A set-returning function: its columns are its output parameters,
+            # renamed by the alias's column list where it gives one.
+            renamed = [one.sval for one in (item.alias.colnames if item.alias else ()) or ()]
+            scope.functions[alias if item.alias else called.rpartition(".")[2]] = \
+                called + "#" + ",".join(renamed)
+            return []
+        # A row source whose columns the index does not state.
+        scope.unknown.add(alias)
+        return []
+
+    def _group(self, stmt: Any, path: str, scope: _Scope) -> list[str]:
+        if not stmt.groupClause:
+            return []
+        inputs, texts, calls = [], [], set()
+        for one in stmt.groupClause:
+            found = self._parts(one, path, scope)
+            inputs += found[0]
+            calls |= found[1]
+            texts.append(_deparse(one, self))
+        return [self._transform(GROUP, path, 1, "group", "GROUP BY " + ", ".join(texts),
+                                inputs, calls=calls)]
+
+    def _predicate(self, node: Any, role: str, path: str, ordinal: int,
+                   scope: _Scope) -> list[str]:
+        if node is None:
+            return []
+        inputs, calls = self._parts(node, path, scope)
+        return [self._transform(role, path, ordinal, role, _deparse(node, self),
+                                inputs, calls=calls)]
+
+    def _value(self, node: Any, path: str, position: int, name: str, scope: _Scope,
+               conditions: list[str], sink: str, target: str, column: str) -> str:
+        inputs, calls = self._parts(node, path, scope)
+        return self._transform(
+            VALUE, path, position, name or f"column{position}", _deparse(node, self),
+            inputs, conditions=conditions, calls=calls, output_kind=sink,
+            output_relation=target if sink == RELATION else "",
+            output_column=column if sink == RELATION else "",
+            output_position=position if sink in (SELF, RETURN, RELATION) else 0)
+
+    def _transform(self, role: str, path: str, ordinal: int, name: str, expression: str,
+                   inputs: list[DerivationInput], *, conditions: list[str] | None = None,
+                   calls: set[str] | None = None, output_kind: str = "",
+                   output_relation: str = "", output_column: str = "",
+                   output_position: int = 0) -> str:
+        key = f"{self._ordinal}.{path}.{role}.{ordinal}.{name}"
+        self._found.derivations.append(Derivation(
+            key=key, role=role, statement_ordinal=self._ordinal, ordinal=ordinal,
+            expression=expression, inputs=inputs, output_kind=output_kind,
+            output_relation=output_relation, output_column=output_column,
+            output_position=output_position, conditions=list(conditions or ()),
+            calls=set(calls or ())))
+        return key
+
+    # -- expressions ----------------------------------------------------------
+
+    def _parts(self, node: Any, path: str, scope: _Scope,
+               ) -> tuple[list[DerivationInput], set[str]]:
+        """The inputs and function calls of one expression.
+
+        A subquery inside it is derived as intermediate transforms of its own,
+        and the expression reads their results.
+        """
+        from pglast import ast as A
+
+        inputs: list[DerivationInput] = []
+        calls: set[str] = set()
+        for one in _expression_nodes(node):
+            if isinstance(one, A.ColumnRef):
+                found = self._column(one, scope)
+                if found is not None:
+                    inputs.append(found)
+            elif isinstance(one, A.ParamRef):
+                inputs.append(DerivationInput(name=f"${one.number}",
+                                              observed=f"${one.number}",
+                                              position=int(one.number)))
+            elif isinstance(one, A.FuncCall):
+                calls.add(_dotted(one.funcname))
+            elif isinstance(one, A.SubLink) and one.subselect is not None:
+                produced = self._select(one.subselect,
+                                        f"{path}.sublink{self._next_subquery()}",
+                                        INTERMEDIATE, scope, "")
+                keys = [key for _name, found_keys in produced[:1] for key in found_keys]
+                if keys:
+                    inputs.append(DerivationInput(
+                        name="(subquery)", observed="(subquery)",
+                        candidates=(("transforms", "|".join(keys), scope.level),)))
+        return inputs, calls
+
+    def _column(self, ref: Any, scope: _Scope) -> DerivationInput | None:
+        from pglast import ast as A
+
+        fields = [one.sval if isinstance(one, A.String) else "*" for one in ref.fields]
+        observed = ".".join(fields)
+        if "*" in fields:
+            self._gap(f"{observed}: columns not established")
+            return None
+        name = fields[-1]
+        if len(fields) == 1:
+            row = self._whole_row(name, scope)
+            return row if row is not None else self._unqualified(name, scope)
+        qualifier = ".".join(fields[:-1])
+        level: _Scope | None = scope
+        while level is not None:
+            if qualifier in level.derived:
+                keys = level.derived[qualifier].get(name) or []
+                return DerivationInput(name, observed, (
+                    ("transforms", "|".join(keys), level.level),) if keys else ())
+            if qualifier in level.relations:
+                return DerivationInput(name, observed, (
+                    ("relation", level.relations[qualifier], level.level),))
+            if qualifier in level.functions:
+                return DerivationInput(name, observed, (
+                    ("function", level.functions[qualifier], level.level),))
+            if qualifier in level.unknown:
+                return DerivationInput(name, observed, (
+                    ("unknown", qualifier, level.level),))
+            level = level.parent
+        # A qualifier naming nothing in FROM: a record variable's field, or the
+        # relation written in full. The binder says which, or that it cannot.
+        return DerivationInput(name, observed, (("relation", qualifier, scope.level),))
+
+    def _whole_row(self, name: str, scope: _Scope) -> DerivationInput | None:
+        """A FROM item's alias used as a value -- its whole row -- or None.
+
+        ``to_jsonb(t)`` reads every column of ``t``: the input is the row, which
+        the binder states as each of its columns.
+        """
+        level: _Scope | None = scope
+        while level is not None:
+            if name in level.relations:
+                return DerivationInput("*", name, (("row", level.relations[name], level.level),))
+            if name in level.derived:
+                keys = [key for found in level.derived[name].values() for key in found]
+                return DerivationInput("*", name, (
+                    ("transforms", "|".join(keys), level.level),) if keys else ())
+            level = level.parent
+        return None
+
+    def _in(self, alias: str, name: str, scope: _Scope) -> DerivationInput:
+        """``name`` as a column of the FROM item ``alias``."""
+        from pglast import ast as A
+
+        return self._column(A.ColumnRef(fields=(A.String(sval=alias), A.String(sval=name))),
+                            scope)
+
+    def _unqualified(self, name: str, scope: _Scope) -> DerivationInput:
+        candidates: list[tuple[str, str, int]] = []
+        merged = False
+        level: _Scope | None = scope
+        while level is not None:
+            merged = merged or (not candidates and name in level.merged)
+            for relation in level.relations.values():
+                candidates.append(("relation", relation, level.level))
+            for columns in level.derived.values():
+                if name in columns:
+                    candidates.append(("transforms", "|".join(columns[name]), level.level))
+            for function in level.functions.values():
+                candidates.append(("function", function, level.level))
+            for alias in level.unknown:
+                candidates.append(("unknown", alias, level.level))
+            level = level.parent
+        return DerivationInput(name, name, tuple(candidates), merged=merged)
+
+    def _gap(self, reason: str) -> None:
+        self._found.derivation_gaps.append(f"derivation: {reason}")
+
+
+def _expression_nodes(node: Any) -> list[Any]:
+    """The nodes of one expression, without descending into its subqueries."""
+    from pglast import ast as A
+
+    seen: list[Any] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, A.Node):
+            seen.append(current)
+            if isinstance(current, A.SubLink):
+                # Its test expression belongs here; its query is its own scope.
+                stack.append(current.testexpr)
+                continue
+            for name in current.__slots__:
+                stack.append(getattr(current, name, None))
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return seen
+
+
+def _named(produced: list[tuple[str, list[str]]], names: list[str],
+           ) -> dict[str, list[str]]:
+    """A query's output columns by name, renamed by an alias column list."""
+    return {
+        (names[at] if at < len(names) else name): keys
+        for at, (name, keys) in enumerate(produced) if (names[at] if at < len(names) else name)
+    }
+
+
+def _single_function(item: Any) -> str:
+    """The function a FROM item calls, as written, where it calls exactly one."""
+    from pglast import ast as A
+
+    if not isinstance(item, A.RangeFunction) or len(item.functions or ()) != 1:
+        return ""
+    call = item.functions[0][0] if isinstance(item.functions[0], (list, tuple)) \
+        else item.functions[0]
+    return _dotted(call.funcname) if isinstance(call, A.FuncCall) else ""
+
+
+def _alias(item: Any) -> str:
+    """The name a FROM item is known by in its query."""
+    alias = getattr(item, "alias", None)
+    if alias is not None:
+        return alias.aliasname
+    return getattr(item, "relname", "") or ""
+
+
+def _output_name(columns: list[str] | None, position: int, target: Any) -> str:
+    """The column a result lands in: the INSERT's column list, else the target's name."""
+    from pglast import ast as A
+
+    if columns:
+        return columns[position - 1] if position <= len(columns) else ""
+    if target is None:
+        return ""
+    if target.name:
+        return target.name
+    if isinstance(target.val, A.ColumnRef):
+        last = target.val.fields[-1]
+        return last.sval if isinstance(last, A.String) else "*"
+    return "?column?"
+
+
+def _deparse(node: Any, deriver: _Deriver) -> str:
+    """An expression as SQL text, or the reason it could not be written back."""
+    from pglast.stream import RawStream
+
+    try:
+        return RawStream()(node)
+    except (NotImplementedError, ValueError) as exc:
+        deriver._gap(f"expression not deparseable ({type(exc).__name__})")  # noqa: SLF001
+        return f"({type(node).__name__})"

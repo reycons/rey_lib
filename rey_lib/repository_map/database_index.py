@@ -51,6 +51,8 @@ _MEMBER_COLUMNS = (
     "provider_member_id",
     # Whether a caller may omit this argument. Always false for a column.
     "has_default",
+    # A transform's expression (#1425); empty for every other member.
+    "expression",
 )
 _OBSERVATION_COLUMNS = (
     "from_source_key", "from_schema_name", "from_object_name",
@@ -129,7 +131,7 @@ class DatabaseIndexWriter:
         )
         self._stage(
             "db_member_stage",
-            [{**row, "source_key": source_key} for row in members],
+            [{"expression": None, **row, "source_key": source_key} for row in members],
             _MEMBER_COLUMNS,
         )
         # The origin always carries the source key. The TARGET carries it only
