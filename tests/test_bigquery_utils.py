@@ -72,12 +72,14 @@ class _Client:
     made: list["_Client"] = []
     failure: BaseException | None = None
 
-    def __init__(self, project: str, default_query_job_config: Any = None) -> None:
+    def __init__(self, project: str, default_query_job_config: Any = None,
+                 client_options: Any = None) -> None:
         """Record the construction, or raise the failure set for it."""
         if _Client.failure is not None:
             raise _Client.failure
         self.project = project
         self.default_query_job_config = default_query_job_config
+        self.client_options = client_options
         self.asked: list[tuple[str, Any]] = []
         self.query_failure: BaseException | None = None
         self.dry_run_failure: BaseException | None = None
@@ -135,8 +137,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> type[_Client]:
 
 def _config(**settings: Any) -> SimpleNamespace:
     """A bigquery connection config, with ``settings`` replacing its fields."""
-    fields = {"name": "public", "provider": "bigquery", "project": EXECUTION_PROJECT,
-              "database": DATA_PROJECT}
+    # As the installation declares it (backlog 1407): project is the data project,
+    # database the dataset, execution_project where jobs run and calls are charged.
+    fields = {"name": "public", "provider": "bigquery", "project": DATA_PROJECT,
+              "database": "samples", "execution_project": EXECUTION_PROJECT}
     fields.update(settings)
     return SimpleNamespace(**fields)
 
@@ -160,6 +164,19 @@ class TestOpening:
         conn = bigquery_utils.get_connection(_config())
 
         assert DBAdapter().provider(conn) == "bigquery"
+
+    def test_calls_are_charged_to_the_execution_project_not_adcs_quota_project(self) -> None:
+        # ADC's own quota project answered 403 accessNotConfigured where it had
+        # the BigQuery API off; the execution project is where work is billed.
+        _open()
+
+        assert _Client.made[0].client_options.quota_project_id == EXECUTION_PROJECT
+
+    def test_without_an_execution_project_calls_are_charged_to_the_data_project(self) -> None:
+        _open(execution_project=None)
+
+        assert _Client.made[0].project == DATA_PROJECT
+        assert _Client.made[0].client_options.quota_project_id == DATA_PROJECT
 
     def test_no_billing_limit_unless_configured(self) -> None:
         _open()
@@ -303,6 +320,14 @@ class TestOpeningStatement:
     def test_the_reference_is_project_qualified(self) -> None:
         reference = DBAdapter().relation_reference(
             _open(), DATA_PROJECT, "usa_names", "usa_1910_current")
+
+        assert reference == "`public-data`.`usa_names`.`usa_1910_current`"
+
+    def test_an_empty_catalog_is_the_connections_data_project(self) -> None:
+        # Opened with no catalog, the table was read from the data project but
+        # named as dataset.table -- which BigQuery looked up in the execution
+        # project, answering 404.
+        reference = DBAdapter().relation_reference(_open(), "", "usa_names", "usa_1910_current")
 
         assert reference == "`public-data`.`usa_names`.`usa_1910_current`"
 

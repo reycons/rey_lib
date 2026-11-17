@@ -78,7 +78,7 @@ def test_it_offers_the_four_ways_to_run_and_the_live_query_and_holds_no_sql() ->
 
     assert public - {
         "statement", "params", "connection", "pageable", "rows_per_page", "current_page",
-        "order_by", "filters",
+        "order_by", "filters", "current_result", "selection",
     } == {"rows", "run", "page", "read", "act", "text", "update", "projection", "execute",
           # Its statement, linted by the artifact engine; read-only (#1252).
           "lint", "save", "from_saved"}
@@ -91,9 +91,17 @@ class _Executor:
 
     def __init__(
         self, results: Any = None, page: Any = None, raises: Exception | None = None,
+        statements: list[str] | None = None,
     ) -> None:
         self.results, self.answer, self.raises = results or [], page, raises
+        # What the provider's parser answers: None is a provider that divides nothing.
+        self.statements = statements
         self.asked: list[tuple[str, Any, str, dict]] = []
+
+    def split_statements(self, conn: Any, text: str) -> list[str] | None:
+        if isinstance(self.statements, Exception):
+            raise self.statements
+        return self.statements
 
     def execute_statements(self, conn: Any, text: str, **bounds: Any) -> list:
         self.asked.append(("execute_statements", conn, text, bounds))
@@ -259,7 +267,8 @@ class TestTheLiveQuery:
     def test_it_reads_as_the_card_does_until_told_otherwise(self) -> None:
         query = DatabaseQuery("SELECT 1")
 
-        assert (query.pageable, query.rows_per_page, query.current_page) == (True, 50, 0)
+        assert (query.pageable, query.rows_per_page, query.current_page) == (True, 200, 0)
+        assert query.current_result == 0
         assert (query.order_by, query.filters, query.connection) == ([], [], None)
 
     def test_text_writes_each_parameter_in_as_its_literal(self) -> None:
@@ -304,8 +313,9 @@ class TestTheLiveQuery:
         query = DatabaseQuery("SELECT :a", {"a": 1}, connection=connection)
 
         assert query.projection() == {
-            "statement": "SELECT 1", "pageable": True, "rows_per_page": 50,
-            "current_page": 0, "order_by": [], "filters": [], "connection": "rey apps",
+            "statement": "SELECT 1", "pageable": True, "rows_per_page": 200,
+            "current_page": 0, "current_result": 0, "order_by": [], "filters": [],
+            "connection": "rey apps",
             "navigation": {"modified": False, "can_close": True},
         }
         assert connection.handed == []
@@ -410,6 +420,195 @@ class TestTheLiveQuery:
         assert result["output"]["text"] == str(failure)
         assert "Execution failed." in result["statistics"][0]["text"]
         assert len(executor.asked) == 2
+
+
+class TestTheSelection:
+    """A highlight runs in place of the statement, which stays whole (#1419)."""
+
+    def test_the_selection_runs_and_the_statement_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Executor(results=[StatementResult(columns=["a"], rows=[{"a": 2}])])
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+        query = DatabaseQuery("p1; p2", connection=_Connection(), pageable=False)
+
+        query.update(statement="p1; p2", selection="p2")
+        query.execute()
+
+        assert executor.asked[0][2] == "p2"
+        assert query.statement == "p1; p2"
+        assert query.projection()["statement"] == "p1; p2"
+
+    def test_a_new_statement_drops_a_highlight_made_in_the_old_one(self) -> None:
+        query = DatabaseQuery("p1", selection="p1")
+
+        query.update(statement="p2")
+
+        assert query.selection == ""
+
+
+class _Script(_Executor):
+    """A provider that divides the text, and answers each statement as told."""
+
+    def __init__(self, answers: dict[str, Any], statements: list[str] | Exception) -> None:
+        super().__init__(statements=statements)  # type: ignore[arg-type]
+        self.answers = answers
+
+    def execute_statements(self, conn: Any, text: str, **bounds: Any) -> list:
+        self.asked.append(("execute_statements", conn, text, bounds))
+        answer = self.answers[text]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def _rows(count: int) -> list[dict[str, int]]:
+    return [{"a": at} for at in range(count)]
+
+
+class TestTheScript:
+    """Several statements: each runs once, in order; results retained and paged (#1418)."""
+
+    def _query(self, monkeypatch: pytest.MonkeyPatch, executor: _Executor) -> DatabaseQuery:
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+        return DatabaseQuery("s1; s2; s3", connection=_Connection())
+
+    def test_each_statement_runs_once_in_order_and_answers_its_first_page(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Script({
+            "s1": [StatementResult(columns=["a"], rows=_rows(450))],
+            "s2": [StatementResult(columns=[], rows=[], row_count=1)],
+            "s3": [StatementResult(columns=["a"], rows=_rows(1))],
+        }, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+
+        answer = query.execute()
+
+        assert [(asked[2], asked[3]) for asked in executor.asked] == [
+            ("s1", {"limit": 1_000}), ("s2", {"limit": 1_000}), ("s3", {"limit": 1_000})]
+        first, second, third = answer["results"]
+        assert first["rows"] == _rows(200)
+        assert first["paging"] == {"offset": 0, "limit": 200, "total_row_count": 450,
+                                   "next_offset": 200}
+        assert first["columns"] == [{"name": "a", "sortable": False, "filter": False}]
+        assert second == {"columns": [], "rows": [], "row_count": 1, "at_row_limit": False}
+        assert third["paging"]["next_offset"] is None
+        assert answer["output"]["text"].splitlines() == [
+            "Result 1: 450 rows returned.", "Result 2: 1 rows affected.",
+            "Result 3: 1 rows returned."]
+
+    def test_a_page_is_read_from_what_is_retained_and_nothing_runs_again(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Script({"s1": [StatementResult(columns=["a"], rows=_rows(450))],
+                            "s2": [StatementResult(columns=["a"], rows=_rows(300))],
+                            "s3": [StatementResult(columns=[], rows=[], row_count=0)]},
+                           ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+        query.execute()
+
+        query.update(current_result=1, current_page=1)
+        answer = query.execute()
+
+        assert len(executor.asked) == 3
+        assert answer["current_result"] == 1
+        # Only the result asked for moves; the others stay on their own page.
+        assert answer["results"][0]["paging"]["offset"] == 0
+        assert answer["results"][1]["rows"] == _rows(300)[200:300]
+        assert answer["results"][1]["paging"] == {"offset": 200, "limit": 200,
+                                                  "total_row_count": 300, "next_offset": None}
+
+    def test_a_result_retains_at_most_the_row_limit_and_says_so(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Script({"s1": [StatementResult(columns=["a"], rows=_rows(1_000))],
+                            "s2": [], "s3": []}, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+
+        answer = query.execute()
+
+        assert answer["results"][0]["at_row_limit"] is True
+        assert answer["results"][0]["paging"]["total_row_count"] == 1_000
+        assert answer["row_limit"] == 1_000
+
+    def test_the_first_failing_statement_stops_the_script_and_keeps_what_ran(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Script({"s1": [StatementResult(columns=["a"], rows=_rows(2))],
+                            "s2": DatabaseError("refused"), "s3": []}, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+
+        answer = query.execute()
+
+        assert [asked[2] for asked in executor.asked] == ["s1", "s2"]
+        assert answer["results"][0]["rows"] == _rows(2)
+        assert answer["results"][1]["error"] == "Statement 2 of 3 failed: refused"
+        assert answer["output"]["text"].splitlines()[-1] == "Statement 2 of 3 failed: refused"
+
+    def test_text_that_does_not_parse_runs_nothing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        refusal = DatabaseError("The SQL could not be parsed; nothing was executed.")
+        executor = _Script({}, refusal)
+        query = self._query(monkeypatch, executor)
+
+        with pytest.raises(DatabaseError) as raised:
+            query.execute()
+
+        assert raised.value is refusal and executor.asked == []
+
+    def test_sorting_or_filtering_retained_results_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = _Script({"s1": [], "s2": [], "s3": []}, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+        query.execute()
+
+        query.update(order_by=[{"column": "a", "direction": "asc"}])
+        with pytest.raises(DatabaseError, match="sorting and filtering"):
+            query.execute()
+        assert len(executor.asked) == 3
+
+    @pytest.mark.parametrize("change", [{"statement": "s1; s2; s3"}, {"connection": None}])
+    def test_replacing_the_statement_or_connection_releases_what_was_retained(
+        self, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any],
+    ) -> None:
+        executor = _Script({"s1": [], "s2": [], "s3": []}, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+        query.execute()
+
+        query.update(**change)
+        if change.get("connection", True) is None:
+            query.update(connection=_Connection())
+        query.execute()
+
+        assert len(executor.asked) == 6
+
+    @pytest.mark.parametrize("change", [{"current_page": 1}, {"current_result": 1}])
+    def test_a_page_with_nothing_retained_runs_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any],
+    ) -> None:
+        # A host that keeps no query between commands (the Loader) asks a fresh one.
+        executor = _Script({"s1": [], "s2": [], "s3": []}, ["s1", "s2", "s3"])
+        query = self._query(monkeypatch, executor)
+        query.update(**change)
+
+        with pytest.raises(DatabaseError, match="no longer held"):
+            query.execute()
+        assert executor.asked == []
+
+    @pytest.mark.parametrize("statements", [None, ["only one"]])
+    def test_one_statement_or_a_provider_that_divides_nothing_pages_as_before(
+        self, monkeypatch: pytest.MonkeyPatch, statements: list[str] | None,
+    ) -> None:
+        declined = UnsupportedDatabaseCapabilityError("cannot page")
+        executor = _Executor(raises=declined, statements=statements)
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+
+        with pytest.raises(UnsupportedDatabaseCapabilityError):
+            DatabaseQuery("CALL p()", connection=_Connection()).execute()
+        assert [asked[0] for asked in executor.asked] == ["execute_page"]
 
     @pytest.mark.parametrize("query, refusal", [
         (DatabaseQuery("SELECT 1"), "bound to no connection"),

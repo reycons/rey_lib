@@ -432,6 +432,30 @@ def execute_statements(
 _MAX_RESULT_SETS = 256
 
 
+def split_statements(sql_text: str) -> list[str]:
+    """The text's statements, in order, as PostgreSQL's own parser divides them (#1418).
+
+    libpg_query through pglast -- the parser this package already uses for
+    PostgreSQL definitions -- so a semicolon inside a literal, a dollar-quoted
+    body or a comment divides nothing. Executes nothing.
+
+    Raises:
+        DatabaseError: If the text does not parse. Nothing has been executed; the
+            message gives the position, never the text that failed (#1357).
+    """
+    from pglast import split  # noqa: PLC0415 -- the parser is loaded where it is used
+    from pglast.parser import ParseError  # noqa: PLC0415
+
+    try:
+        return list(split(sql_text))
+    except ParseError as exc:
+        position = exc.args[1] + 1 if len(exc.args) > 1 and isinstance(exc.args[1], int) else None
+        where = f" at position {position}" if position is not None else ""
+        raise DatabaseError(
+            f"The SQL could not be parsed (syntax error{where}); nothing was executed."
+        ) from None
+
+
 def _advanced(cursor: Any) -> bool:
     """Whether the cursor moved to another result set.
 

@@ -524,6 +524,26 @@ class DBAdapter:
             return list(own(conn, sql_text, limit=limit))
         return _execute_statements_over_dbapi(conn, sql_text, limit=limit)
 
+    def split_statements(self, conn: Any, sql_text: str) -> Optional[list[str]]:
+        """The text's statements, in order, where the provider can divide it (#1418).
+
+        Dispatches and divides nothing itself: dividing SQL is a dialect fact,
+        answered by the provider's own parser. Executes nothing.
+
+        Args:
+            conn: Open connection handle, naming the provider.
+            sql_text: The SQL, exactly as written.
+
+        Returns:
+            The statements, or None where the provider declares no parser -- the
+            text then stays one unit, as before.
+
+        Raises:
+            DatabaseError: If the provider's parser cannot read the text.
+        """
+        own = getattr(_backend(self._provider_for_conn(conn)), "split_statements", None)
+        return list(own(sql_text)) if callable(own) else None
+
     def execute_page(
         self,
         conn: Any,
@@ -1085,7 +1105,7 @@ class DBAdapter:
                 of its own.
         """
         return self._require_provider_capability(conn, "relation_reference")(
-            catalog, schema, name,
+            conn, catalog, schema, name,
         )
 
     def execute_statement(self, conn: Any, sql_text: str) -> int:

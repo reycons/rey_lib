@@ -9,12 +9,16 @@ capability -- the writes among them -- is absent, and DBAdapter refuses it by na
 
 Connection config
 -----------------
+As the installation declares it (backlog 1407):
+
 ``provider: bigquery``
-``project``                 The execution project: the GCP project query jobs
-                            run and are billed in. Required.
-``database``                The data project, read as the catalog -- BigQuery's
+``project``                 The data project, read as the catalog -- BigQuery's
                             project, dataset and table are Rey's catalog,
                             schema and table. Required.
+``database``                The dataset. Required.
+``execution_project``       Optional. The GCP project query jobs run in and
+                            every call is billed and charged to; ``project``
+                            where absent.
 ``maximum_bytes_billed``    Optional. Passed to BigQuery's query job
                             configuration; a query that would bill more fails.
 
@@ -33,7 +37,7 @@ schema_metadata(conn, schema, database_name=)      One dataset's tables and view
 table_column_catalog(conn, schema, table, ...)     One table's or view's columns.
 table_exists(conn, catalog, schema, table)         Whether a table or view exists.
 quote_identifier(name)                             A GoogleSQL quoted identifier.
-relation_reference(catalog, schema, name)          A project-qualified table reference.
+relation_reference(conn, catalog, schema, name)    A project-qualified table reference.
 fetch_rows(conn, sql_text, params)                 One read with ``:name`` parameters.
 execute_page(conn, sql_text, offset=, limit=, ...) One page of a reader's query.
 """
@@ -45,6 +49,7 @@ from typing import Any
 
 import google.auth.exceptions
 from google.api_core import exceptions as api_exceptions
+from google.api_core.client_options import ClientOptions
 from google.cloud import bigquery
 from google.cloud.bigquery import dbapi
 
@@ -129,8 +134,9 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> BigQueryConnection:
     Parameters
     ----------
     db_cfg : Any
-        Connection config. Required fields: project, database. Optional:
-        maximum_bytes_billed.
+        Connection config. Required fields: project (the data project),
+        database (the dataset). Optional: execution_project (where jobs run
+        and calls are charged; project where absent), maximum_bytes_billed.
     ctx : Any
         Accepted so every backend answers the adapter's call the same way.
         ADC is resolved by Google's library, so nothing is read from it.
@@ -166,17 +172,28 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> BigQueryConnection:
     job_config = (
         bigquery.QueryJobConfig(maximum_bytes_billed=maximum) if maximum is not None else None
     )
+    # Where jobs run and calls are charged: the declared execution project, else
+    # the data project itself (backlog 1407).
+    execution = str(_setting(db_cfg, "execution_project") or project)
     _logger.debug(
-        "attempting bigquery client through ADC connection=%s project=%s",
-        name, project,
+        "attempting bigquery client through ADC connection=%s execution_project=%s",
+        name, execution,
     )
     try:
-        client = bigquery.Client(project=str(project), default_query_job_config=job_config)
+        # Every call is charged to the execution project. ADC may carry a quota
+        # project of its own (gcloud's application-default login records one);
+        # without this, calls are charged there, and a project with the BigQuery
+        # API off answers 403 accessNotConfigured.
+        client = bigquery.Client(
+            project=execution, default_query_job_config=job_config,
+            client_options=ClientOptions(quota_project_id=execution),
+        )
     except _GOOGLE_ERRORS as exc:
         raise DatabaseError(
             f"bigquery_utils: failed to open connection '{name}': {_reason(exc)}"
         ) from None
-    return BigQueryConnection(client, str(database))
+    # The catalog is the data project; its datasets are listed from it.
+    return BigQueryConnection(client, str(project))
 
 
 def get_current_database(conn: BigQueryConnection) -> str:
@@ -291,14 +308,16 @@ def quote_identifier(name: str) -> str:
     return "`" + str(name).replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
-def relation_reference(catalog: str, schema: str, name: str) -> str:
+def relation_reference(conn: BigQueryConnection, catalog: str, schema: str, name: str) -> str:
     """One table or view as a GoogleSQL statement names it: project, dataset and name.
 
     Always project-qualified: BigQuery resolves an unqualified dataset.table
     against the execution project, which is not where the data project's
-    tables are.
+    tables are. An empty catalog is the connection's data project, as every
+    read here takes it.
     """
-    return ".".join(quote_identifier(part) for part in (catalog, schema, name) if part)
+    project = catalog or get_current_database(conn)
+    return ".".join(quote_identifier(part) for part in (project, schema, name) if part)
 
 
 def fetch_rows(conn: BigQueryConnection, sql_text: str, params: dict[str, Any]) -> list[dict[str, Any]]:

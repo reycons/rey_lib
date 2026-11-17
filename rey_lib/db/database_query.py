@@ -10,9 +10,11 @@ unchanged, runs in dataset mode and hands back plain dictionaries. ``run``
 executes the text exactly as supplied -- possibly a batch, a definition or a
 call -- for every result it produces; ``page`` reads it a page at a time.
 ``read`` runs one read and keeps its columns whether or not any row came back,
-bounded or not, on every provider that reads. The text is never read,
-classified, bounded or rewritten, and a failure or a declination reaches the
-caller as raised. Parameters are valid only where they can be bound: ``run``,
+bounded or not, on every provider that reads. Those four never read,
+classify, bound or rewrite the text, and a failure or a declination reaches the
+caller as raised. The live query's ``execute`` alone asks the provider to divide
+its text into statements before running it, so a script runs statement by
+statement (#1418). Parameters are valid only where they can be bound: ``run``,
 ``page`` and ``read`` refuse them rather than drop them.
 
 ``StatementResult`` and ``PageResult`` are the one shape of those answers. The
@@ -40,14 +42,19 @@ if TYPE_CHECKING:
 
 __all__ = ["DatabaseQuery", "PageResult", "StatementResult"]
 
-#: The most rows one result of a run holds when the query is executed without paging.
+#: The most rows one result of a run holds when the query is executed without paging,
+#: and the most rows a script retains per result for display (#1418). A retained-result
+#: limit only: the driver may hold more while the statement executes.
 RESULT_ROW_LIMIT = 1_000
 
 #: The live properties a reader may change through ``DatabaseQuery.update``.
 _LIVE_PROPERTIES = frozenset({
     "statement", "connection", "pageable", "rows_per_page", "current_page", "order_by",
-    "filters",
+    "filters", "current_result", "selection",
 })
+
+#: The changes that make a script's retained results stale: they are released.
+_REPLACING = frozenset({"statement", "connection", "selection"})
 
 
 @dataclass(frozen=True)
@@ -154,10 +161,15 @@ class DatabaseQuery:
     connection: Optional["Connection"] = field(default=None, compare=False, repr=False)
     #: Whether ``execute`` reads one page of the result, or runs the query.
     pageable: bool = True
-    #: How many rows one page holds.
-    rows_per_page: int = 50
+    #: How many rows one page holds (#1418: 200 by default).
+    rows_per_page: int = 200
     #: Which page ``execute`` reads, from 0.
     current_page: int = 0
+    #: Which of a script's retained results ``current_page`` pages, from 0 (#1418).
+    current_result: int = 0
+    #: The part of the statement the reader highlighted, executed in its place when
+    #: given (#1419). The statement -- and what is saved -- stays the whole text.
+    selection: str = ""
     #: The ordering a page applies, as column/direction mappings.
     order_by: list[dict[str, Any]] = field(default_factory=list)
     #: The filters a page applies, as column/operator/value mappings. A filter
@@ -170,6 +182,11 @@ class DatabaseQuery:
     )
     _opened_statement: str = field(default="", init=False, repr=False, compare=False)
     _result: Optional[dict[str, Any]] = field(default=None, init=False, repr=False, compare=False)
+    # A script's results, executed once and retained (at most RESULT_ROW_LIMIT rows each)
+    # so a later page is read from here and no statement runs again (#1418). Released
+    # when the statement or connection is replaced; None when nothing is retained.
+    _script: Optional[list[dict[str, Any]]] = field(default=None, init=False, repr=False,
+                                                    compare=False)
     _save_control: Any = field(default=None, init=False, repr=False, compare=False)
     _save_name: str = field(default="Adhoc query", init=False, repr=False, compare=False)
     _saved_query_id: Optional[int] = field(default=None, init=False, repr=False, compare=False)
@@ -241,6 +258,9 @@ class DatabaseQuery:
         Editing changes working state only. Persistence is the explicit
         :meth:`save` operation; opening, editing and connection changes do not save.
 
+        A change naming the statement or the connection releases a script's
+        retained results (#1418): the next ``execute`` runs the text again.
+
         Raises:
             DatabaseError: If a change names anything but a live property.
         """
@@ -252,6 +272,11 @@ class DatabaseQuery:
                 setattr(self, name, value)
             if "statement" in changes:
                 self.params = {}
+                # A highlight belongs to the text it was made in (#1419).
+                if "selection" not in changes:
+                    self.selection = ""
+            if _REPLACING & set(changes):
+                self._script = None
 
     def save(self, control: Any, name: Optional[str] = None) -> Optional[int]:
         """Retain this Workbench query through Control's mapped save procedure.
@@ -300,6 +325,7 @@ class DatabaseQuery:
                 "pageable": self.pageable,
                 "rows_per_page": self.rows_per_page,
                 "current_page": self.current_page,
+                "current_result": self.current_result,
                 "order_by": list(self.order_by),
                 "filters": list(self.filters),
                 "connection": self.connection.name if self.connection is not None else None,
@@ -375,10 +401,18 @@ class DatabaseQuery:
     def execute(self) -> dict[str, Any]:
         """Execute this query as its own state says, on its connection.
 
-        ``pageable`` reads page ``current_page`` of ``rows_per_page`` rows; a
-        provider that cannot page this text says so by raising, and that answer
-        reaches the caller. Otherwise the query is run, each result holding at
-        most ``RESULT_ROW_LIMIT`` rows.
+        The mode is decided before any SQL runs (#1418). Where the provider
+        divides the text into statements and there is more than one, it is a
+        script: each statement executes once, in order, stopping at the first
+        that fails; each result retains at most ``RESULT_ROW_LIMIT`` rows and is
+        answered ``rows_per_page`` at a time. While retained, a further
+        ``execute`` answers page ``current_page`` of result ``current_result``
+        from what is held, and nothing runs again.
+
+        Otherwise ``pageable`` reads page ``current_page`` of ``rows_per_page``
+        rows; a provider that cannot page this text says so by raising, and that
+        answer reaches the caller. Otherwise the query is run, each result
+        holding at most ``RESULT_ROW_LIMIT`` rows.
 
         Raises:
             DatabaseError: If the query is bound to no connection, has no
@@ -405,12 +439,25 @@ class DatabaseQuery:
 
     def _execute_result(self) -> dict[str, Any]:
         """The existing run/page operation, while this query's act is held."""
+        if self._script is not None:
+            return self._script_page()
         if self.connection is None:
             raise DatabaseError("DatabaseQuery is bound to no connection.")
-        written = self.text()
+        # The highlighted part where there is one; the statement is left whole (#1419).
+        written = self.selection if self.selection.strip() else self.text()
         if not written.strip():
             raise DatabaseError("DatabaseQuery has no statement to execute.")
         handle = self.connection.handle()
+        # Recognised before execution, by the provider's own parser; None where the
+        # provider divides nothing, and the text stays one unit as before (#1418).
+        statements = _adapter(None).split_statements(handle, written)
+        if statements is not None and len(statements) > 1:
+            # A later page exists only in what a run retained; asked for one with
+            # nothing retained, nothing runs again to make it (#1418).
+            if int(self.current_page) or int(self.current_result):
+                raise DatabaseError("This script's results are no longer held; run it "
+                                    "again to see them. Nothing was executed.")
+            return self._run_script(handle, statements)
         as_written = DatabaseQuery(written)
         if self.pageable:
             page = as_written.page(
@@ -446,6 +493,76 @@ class DatabaseQuery:
             "row_limit": RESULT_ROW_LIMIT,
         }
 
+    def _run_script(self, handle: Any, statements: list[str]) -> dict[str, Any]:
+        """Execute each statement once, in order, and retain its results (#1418).
+
+        Each statement runs through ``run`` -- the existing path, whose cursor is
+        closed when it returns -- keeping at most ``RESULT_ROW_LIMIT`` rows of each
+        result. The first statement that fails stops the script: the results
+        before it are kept, and the failure is retained as its own entry naming
+        the statement. Nothing is executed again to answer a later page.
+        """
+        retained: list[dict[str, Any]] = []
+        for at, statement in enumerate(statements, 1):
+            try:
+                results = DatabaseQuery(statement).run(handle, limit=RESULT_ROW_LIMIT)
+            except DatabaseError as failure:
+                retained.append({"error": (f"Statement {at} of {len(statements)} failed: "
+                                           f"{failure}")})
+                break
+            retained.extend({
+                "columns": _columns(result.columns, result.column_kinds),
+                "rows": list(result.rows),
+                "row_count": result.row_count,
+                "at_row_limit": len(result.rows) >= RESULT_ROW_LIMIT,
+                "page": 0,
+            } for result in results)
+        self._script = retained
+        self.current_result = 0
+        self.current_page = 0
+        return self._script_page()
+
+    def _script_page(self) -> dict[str, Any]:
+        """Answer every retained result at its own page; runs nothing (#1418).
+
+        ``current_page`` moves the page of result ``current_result`` only. The
+        retained rows are shown in their own order: ordering and filtering need
+        the database, so a request for either is refused, and each result's
+        columns say they offer neither.
+
+        Raises:
+            DatabaseError: If ordering or filtering is asked of retained results.
+        """
+        script = self._script
+        assert script is not None
+        if self.order_by or self.filters:
+            raise DatabaseError("A script's results are shown as retained; sorting and "
+                                "filtering need the database and are not available.")
+        size = max(1, int(self.rows_per_page))
+        if 0 <= int(self.current_result) < len(script):
+            script[int(self.current_result)]["page"] = max(0, int(self.current_page))
+        results = []
+        for held in script:
+            if "error" in held:
+                results.append({"columns": [], "rows": [], "row_count": None,
+                                "at_row_limit": False, "error": held["error"]})
+                continue
+            offset = held["page"] * size
+            retained = len(held["rows"])
+            results.append({
+                "columns": [{**column, "sortable": False, "filter": False}
+                            for column in held["columns"]],
+                "rows": held["rows"][offset:offset + size],
+                "row_count": held["row_count"],
+                "at_row_limit": held["at_row_limit"],
+                **({"paging": {
+                    "offset": offset, "limit": size, "total_row_count": retained,
+                    "next_offset": offset + size if offset + size < retained else None,
+                }} if held["columns"] else {}),
+            })
+        return {"pageable": False, "results": results, "row_limit": RESULT_ROW_LIMIT,
+                "current_result": int(self.current_result)}
+
     def _execution_content(self, elapsed_ms: float) -> dict[str, Any]:
         """Describe only facts this execution established, using canonical Content."""
         result = self._result
@@ -454,9 +571,16 @@ class DatabaseQuery:
         statistics = []
         results = [result] if result["pageable"] else result["results"]
         for at, one in enumerate(results, 1):
+            if "error" in one:
+                summaries.append(one["error"])
+                statistics.append(Content(f"Result {at}", one["error"], "text")
+                                  .projection()["content"])
+                continue
+            # A script's result counts the rows it retained, not the page in hand.
+            returned = one["paging"]["total_row_count"] if "paging" in one else len(one["rows"])
             facts = [f"Execution time (all results): {elapsed_ms:.3f} ms",
-                     f"Rows returned: {len(one['rows'])}"]
-            summary = f"Result {at}: {len(one['rows'])} rows returned."
+                     f"Rows returned: {returned}"]
+            summary = f"Result {at}: {returned} rows returned."
             if result["pageable"]:
                 total = one["total_row_count"]
                 facts.extend([f"Total rows: {total if total is not None else 'not reported'}",
