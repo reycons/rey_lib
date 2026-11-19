@@ -30,6 +30,7 @@ from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.logs.app_logger import AppLogger
 
 __all__ = [
@@ -43,6 +44,10 @@ __all__ = [
 logger = AppLogger(__name__)
 
 SCHEMA = "code"
+
+#: The procedure map the promotion is bound in, and its binding (#541).
+_MAP = "code"
+_PUBLISH = "publish_bridge_index"
 
 #: Where the bridge is staged before it is published (backlog 855).
 STAGE_SCHEMA = "code_stage"
@@ -438,10 +443,14 @@ def _get(obj: Any, key: str) -> Any:
 class BridgeIndexWriter:
     """Stages the bridge facts and promotes them in one call."""
 
-    def __init__(self, adapter: DBAdapter, connection: Any) -> None:
-        """Hold the adapter and the connection the bridge is published through."""
+    def __init__(self, adapter: DBAdapter, connection: Any, ctx: Any,
+                 run_log: Any = None) -> None:
+        """Hold the adapter, the connection the bridge is published through, and the
+        run's context (its ``code`` procedure map, #541) and evidence recorder."""
         self._adapter = adapter
         self._connection = connection
+        self._ctx = ctx
+        self._run_log = run_log
 
     def replace_index(self, inspected: dict[str, list[dict[str, Any]]]) -> None:
         """Replace the published bridge with this inspection.
@@ -464,7 +473,7 @@ class BridgeIndexWriter:
         self._stage(
             "db_bridge_coverage_stage", inspected["coverage"], _COVERAGE_COLUMNS,
         )
-        self._call("p_publish_bridge")
+        self._call(_PUBLISH)
 
     def _clear_staging(self) -> None:
         """Empty staging, so a run that staged and failed cannot be published."""
@@ -489,8 +498,8 @@ class BridgeIndexWriter:
             self._adapter,
         )
 
-    def _call(self, procedure: str) -> None:
-        """Call the schema's promotion procedure."""
-        self._adapter.execute_sql(
-            self._connection, f"CALL {SCHEMA}.{procedure}()", {}, "no_return",
-        )
+    def _call(self, binding: str) -> None:
+        """Invoke the promotion through the ``code`` map (#541): governed, logged, indexed."""
+        ProcedureMap.resolve(
+            self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
+        ).call(self._connection, {}, self._run_log)

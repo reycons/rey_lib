@@ -54,7 +54,7 @@ from rey_lib.repository_map.indexed_database_object import (
     IndexedDatabaseObject,
     IndexedRelation,
 )
-from rey_lib.tree.persisted import TREE_CONNECTION, TREE_SCHEMA, TREE_VIEW_NAME, TreeDataObject
+from rey_lib.tree.persisted import TREE_SCHEMA, TREE_VIEW_NAME, TreeDataObject
 from rey_lib.tree.sources import DATABASE_SOURCE
 
 __all__ = [
@@ -73,12 +73,6 @@ _RELATIONSHIPS = (
     ("used", "Used By", True),
 )
 
-#: Where the dependency facts live. The code index is in the database the
-#: Console already reads its own projections from, so it is reached the same
-#: way -- not through the browsed connection, which may be any database at all
-#: and is not where the index was published. What the index knows is
-#: IndexedDatabaseObject's (backlog 696, 729); where it lives is this.
-_INDEX_CONNECTION = TREE_CONNECTION
 
 #: Where a code symbol's file is rooted, in the token the code tree already
 #: uses. The open_file action reads source_root and relative_path off the row.
@@ -667,8 +661,7 @@ class DatabaseDataObject:
         it is the difference between "nothing depends on this" and "nobody
         looked".
         """
-        handle = shared_connection(ctx, _INDEX_CONNECTION).handle()
-        return _indexed_object(configured).is_indexed(handle)
+        return _indexed_object(configured).is_indexed(_index_control(ctx))
 
     def _result_groups(
         self, ctx: Any, configured: dict[str, Any], relationship: str,
@@ -852,8 +845,7 @@ class DatabaseDataObject:
         groupings of the same answer, and asking again for each would be the
         same question three times.
         """
-        handle = shared_connection(ctx, _INDEX_CONNECTION).handle()
-        return _indexed_object(configured).reached_by_code(handle)
+        return _indexed_object(configured).reached_by_code(_index_control(ctx))
 
     def _related_rows(
         self, ctx: Any, configured: dict[str, Any], reverse: bool,
@@ -868,8 +860,7 @@ class DatabaseDataObject:
         why no heading is offered for it -- "not indexed" and "no dependencies"
         must not read the same, and an absent heading says the first.
         """
-        handle = shared_connection(ctx, _INDEX_CONNECTION).handle()
-        return _indexed_object(configured).related(handle, reverse=reverse)
+        return _indexed_object(configured).related(_index_control(ctx), reverse=reverse)
 
     def _reverse(self, relationship: str) -> bool:
         """Which way a named reading asks."""
@@ -1014,6 +1005,26 @@ def _by_name(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(entries, key=lambda one: (
         str(one.get("name") or "").casefold(), str(one.get("name") or ""),
     ))
+
+
+def _index_control(ctx: Any) -> Any:
+    """The shared Control the code index is read through (#541), as the Tree's rows are.
+
+    Never the browsed connection, which may be any database at all and is not
+    where the index was published. What the index knows is IndexedDatabaseObject's
+    (backlog 696, 729).
+
+    Raises:
+        ConfigError: When this runtime has no control database.
+    """
+    # Imported here, as tree/persisted.py does: the bootstrap reaches the tree package.
+    from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+    control = open_shared_control(ctx).shared_control
+    if control is None:
+        raise ConfigError("The code index is read through Control, and this runtime has no "
+                          "control database.")
+    return control
 
 
 def _indexed_object(configured: dict[str, Any]) -> IndexedDatabaseObject:

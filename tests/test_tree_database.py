@@ -642,11 +642,9 @@ class TestTheCodeIndexIsAskedThroughItsOwner:
         )
 
         calls: list[tuple] = []
-        handle = object()
-        monkeypatch.setattr(
-            "rey_lib.tree.database.shared_connection",
-            lambda _ctx, _name: type("_Shared", (), {"handle": lambda _self: handle})(),
-        )
+        control = object()
+        # The index is read through the shared Control (#541), never a handle.
+        monkeypatch.setattr("rey_lib.tree.database._index_control", lambda _ctx: control)
         monkeypatch.setattr(IndexedDatabaseObject, "is_indexed",
                             lambda obj, conn: calls.append(("indexed", obj, conn)) or True)
         monkeypatch.setattr(

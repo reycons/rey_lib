@@ -13,7 +13,32 @@ import pytest
 
 from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.repository_map.code_index import CodeIndexWriter, IndexedRepository
+from rey_lib.repository_map import code_index_database as module
 from rey_lib.repository_map.code_index_database import CodeIndexDatabaseWriter
+
+#: The one promotion, as the recording map below writes it (#541): through the code
+#: procedure map, by its binding, never a CALL assembled in Python.
+_PUBLISHED = "MAP code.publish_code_index [('scan', True)]"
+
+
+@pytest.fixture(autouse=True)
+def routed(monkeypatch):
+    """Route the writer's map resolution and calls to a recorder: each call is written
+    into the statements of the connection it was made on, in order."""
+    class _ProcedureMap:
+        def __init__(self, map_name, action):
+            self.map_name, self.action = map_name, action
+
+        @classmethod
+        def resolve(cls, _conn, _map_cfg, map_name, action):
+            return cls(map_name, action)
+
+        def call(self, conn, values, _run_log, run_ctx=None):
+            conn.statements.append(f"MAP {self.map_name}.{self.action} {sorted(values.items())}")
+            return {"outputs": {}, "rows": None}
+
+    monkeypatch.setattr(module, "ProcedureMap", _ProcedureMap)
+    monkeypatch.setattr(module, "get_procedure_map", lambda _ctx, name: object())
 
 
 class _Adapter:
@@ -107,12 +132,12 @@ class TestTheWriteBoundary:
     """Staging and one call, and nothing else."""
 
     def test_it_satisfies_the_writer_contract(self) -> None:
-        assert isinstance(CodeIndexDatabaseWriter(_Adapter(), None), CodeIndexWriter)
+        assert isinstance(CodeIndexDatabaseWriter(_Adapter(), None, object()), CodeIndexWriter)
 
     def test_storage_is_never_written_to_directly(self) -> None:
         """The writer holds no privilege on storage; it must not try to use one."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
         assert staged <= {
@@ -123,7 +148,7 @@ class TestTheWriteBoundary:
         # storage table named anywhere would mean the writer needs a privilege
         # the schema does not give it.
         for statement in adapter.statements:
-            if statement.startswith("CALL"):
+            if statement.startswith("MAP"):
                 continue
             assert statement.startswith('DELETE FROM "code_stage".')
             assert statement.endswith('_stage"')
@@ -131,17 +156,19 @@ class TestTheWriteBoundary:
     def test_the_replacement_is_one_call(self) -> None:
         """Atomicity is the schema's, so exactly one promotion is issued."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
-        calls = [s for s in adapter.statements if s.startswith("CALL")]
-        assert calls == ["CALL code.p_publish(true)"]
+        calls = [s for s in adapter.statements if s.startswith("MAP")]
+        assert calls == [_PUBLISHED]
+        # Never a CALL assembled in Python (#541).
+        assert not [s for s in adapter.statements if s.startswith("CALL")]
 
     def test_it_promotes_the_scan_and_never_the_architecture(self) -> None:
         """Facts only (backlog 639): nothing authored is staged beside the scan."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
-        assert "CALL code.p_publish(true)" in adapter.statements
+        assert _PUBLISHED in adapter.statements
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
         assert "concept_stage" not in staged
         assert "realization_stage" not in staged
@@ -152,7 +179,7 @@ class TestTheWriteBoundary:
         Otherwise the next promotion would publish a mixture of two scans.
         """
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
@@ -185,7 +212,7 @@ class TestTheWriteBoundary:
         identity for itself.
         """
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
         minted = {
             "repository_id", "code_file_id", "code_symbol_id", "code_edge_id",
@@ -234,14 +261,14 @@ class TestPublicationIsAllOrNothing:
         adapter = _FailingAdapter(fails_on)
 
         with pytest.raises(DatabaseError):
-            CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+            CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
-        assert not [s for s in adapter.statements if s.startswith("CALL")]
+        assert not [s for s in adapter.statements if s.startswith("MAP")]
 
     def test_every_staging_set_is_loaded_before_the_call(self) -> None:
         """All three, in dependency order, and the call comes last."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
 
         assert [table for _s, table, _c, _cols in adapter.inserts] == [
             "repository_stage",
@@ -249,4 +276,4 @@ class TestPublicationIsAllOrNothing:
             "symbol_stage",
             "edge_stage",
         ]
-        assert adapter.statements[-1] == "CALL code.p_publish(true)"
+        assert adapter.statements[-1] == _PUBLISHED

@@ -30,6 +30,7 @@ from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.code_index import IndexedRepository
 
@@ -39,6 +40,11 @@ logger = AppLogger(__name__)
 
 #: The schema owning the code index. One place knows the word.
 SCHEMA = "code"
+
+#: The procedure map the index's write routines are bound in, and the bindings (#541).
+_MAP = "code"
+_PUBLISH = "publish_code_index"
+_CLEAR = "clear_code_index"
 
 #: Where the scan is staged before code.p_publish admits it (backlog 855).
 STAGE_SCHEMA = "code_stage"
@@ -127,7 +133,8 @@ _FLOW_COLUMNS = {
 class CodeIndexDatabaseWriter:
     """Writes one snapshot through the code schema's own write API."""
 
-    def __init__(self, adapter: DBAdapter, connection: Any) -> None:
+    def __init__(self, adapter: DBAdapter, connection: Any, ctx: Any,
+                 run_log: Any = None) -> None:
         """Hold what was already resolved.
 
         Neither is opened here. The application bootstraps, resolves the
@@ -137,9 +144,14 @@ class CodeIndexDatabaseWriter:
         Args:
             adapter: The provider-dispatching adapter.
             connection: An open connection for the indexer's role.
+            ctx: The run's context, which holds the ``code`` procedure map the
+                promotions are bound in (#541).
+            run_log: The run's evidence recorder, which each promotion is logged to.
         """
         self._adapter = adapter
         self._connection = connection
+        self._ctx = ctx
+        self._run_log = run_log
 
     def replace_index(self, indexed: list[IndexedRepository]) -> None:
         """Stage every repository, then promote them as one replacement.
@@ -271,7 +283,7 @@ class CodeIndexDatabaseWriter:
         )
         # The scan only. Nothing authored is staged or resolved here: a
         # declaration cannot refuse the publication of current facts.
-        self._call("p_publish", "true")
+        self._call(_PUBLISH, {"scan": True})
         logger.info("Promoted the staged scan to the live index")
 
     def clear(self) -> None:
@@ -280,7 +292,7 @@ class CodeIndexDatabaseWriter:
         Administrative, not part of indexing: the normal path replaces, so
         nothing has to run between a wipe and a repopulate.
         """
-        self._call("p_index_clear")
+        self._call(_CLEAR, {})
 
     def _clear_staging(self) -> None:
         """Empty staging before filling it.
@@ -328,18 +340,16 @@ class CodeIndexDatabaseWriter:
             self._adapter,
         )
 
-    def _call(self, procedure: str, arguments: str = "") -> None:
-        """Call one of the schema's write procedures.
+    def _call(self, binding: str, values: dict[str, Any]) -> None:
+        """Invoke one of the index's governed write routines through the ``code`` map (#541).
+
+        Not a built ``CALL`` string: the map is what makes this a governed operation,
+        logs it in the run, and makes the call visible to the code index.
 
         Args:
-            procedure: The unqualified procedure name.
-            arguments: The argument list, already written as SQL. These are
-                literal declarations of what is being promoted, never values
-                taken from a scan, so there is nothing here to parameterize.
+            binding: The binding's name in the ``code`` map.
+            values: The values its mapped parameters take.
         """
-        self._adapter.execute_sql(
-            self._connection,
-            f"CALL {SCHEMA}.{procedure}({arguments})",
-            {},
-            "no_return",
-        )
+        ProcedureMap.resolve(
+            self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
+        ).call(self._connection, values, self._run_log)

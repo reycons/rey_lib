@@ -1493,6 +1493,30 @@ class Control:
         }, required=True)
         return dict(rows[0]) if rows else None
 
+    def indexed_object_exists(self, schema: str, name: str, object_type: str,
+                              signature: str) -> bool:
+        """Whether the code index holds this database object (#541): code.f_indexed_object_exists."""
+        return bool(self._call_rows("get_indexed_object", {
+            "schema": schema, "name": name, "object_type": object_type, "signature": signature,
+        }, required=True))
+
+    def indexed_object_related(self, schema: str, name: str, object_type: str, signature: str,
+                               reverse: bool) -> list[dict[str, Any]]:
+        """One direction of an indexed object's edges (#541): code.f_indexed_object_related --
+        what it depends on, or (``reverse``) what depends on it."""
+        return [dict(row) for row in self._call_rows("get_indexed_object_related", {
+            "schema": schema, "name": name, "object_type": object_type, "signature": signature,
+            "reverse": reverse,
+        }, required=True)]
+
+    def indexed_object_reached_by_code(self, schema: str, name: str, object_type: str,
+                                       signature: str) -> list[dict[str, Any]]:
+        """Code reaching an indexed object through a procedure-map binding, one hop (#541):
+        code.f_indexed_object_reached_by_code."""
+        return [dict(row) for row in self._call_rows("get_indexed_object_reached_by_code", {
+            "schema": schema, "name": name, "object_type": object_type, "signature": signature,
+        }, required=True)]
+
     def update_workflow(self, workflow_id: int, definition: dict[str, Any],
                         required: bool = True) -> dict[str, list[int]]:
         """Save a Workflow's complete definition; answer the saved ids in order (#1325).

@@ -144,12 +144,28 @@ def test_javascript_unsupported_switch_is_not_reported_complete(tmp_path):
     assert 'switch_statement' in coverage[0]["reason"]
 
 
-def test_flow_facts_survive_the_existing_scan_to_staging_pipeline(tmp_path):
+def test_flow_facts_survive_the_existing_scan_to_staging_pipeline(tmp_path, monkeypatch):
+    from rey_lib.repository_map import code_index_database
     from rey_lib.repository_map.code_index import _indexed
     from rey_lib.repository_map.writer import RepositoryMap
     from tests.test_code_index import _header, _file
-    from tests.test_code_index_database import _Adapter
+    from tests.test_code_index_database import _Adapter, _PUBLISHED
     from rey_lib.repository_map.code_index_database import CodeIndexDatabaseWriter
+
+    class _ProcedureMap:
+        """The code map's promotion, recorded on the connection it is called on (#541)."""
+        def __init__(self, map_name, action):
+            self.map_name, self.action = map_name, action
+
+        @classmethod
+        def resolve(cls, _conn, _map_cfg, map_name, action):
+            return cls(map_name, action)
+
+        def call(self, conn, values, _run_log, run_ctx=None):
+            conn.statements.append(f"MAP {self.map_name}.{self.action} {sorted(values.items())}")
+
+    monkeypatch.setattr(code_index_database, "ProcedureMap", _ProcedureMap)
+    monkeypatch.setattr(code_index_database, "get_procedure_map", lambda _ctx, name: object())
     path=tmp_path/'sample.py'
     path.write_text('def run():\n    return operation()\n')
     records=[r.to_dict() for r in python_control_flow(path,'Python',path.name)]
@@ -157,12 +173,12 @@ def test_flow_facts_survive_the_existing_scan_to_staging_pipeline(tmp_path):
     assert indexed.control_flow_nodes and indexed.control_flow_edges
     assert indexed.control_flow_coverage[0]['owner_qualified_name']=='run'
     adapter=_Adapter()
-    CodeIndexDatabaseWriter(adapter,None).replace_index([indexed])
+    CodeIndexDatabaseWriter(adapter,adapter,object()).replace_index([indexed])
     tables={table: count for schema,table,count,cols in adapter.inserts}
     assert tables['control_flow_node_stage']==len(indexed.control_flow_nodes)
     assert tables['control_flow_edge_stage']==len(indexed.control_flow_edges)
     assert tables['control_flow_coverage_stage']==1
-    assert adapter.statements[-1]=='CALL code.p_publish(true)'
+    assert adapter.statements[-1]==_PUBLISHED
 
 
 def test_javascript_plain_syntax_snapshot_handles_destructuring_and_nested_ternary(tmp_path):

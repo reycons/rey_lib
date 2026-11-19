@@ -22,6 +22,7 @@ from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.logs.app_logger import AppLogger
 
 __all__ = ["DatabaseIndexWriter"]
@@ -29,6 +30,10 @@ __all__ = ["DatabaseIndexWriter"]
 logger = AppLogger(__name__)
 
 SCHEMA = "code"
+
+#: The procedure map the promotion is bound in, and its binding (#541).
+_MAP = "code"
+_PUBLISH = "publish_database_index"
 
 #: Where the database index is staged before it is published (backlog 855).
 STAGE_SCHEMA = "code_stage"
@@ -78,15 +83,20 @@ _STAGING = (
 class DatabaseIndexWriter:
     """Stages one database's catalog facts and promotes them in one call."""
 
-    def __init__(self, adapter: DBAdapter, connection: Any) -> None:
+    def __init__(self, adapter: DBAdapter, connection: Any, ctx: Any,
+                 run_log: Any = None) -> None:
         """Hold the adapter and the connection the index is published through.
 
         Args:
             adapter: The database adapter.
             connection: An open connection handle.
+            ctx: The run's context, holding the ``code`` procedure map (#541).
+            run_log: The run's evidence recorder, which the promotion is logged to.
         """
         self._adapter = adapter
         self._connection = connection
+        self._ctx = ctx
+        self._run_log = run_log
 
     def replace_index(
         self,
@@ -158,7 +168,7 @@ class DatabaseIndexWriter:
             "Staged %d objects, %d members, %d observations for %s",
             len(objects), len(members), len(observations), source_key,
         )
-        self._call("p_publish_database")
+        self._call(_PUBLISH)
 
     def _clear_staging(self) -> None:
         """Empty every staging table, deepest dependency first."""
@@ -189,12 +199,12 @@ class DatabaseIndexWriter:
             self._adapter,
         )
 
-    def _call(self, procedure: str) -> None:
-        """Call the schema's promotion procedure.
+    def _call(self, binding: str) -> None:
+        """Invoke the promotion through the ``code`` map (#541): governed, logged, indexed.
 
         Args:
-            procedure: The unqualified procedure name.
+            binding: The binding's name in the ``code`` map.
         """
-        self._adapter.execute_sql(
-            self._connection, f"CALL {SCHEMA}.{procedure}()", {}, "no_return",
-        )
+        ProcedureMap.resolve(
+            self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
+        ).call(self._connection, {}, self._run_log)
