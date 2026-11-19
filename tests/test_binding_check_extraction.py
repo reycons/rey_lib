@@ -245,8 +245,10 @@ def test_the_dispatch_method_is_recorded_with_each_observation(tmp_path) -> None
             "relative_path": "control.py", "receiver": "self",
             "methods": ("_call", "_call_rows")}
 
-    found, status = _seam_observations(source, seam)
+    found, status, module_map = _seam_observations(source, seam)
 
+    # The Control seam names no map in code: the installation does (#62 unchanged).
+    assert module_map == "" and {o["observed_map"] for o in found} == {""}
     by_binding = {o["observed_binding"]: o for o in found}
     assert by_binding["insert_file_manifest"]["dispatch_method"] == "_call"
     assert by_binding["get_files_to_classify"]["dispatch_method"] == "_call_rows"
@@ -257,6 +259,80 @@ def test_the_dispatch_method_is_recorded_with_each_observation(tmp_path) -> None
     unresolved = [o for o in found if o["resolution"] == "unresolved"]
     assert [o["dispatch_method"] for o in unresolved] == ["_call_rows"]
     assert status == "partial"
+
+
+_PUBLISHER_SEAM = {"seam": "a_publication", "repository": "rey_lib",
+                   "relative_path": "publication.py", "receiver": "self", "methods": ("_call",),
+                   "binding_parameter": "binding", "map_constant": "_MAP"}
+
+
+def test_a_publisher_seam_reads_its_map_and_bindings_from_its_own_constants(tmp_path) -> None:
+    """#62: a module dispatching through ProcedureMap behind ``_call`` -- the map and the
+    bindings named once as module constants, the binding wherever ``_call`` takes it."""
+    source = tmp_path / "publication.py"
+    source.write_text(
+        "from typing import Final\n"
+        "_MAP = 'code'\n"
+        "_CLEAR: Final = 'clear_stage'\n"
+        "_PUBLISH = 'publish_generation'\n"
+        "class Publisher:\n"
+        "    def publish(self, ctx, run_log, key):\n"
+        "        self._call(ctx, run_log, _CLEAR, key)\n"
+        "        self._call(ctx, run_log, binding=_PUBLISH, key=key)\n"
+        "    def again(self, ctx, run_log, chosen):\n"
+        "        self._call(ctx, run_log, chosen, 'k')\n"
+        "    def _call(self, ctx, run_log, binding, key):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    found, status, module_map = _seam_observations(source, _PUBLISHER_SEAM)
+
+    assert module_map == "code"
+    exact = [(o["qualified_name"], o["observed_map"], o["observed_binding"])
+             for o in found if o["resolution"] == "exact"]
+    assert exact == [("Publisher.publish", "code", "clear_stage"),
+                     ("Publisher.publish", "code", "publish_generation")]
+    # A binding that is no constant of the module is reported, never dropped.
+    unresolved = [o for o in found if o["resolution"] == "unresolved"]
+    assert [(o["qualified_name"], o["observed_binding"]) for o in unresolved] == [
+        ("Publisher.again", "chosen")]
+    assert status == "partial"
+
+
+def test_a_publisher_seam_with_no_map_constant_is_partial_not_guessed(tmp_path) -> None:
+    source = tmp_path / "publication.py"
+    source.write_text(
+        "_PUBLISH = 'publish_generation'\n"
+        "class Publisher:\n"
+        "    def publish(self):\n"
+        "        self._call(_PUBLISH)\n"
+        "    def _call(self, binding):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    found, status, module_map = _seam_observations(source, _PUBLISHER_SEAM)
+
+    assert module_map == "" and status == "partial"
+    assert [o["observed_binding"] for o in found] == ["publish_generation"]
+
+
+def test_the_publisher_seams_name_every_module_that_dispatches_through_its_own_map() -> None:
+    """#62: the estate's publishers, each read as a seam; the Control seam first and unchanged."""
+    from rey_lib.repository_map.bridge_index import _SEAMS
+
+    assert _SEAMS[0] == {"seam": "control_dispatch", "repository": "rey_lib",
+                         "relative_path": "rey_lib/control/control.py", "receiver": "self",
+                         "methods": ("_call", "_call_rows")}
+    assert {seam["relative_path"] for seam in _SEAMS[1:]} == {
+        "rey_lib/repository_map/code_index_database.py",
+        "rey_lib/repository_map/database_index.py",
+        "rey_lib/repository_map/bridge_index.py",
+        "rey_lib/system_capability/publication.py",
+        "rey_lib/inferred_architecture/publication.py",
+        "rey_lib/ai/experience/publication.py",
+    }
 
 
 def test_bindings_carry_their_result_mode_and_their_parameters() -> None:

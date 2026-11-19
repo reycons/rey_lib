@@ -54,7 +54,7 @@ STAGE_SCHEMA = "code_stage"
 
 #: What produced an extraction. Recorded on coverage, so a published bridge
 #: says which extractor's reach it reflects.
-EXTRACTOR_VERSION = "rey_repository_map/bridge 3"
+EXTRACTOR_VERSION = "rey_repository_map/bridge 4"
 
 #: WHAT THIS EXTRACTOR STATES, as a number a query can compare.
 #:
@@ -73,6 +73,16 @@ BRIDGE_SCHEMA_VERSION = 3
 #: The dispatch seams read, and nothing else. Each names the repository, the
 #: module within it, the receiver and the methods whose FIRST argument is the
 #: binding. Adding one is a decision, not a tweak.
+#:
+#: A PUBLISHER seam (#62) is a module that dispatches its own governed routines
+#: through ``ProcedureMap.resolve`` behind a ``_call`` method, the map and the
+#: bindings named once as module constants. It declares two more things, both
+#: read from the module itself: ``binding_parameter`` -- the name of the
+#: ``_call`` parameter that carries the binding, whose position is that
+#: method's own signature -- and ``map_constant`` -- the module constant naming
+#: the map, which here is code, not installation configuration.
+_PUBLISHER = {"repository": "rey_lib", "receiver": "self", "methods": ("_call",),
+              "binding_parameter": "binding", "map_constant": "_MAP"}
 _SEAMS = (
     {
         "seam": "control_dispatch",
@@ -81,6 +91,18 @@ _SEAMS = (
         "receiver": "self",
         "methods": ("_call", "_call_rows"),
     },
+    {**_PUBLISHER, "seam": "code_index_publication",
+     "relative_path": "rey_lib/repository_map/code_index_database.py"},
+    {**_PUBLISHER, "seam": "database_index_publication",
+     "relative_path": "rey_lib/repository_map/database_index.py"},
+    {**_PUBLISHER, "seam": "bridge_publication",
+     "relative_path": "rey_lib/repository_map/bridge_index.py"},
+    {**_PUBLISHER, "seam": "system_capability_publication",
+     "relative_path": "rey_lib/system_capability/publication.py"},
+    {**_PUBLISHER, "seam": "inferred_architecture_publication",
+     "relative_path": "rey_lib/inferred_architecture/publication.py"},
+    {**_PUBLISHER, "seam": "ai_experience_publication",
+     "relative_path": "rey_lib/ai/experience/publication.py"},
 )
 
 _CODE_COLUMNS = (
@@ -190,14 +212,15 @@ def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]
     coverage: list[dict[str, Any]] = []
     for seam in _SEAMS:
         source = apps_root / seam["repository"] / seam["relative_path"]
-        observed, status = _seam_observations(source, seam)
+        observed, status, module_map = _seam_observations(source, seam)
         code.extend(observed)
         coverage.append({
             "installation": installation,
             "seam": seam["seam"],
-            # Which map this seam resolves through HERE. The code cannot say;
-            # the installation can.
-            "map_name": control_map,
+            # Which map this seam resolves through HERE. At the Control seam the
+            # code cannot say and the installation can; a publisher module names
+            # its map itself (#62).
+            "map_name": module_map if "map_constant" in seam else control_map,
             "extractor_version": EXTRACTOR_VERSION,
             "status": status,
             "bridge_schema_version": BRIDGE_SCHEMA_VERSION,
@@ -214,21 +237,26 @@ def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]
 
 def _seam_observations(
     source: Path, seam: dict[str, Any],
-) -> tuple[list[dict[str, Any]], str]:
-    """Every dispatch at one seam, resolved or not.
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Every dispatch at one seam, resolved or not; with the map a publisher names.
 
-    A non-literal first argument is recorded ``unresolved`` with what was seen,
-    never dropped: silence would make "no code reaches this" indistinguishable
-    from "the extractor could not tell".
+    A non-literal binding is recorded ``unresolved`` with what was seen, never
+    dropped: silence would make "no code reaches this" indistinguishable from
+    "the extractor could not tell". At a publisher seam (#62) the binding is the
+    argument in the position of ``_call``'s ``binding`` parameter, and a module
+    constant holding a string counts as that string -- named once, in the module.
     """
     if not source.exists():
         # Reported, not assumed empty. An unreadable seam is a coverage
         # failure, and publishing it as complete would launder it into "no
         # code reaches anything".
         logger.warning("bridge: seam source not found: %s", source)
-        return [], "failed"
+        return [], "failed", ""
 
     tree = ast.parse(source.read_text(encoding="utf-8"))
+    constants = _module_constants(tree) if "map_constant" in seam else {}
+    module_map = constants.get(str(seam.get("map_constant") or ""), "")
+    position = _binding_position(tree, seam)
     # DOTTED, not bare. The code index keys a symbol by
     # (repository_key, relative_path, qualified_name) and calls this method
     # 'Control.end_step'. A bare 'end_step' joins to nothing, which is how a
@@ -248,15 +276,15 @@ def _seam_observations(
         if not (isinstance(func.value, ast.Name)
                 and func.value.id == seam["receiver"]):
             continue
-        if not node.args:
+        first = _binding_argument(node, position, seam)
+        if first is None:
             continue
-        first = node.args[0]
         literal = (
             first.value
             if isinstance(first, ast.Constant) and isinstance(first.value, str)
-            else ""
+            else constants.get(first.id, "") if isinstance(first, ast.Name) else ""
         )
-        if not literal:
+        if not literal or ("map_constant" in seam and not module_map):
             complete = False
         owner = min(
             (o for o in owners if o[0] <= node.lineno <= o[1]),
@@ -269,8 +297,9 @@ def _seam_observations(
             "qualified_name": owner,
             "source_line": node.lineno,
             "seam": seam["seam"],
-            # The map is not the code's to state at this seam.
-            "observed_map": "",
+            # The map is not the code's to state at the Control seam; a publisher
+            # module states its own (#62).
+            "observed_map": module_map,
             "observed_binding": literal or _seen(first),
             "resolution": "exact" if literal else "unresolved",
             # WHICH dispatch method reached it, which is what decides the
@@ -279,7 +308,52 @@ def _seam_observations(
             # declared the other with nothing to notice.
             "dispatch_method": func.attr,
         })
-    return found, ("complete" if complete else "partial")
+    return found, ("complete" if complete else "partial"), module_map
+
+
+def _module_constants(tree: ast.Module) -> dict[str, str]:
+    """The module's own string constants -- ``NAME = "x"`` or ``NAME: Final = "x"`` at
+    module level (#62). Only literal strings; nothing is evaluated or followed."""
+    found: dict[str, str] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value = statement.targets[0], statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            target, value = statement.target, statement.value
+        else:
+            continue
+        if (isinstance(target, ast.Name) and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)):
+            found[target.id] = value.value
+    return found
+
+
+def _binding_position(tree: ast.Module, seam: dict[str, Any]) -> int:
+    """Where the binding is passed at this seam: the first argument, or -- at a
+    publisher seam (#62) -- the position of the dispatch method's own
+    ``binding_parameter`` (its receiver excluded); -1 where the module declares no
+    such method, so nothing there is read as a binding."""
+    name = seam.get("binding_parameter")
+    if not name:
+        return 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name in seam["methods"]:
+            parameters = [one.arg for one in node.args.args][1:]
+            if name in parameters:
+                return parameters.index(str(name))
+    return -1
+
+
+def _binding_argument(node: ast.Call, position: int, seam: dict[str, Any]) -> ast.expr | None:
+    """The argument a dispatch passes its binding in, by position or by keyword."""
+    keyword = seam.get("binding_parameter")
+    for one in node.keywords:
+        if keyword and one.arg == keyword:
+            return one.value
+    if 0 <= position < len(node.args):
+        return node.args[position]
+    return None
 
 
 def _qualified(tree: ast.Module) -> list[tuple[ast.AST, str]]:
