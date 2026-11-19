@@ -60,8 +60,9 @@ class HostedCapabilities:
         self,
         application: Application,
         control: Any,
-        catalogue: Mapping[str, Callable[[Mapping[str, Any]], Any]],
+        catalogue: Mapping[str, Callable[..., Any]],
         hosted_kind: str,
+        bounded: tuple[str, ...] = (),
     ) -> None:
         """Settle which keys are invocable, fail closed per key.
 
@@ -75,6 +76,10 @@ class HostedCapabilities:
                 its opening identity kind where it holds one object (a File, a
                 Workflow), the held objects' own kind where it holds several (an
                 AI session's AITasks).
+            bounded: The catalogue keys whose callable also takes the calling
+                tool's governed ``result_row_limit`` (#1429): how many items one
+                answer may hold. The callable bounds what it answers, never what
+                it counts; every other callable takes the inputs alone.
 
         A disagreement leaves that key not invocable and is logged once; the
         application still hosts and presents its object. A failed governed read
@@ -82,6 +87,7 @@ class HostedCapabilities:
         """
         self._hosted_kind = str(hosted_kind)
         self._catalogue = dict(catalogue)
+        self._bounded = frozenset(bounded)
         self._invocable: dict[str, ApplicationCapability] = {}
         self._refused: dict[str, str] = {}
         published = {capability.key: capability for capability in application.capabilities}
@@ -111,7 +117,8 @@ class HostedCapabilities:
                 self._invocable[key] = published[key]
 
     def invoke(self, capability: str, inputs: Any,
-               caller: Mapping[str, Any] | None = None) -> Any:
+               caller: Mapping[str, Any] | None = None,
+               result_row_limit: int | None = None) -> Any:
         """Answer one invocation against the hosted object, or refuse it.
 
         Checked in order: the key is invocable; the inputs satisfy its input
@@ -125,6 +132,8 @@ class HostedCapabilities:
             caller: Who asked, as the transport established it (#1325):
                 ``{application, run_id}`` from the routing, or None where no
                 transport identified one.
+            result_row_limit: The calling tool's governed limit (#1429), where it
+                states one; given only to a ``bounded`` callable.
 
         Returns:
             Whatever the catalogue's callable returns.
@@ -160,6 +169,8 @@ class HostedCapabilities:
                 f"capability '{key}' declares {declared.access} access, which is not answered."
             )
         _LOG.debug("invoking capability '%s' on the hosted %s", key, self._hosted_kind)
+        if key in self._bounded:
+            return self._catalogue[key](inputs, result_row_limit)
         return self._catalogue[key](inputs)
 
 

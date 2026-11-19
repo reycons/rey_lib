@@ -63,6 +63,32 @@ def test_map_edit_does_not_write_and_save_is_declared_only_while_dirty():
     assert mapped(store).layout_projection()["geometry"] == GEOMETRY
 
 
+def loading(projected):
+    return [a for a in projected["actions"] if a["role"]["act"] == "load"]
+
+
+def test_open_from_save_holds_the_saved_arrangement_again_and_writes_nothing():
+    """Open from save (#1426): declared only with a saved arrangement; restores it, saves nothing."""
+    store = Store()
+    held = mapped(store)
+    scope = held.layout_projection()["actions"][0]["command"]["scope"]
+    assert not loading(held.layout_projection())
+    with pytest.raises(ConfigError, match="no saved layout"):
+        held.load(scope)
+    held.edit_layout(GEOMETRY, scope)
+    held.save(scope)
+    writes = deepcopy(store.writes)
+    rows = deepcopy(store.rows)
+    held.edit_layout({**GEOMETRY, "zoom": 3}, scope)
+    [load] = loading(held.layout_projection())
+    assert load["command"] == {"command": "map", "action": "load", "scope": scope}
+    held.load(scope)
+    projected = held.layout_projection()
+    assert projected["geometry"] == GEOMETRY
+    assert not saving(projected)
+    assert store.writes == writes and store.rows == rows
+
+
 def test_map_stale_save_is_refused_and_keeps_the_unsaved_geometry():
     store = Store()
     first, second = mapped(store), mapped(store)
@@ -89,6 +115,22 @@ def test_map_refuses_domain_data_in_a_geometry_edit():
     scope = held.layout_projection()["actions"][0]["command"]["scope"]
     with pytest.raises(ConfigError, match="geometry only"):
         held.edit_layout({**GEOMETRY, "nodes": []}, scope)
+
+
+def test_a_lines_routing_is_layout_saved_and_restored_with_the_positions():
+    """A moved line's turn (#1426) is geometry: saved with the layout, read back."""
+    store = Store()
+    held = mapped(store)
+    scope = held.layout_projection()["actions"][0]["command"]["scope"]
+    routed = {**GEOMETRY, "routes": {"reference:7": 0.6}}
+    held.edit_layout(routed, scope)
+    held.save(scope)
+    assert mapped(store).layout_projection()["geometry"] == routed
+    workflow = Workflow(workflow_id=11, name="example", enabled=True,
+                        config={}, processes=[], control=Store())
+    workflow.bind_map_layout()
+    workflow.edit_map_layout(routed)
+    assert workflow.map_layout_projection()["geometry"] == routed
 
 
 def test_workflow_layout_save_keeps_its_live_definition_and_is_recovered():

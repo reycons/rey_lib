@@ -264,7 +264,8 @@ class Workflow:
         """Hold reported geometry independently of this Workflow's definition."""
         if not isinstance(geometry, dict) or not {"elements", "positions", "pan", "zoom"} <= geometry.keys():
             raise ConfigError("A Workflow map edit requires its graph geometry.")
-        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport"}:
+        # ``routes``: the reader's routing of the lines they moved (#1426), by line id.
+        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport", "routes"}:
             raise ConfigError("A Workflow map layout contains geometry only.")
         self._map_layout()["geometry"] = deepcopy(geometry)
         self._changed()

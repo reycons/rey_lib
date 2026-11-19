@@ -38,7 +38,7 @@ from typing import Any
 
 __all__ = [
     "RoutineAnalysis", "analyse_routine", "analyse_view", "ANALYZABLE_LANGUAGES",
-    "Derivation", "DerivationInput",
+    "Derivation", "DerivationInput", "derivation_place", "expression_head",
 ]
 
 #: Languages this module can read. A routine in any other language is
@@ -163,6 +163,75 @@ def analyse_routine(definition: str, language: str) -> RoutineAnalysis:
 
     _derive_plpgsql(tree, found)
     return found.as_analysis()
+
+
+def expression_head(expression: str) -> str:
+    """What a transform's expression applies, as a short name (#1426's map labels).
+
+    The expression is the one this analyser deparsed (``Derivation.expression``):
+    a function call answers its function's name, a column reference the column
+    it reads as written, a cast what it casts, COALESCE / CASE their keyword. Anything else
+    -- or text that does not parse -- answers an empty string: the caller shows
+    the transform's role alone, and the full expression stays where it is.
+    """
+    from pglast import ast as A
+    from pglast import parse_sql
+    from pglast.parser import ParseError
+
+    try:
+        tree = parse_sql(f"SELECT {expression}")
+    except ParseError:
+        return ""
+    node = tree[0].stmt.targetList[0].val
+    while isinstance(node, A.TypeCast):
+        node = node.arg
+    if isinstance(node, A.FuncCall):
+        return str(node.funcname[-1].sval)
+    if isinstance(node, A.ColumnRef) and all(isinstance(one, A.String) for one in node.fields):
+        return ".".join(str(one.sval) for one in node.fields)
+    if isinstance(node, A.CoalesceExpr):
+        return "COALESCE"
+    if isinstance(node, A.CaseExpr):
+        return "CASE"
+    return ""
+
+
+def carries_forward(expression: str) -> bool:
+    """Whether a value transform only carries a column forward (#1426): its
+    expression, as this analyser deparsed it, is a bare column reference -- no
+    function, cast, operator or literal. False for anything else, and for text
+    that does not parse.
+    """
+    from pglast import ast as A
+    from pglast import parse_sql
+    from pglast.parser import ParseError
+
+    if not expression.strip():
+        return False
+    try:
+        tree = parse_sql(f"SELECT {expression}")
+    except ParseError:
+        return False
+    node = tree[0].stmt.targetList[0].val
+    return isinstance(node, A.ColumnRef) and all(isinstance(one, A.String)
+                                                 for one in node.fields)
+
+
+def derivation_place(key: str, role: str) -> tuple[str, str]:
+    """Where a transform sits and what it produces, as its key states them (#1426).
+
+    The key is ``<statement>.<query path>.<role>.<ordinal>.<name>`` (``Derivation``,
+    built by ``_Deriver._transform``). Answers the innermost named query on the
+    path -- a CTE's name, a FROM subquery's alias -- or "" for the statement's
+    own query; and the name it produces. Both "" when the key is not in that form.
+    """
+    match = re.match(rf"^\d+\.(.*)\.{re.escape(role)}\.\d+\.(.*)$", key)
+    if match is None:
+        return "", ""
+    path, name = match.groups()
+    named = [segment.split(":", 1)[1] for segment in path.split(".")
+             if segment.startswith(("cte:", "sub:"))]
+    return (named[-1] if named else ""), name
 
 
 def _sql_body(definition: str, parse_sql: Any) -> str | None:

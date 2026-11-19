@@ -190,5 +190,24 @@ def test_its_interface_carries_no_transport_and_the_caller_only_as_routing_names
     construction = set(inspect.signature(HostedCapabilities.__init__).parameters)
     invocation = set(inspect.signature(HostedCapabilities.invoke).parameters)
 
-    assert construction == {"self", "application", "control", "catalogue", "hosted_kind"}
-    assert invocation == {"self", "capability", "inputs", "caller"}
+    # ``bounded`` / ``result_row_limit`` (#1429): the calling tool's governed limit,
+    # not a transport -- what one answer may hold.
+    assert construction == {"self", "application", "control", "catalogue", "hosted_kind",
+                            "bounded"}
+    assert invocation == {"self", "capability", "inputs", "caller", "result_row_limit"}
+
+
+def test_a_bounded_capability_is_given_the_tools_governed_limit_and_no_other_is() -> None:
+    """#1429: only a key the owner declares bounded takes the limit; the rest as before."""
+    seen: list[Any] = []
+    control = _Control([_row(_TEXT), _row(_FACTS)])
+    hosted = HostedCapabilities(
+        Application(name="data_engine", capabilities=(_TEXT, _FACTS)), control,
+        {"file.text": lambda inputs: "unbounded",
+         "file.facts": lambda inputs, limit: seen.append(limit) or {"limit": limit}},
+        "configured_file", bounded=("file.facts",))
+
+    assert hosted.invoke("file.facts", {}, result_row_limit=7) == {"limit": 7}
+    assert hosted.invoke("file.facts", {}) == {"limit": None}
+    assert hosted.invoke("file.text", {"max_bytes": 1}, result_row_limit=7) == "unbounded"
+    assert seen == [7, None]

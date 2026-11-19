@@ -39,7 +39,13 @@ import json
 
 from typing import Any, Callable, Final
 
-from rey_lib.db.database_objects import DatabaseChildIdentity, DatabaseObjectListing, DatabaseSchema
+from rey_lib.db.database_objects import (
+    DatabaseChildIdentity, DatabaseConstraint, DatabaseObjectListing, DatabaseSchema,
+    data_type_category, parameter_role,
+)
+from rey_lib.db.postgres_references import (
+    VALUE, carries_forward, derivation_place, expression_head,
+)
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.repository_map.indexed_database_object import IndexedDatabaseObject
 
@@ -80,6 +86,145 @@ _FLOW: Final = "flow:"
 _APPLICATION: Final = "application:"
 _SYMBOL: Final = "symbol:"
 _BOUNDARY: Final = "boundary:"
+#: A level-1 column flow (#1426): input column -> output column, its transforms hidden.
+_COLUMN_FLOW_EDGE: Final = "column_flow:"
+#: A table's or view's header row (#1426): it names the object; a click selects it.
+_HEADER: Final = "header:"
+#: The +/- on a header row (#1426): a click shows or hides the object's columns.
+_TOGGLE: Final = "toggle:"
+#: The connections control on a header row (#1426): a click hides or restores
+#: every line into or out of the object, nothing else.
+_LINKS: Final = "links:"
+#: The relationships control on a header row (#1426): a click hides or restores
+#: the object's header-to-header lines only; its column lines stay.
+_RELATIONS: Final = "relations:"
+#: Each header control that hides a kind of line (#1426), and the focus key that
+#: holds the objects whose lines of that kind are hidden: the connections control
+#: the column-to-column lines, the relationships control the header-to-header ones.
+_HIDDEN_LINES: Final = ((_LINKS, "hidden_connections"), (_RELATIONS, "hidden_relationships"))
+#: The generations an object-focused map can hide (#1426 Map Options): the
+#: objects one hop from the focused object, and those two hops away.
+_GENERATIONS: Final = frozenset({1, 2})
+#: The object types any database map can hide (#1426 Map Options).
+_OBJECT_TYPES: Final = frozenset({"table", "view", "function", "procedure"})
+#: The map's visibility toggles (#1426 Map Options), in the pill's order: what a
+#: toggle is ``on``, the focus key holding what is hidden, and the value it hides.
+_GENERATION_TOGGLES: Final = (("first_order", "hidden_generations", 1),
+                              ("second_order", "hidden_generations", 2))
+_TYPE_TOGGLES: Final = (("tables", "hidden_object_types", "table"),
+                        ("views", "hidden_object_types", "view"),
+                        ("functions", "hidden_object_types", "function"),
+                        ("procedures", "hidden_object_types", "procedure"))
+#: The acts of the whole view's declared actions (#1426, #1151): on its opened
+#: panels, and on its hidden connections.
+_EXPAND: Final = "expand"
+_COLLAPSE: Final = "collapse"
+_HIDE: Final = "hide"
+_SHOW: Final = "show"
+#: The pill a header's controls sit in (#1426): drawn only, never pressed.
+_CONTROLS: Final = "controls:"
+#: An ER box's own parts, never marked for a selection: its header and its controls.
+_BOX_PARTS: Final = frozenset({"header", "toggle", "links", "relations", "controls", "group"})
+#: One column pair of a foreign key drawn between rows or boxes (#1426).
+_FK_COLUMN_EDGE: Final = "fk_column:"
+
+#: Column lineage levels on an opened table or view (#1426). Both draw the same
+#: #1425 relationships: column flow hides the transforms between two columns,
+#: derivation detail shows them with their expressions.
+_COLUMN_FLOW: Final = "columns"
+_DERIVATION_DETAIL: Final = "transforms"
+_LINEAGE_LEVELS: Final = frozenset({_COLUMN_FLOW, _DERIVATION_DETAIL})
+#: The toolbar toggle that shows derivation detail (#1426, the user's ruling).
+_DERIVATION_DETAIL_LABEL: Final = "Transforms"
+#: How far a double-clicked column's lineage reaches (#1426): all of it -- no
+#: depth (the user's ruling, 2026-11-18, replacing 3 graph edges).
+_COLUMN_FOCUS_DEPTH: Final[int | None] = None
+#: The members whose full lineage the AI may read from the map (#1429): what
+#: #1425's derivation graph holds -- a column, a transform, a routine's parameter.
+_LINEAGE_MEMBERS: Final = ("column", "transform", "parameter")
+#: The focused lineage reads left to right, as the approved visual (#1426) shows.
+_COLUMN_FOCUS_DIRECTION: Final = "RIGHT"
+#: The focused lineage's key, in the theme's colours as the schema style draws them.
+_COLUMN_FOCUS_LEGEND: Final = (
+    {"label": "Table / View", "shape": "round-rectangle", "color": "var(--border)"},
+    {"label": "Column", "shape": "round-rectangle", "color": "var(--ink)"},
+    {"label": "Transform", "shape": "diamond", "color": "var(--progress-fill)"},
+    {"label": "Column derivation (flow)", "shape": "line", "color": "var(--progress-fill)"},
+)
+
+
+def _transform_label(role: str, expression: str | None, key: str) -> str:
+    """A transform's short label (#1426): where it sits, what it produces and from what.
+
+    A value transform reads ``definition.ai ← jsonb_build_object``: the CTE or
+    subquery it is in (none for the statement's own query), the name it
+    produces, and what its expression applies -- or its role, where nothing
+    short names that. A join, filter or group is its role. Both readings are
+    #1425's analyser's own (``derivation_place``, ``expression_head``).
+    """
+    if role != VALUE:
+        return role
+    place, name = derivation_place(key, role)
+    applies = expression_head(expression or "") or role
+    if not name:
+        return f"{role} → {applies}"
+    return f"{place + '.' if place else ''}{name} ← {applies}"
+
+
+def _transforms_anything(role: str, expression: str | None) -> bool:
+    """Whether a transform is drawn on the map (#1426): every one but a value that
+    only carries a column forward -- its line runs column to column instead."""
+    return not (role == VALUE and carries_forward(expression or ""))
+
+
+def _mark_holding_objects(nodes: list[dict[str, Any]], holding: set[str],
+                          selected: str | None) -> None:
+    """A column selection read at object level (#1426 design): the object holding
+    the selected column is ``focus``, every other object holding a marked column
+    ``first`` -- the map's own marks, which the panels show as their fill."""
+    owner = next((node.get("parent") for node in nodes if node["id"] == selected), None)
+    for node in nodes:
+        if node["id"] in holding and not node.get("highlight"):
+            node["highlight"] = ["focus"] if node["id"] == owner else ["first"]
+
+
+def _line_columns(nodes: list[dict[str, Any]], edge: dict[str, Any] | None,
+                  display: dict[str, str]) -> set[str]:
+    """The drawn column rows a selected line joins (#1426): shown as selected columns.
+
+    A foreign key's columns and a derivation's two columns, where each is drawn as a
+    row; an end in a collapsed object, or a line that names no column, gives none.
+    """
+    if edge is None:
+        return set()
+    ends = {display.get(one, one) for one in (edge.get("from", edge["source"]),
+                                              edge.get("to", edge["target"]))}
+    return {node["id"] for node in nodes if node["id"] in ends and node.get("kind") == "column"}
+
+
+def _object_type_of(node: dict[str, Any]) -> str | None:
+    """A drawn object's database type (#1426 Map Options): its identity's, or a
+    schema overview's table (an external table too) or view; None for code."""
+    stated = (node.get("identity") or {}).get("object_type")
+    if stated:
+        return str(stated)
+    return {"table": "table", "external": "table", "view": "view"}.get(str(node.get("kind") or ""))
+
+
+def _evidence_rows(edge: dict[str, Any]) -> list[list[Any]]:
+    """A derivation's evidence, one details row each."""
+    return [["Evidence", f"{evidence['fact_source']} · {evidence['resolution']}"
+                         f" · {evidence['evidence']}"]
+            for evidence in edge.get("evidence") or []]
+#: What may be opened to show its columns (decision (d): tables and views).
+_OPENABLE: Final = frozenset({"table", "view"})
+#: The database routines that open like a view (#1426): a function or procedure
+#: shows its parameters, its inputs and its outputs, as a view shows its columns.
+_OPENABLE_ROUTINES: Final = frozenset({"function", "procedure"})
+#: A function's parameter groups (#1426), in panel order: each group's heading
+#: and the parameter roles it holds (``parameter_role`` of the member's mode).
+_PARAMETER_GROUPS: Final = (("inputs:", "Inputs", frozenset({"input"})),
+                            ("outputs:", "Outputs", frozenset({"output"})))
 
 #: A claim's owner file is a configured file beneath the apps root: its
 #: ``owner_subject_id`` is the path relative to it (#1218).
@@ -135,10 +280,21 @@ class ObjectMap:
         self._index_installation = ""
         self._database_provider = ""
         self._table_context: dict[str, Any] | None = None
+        #: A focused column's lineage (#1426), as its read answered; the screen it draws.
+        self._column_focus: dict[str, Any] | None = None
+        #: The column rows the schema projection last drew: a double-click focuses one.
+        self._column_rows: set[str] = set()
+        #: Each drawn column row's identity -- schema, object, object_type, column --
+        #: what an explain gesture names it by (#1399, #1426).
+        self._member_identities: dict[str, dict[str, str]] = {}
         self._context_path: list[dict[str, Any]] = []
         self._edge_inspection: dict[str, Any] | None = None
         self._layout_control: Any = None
         self._layouts: dict[str, dict[str, Any]] = {}
+        #: The column, transform and derivation-edge ids the schema projection
+        #: last drew for its opened tables and views (#1426). Selectable; they
+        #: never open or drill.
+        self._lineage_ids: set[str] = set()
 
     def bind_layout(self, control: Any) -> None:
         """Use the existing Control for this map's geometry, without replacing the map."""
@@ -166,7 +322,8 @@ class ObjectMap:
             raise ConfigError("This map has no layout persistence connection.")
         if not isinstance(geometry, dict) or not {"elements", "positions", "pan", "zoom"} <= geometry.keys():
             raise ConfigError("A map layout edit requires its graph geometry.")
-        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport"}:
+        # ``routes``: the reader's routing of the lines they moved (#1426), by line id.
+        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport", "routes"}:
             raise ConfigError("A map layout contains geometry only.")
         try:
             copied = json.loads(json.dumps(geometry, allow_nan=False))
@@ -186,6 +343,13 @@ class ObjectMap:
             raise ConfigError("The saved map layout could not be recovered.")
         held.update(geometry=row["geometry"], saved=row["geometry"], revision=int(row["revision"]))
 
+    def load(self, scope: dict[str, Any]) -> None:
+        """Hold the saved arrangement again for this scope (#1426); nothing is written."""
+        held = self._layout(scope)
+        if held["saved"] is None:
+            raise ConfigError("This map has no saved layout to open.")
+        held["geometry"] = json.loads(json.dumps(held["saved"]))
+
     def layout_projection(self) -> dict[str, Any]:
         """Geometry and the exact commands this live map permits."""
         scope = self._layout_scope()
@@ -196,6 +360,10 @@ class ObjectMap:
         if held["geometry"] is not None and held["geometry"] != held["saved"]:
             actions.append({"role": {"act": "save", "on": "map_layout"},
                             "command": {"command": "map", "action": "save", "scope": scope}})
+        # Open from save (#1426): only where this scope has a saved arrangement.
+        if held["saved"] is not None:
+            actions.append({"role": {"act": "load", "on": "map_layout"},
+                            "command": {"command": "map", "action": "load", "scope": scope}})
         return {"key": json.dumps(scope, sort_keys=True), "revision": held["revision"],
                 "geometry": json.loads(json.dumps(held["geometry"])), "actions": actions}
 
@@ -296,20 +464,42 @@ class ObjectMap:
             self._focus_flow(focus)
             return
         if self.projection_kind == SCHEMA_PROJECTION:
+            # Opened: a table by name, or a table or view on the focused screen
+            # by its node (#1426). Checked once the screen is known, below.
             opened = [str(name) for name in focus.get("opened") or []]
-            unknown = sorted(set(opened) - set(self._table_names()))
-            if unknown:
-                raise ConfigError(f"This schema holds no table {unknown}.")
+            lineage = str(focus.get("lineage") or self._focus.get("lineage") or _COLUMN_FLOW)
+            if lineage not in _LINEAGE_LEVELS:
+                raise ConfigError(f"The map has no lineage level {lineage!r}.")
             table = str(focus.get("table") or "")
             node = str(focus.get("node") or "")
+            column = str(focus.get("column") or "")
             object_focus = focus.get("object")
-            step = None
-            if object_focus is not None:
-                if not isinstance(object_focus, dict):
-                    raise ConfigError("A database-object focus must be an identity.")
+            # The display options (#1426 Map Options): which generations and object
+            # types are hidden. They filter what this map holds; they never read it.
+            hidden_generations = sorted({int(one) for one in focus.get("hidden_generations") or []})
+            if set(hidden_generations) - _GENERATIONS:
+                raise ConfigError(f"The map has no generation {hidden_generations}.")
+            hidden_types = sorted({str(one) for one in focus.get("hidden_object_types") or []})
+            if set(hidden_types) - _OBJECT_TYPES:
+                raise ConfigError(f"The map has no object type {hidden_types}.")
+            if isinstance(object_focus, dict):
                 object_focus = {"name": str(object_focus.get("name") or ""),
                                 "object_type": str(object_focus.get("object_type") or ""),
                                 "signature": str(object_focus.get("signature") or "")}
+            # The same object focused again -- a display option changed -- keeps the
+            # context this map already read for it.
+            same_object = (not column and self._table_context is not None
+                           and table == str(self._focus.get("table") or "")
+                           and node == str(self._focus.get("node") or "")
+                           and object_focus == self._focus.get("object"))
+            step = None
+            if column:
+                # A column's own lineage (#1426), to the map's depth.
+                context = self._read_column_focus(column)
+                step = {"value": column, "label": context["label"], "focus": {"column": column}}
+            elif object_focus is not None:
+                if not isinstance(object_focus, dict):
+                    raise ConfigError("A database-object focus must be an identity.")
                 kind = object_focus["object_type"]
                 entries = self._read.get(kind + "s", []) if kind in ("view", "function", "procedure") else []
                 matches = [entry for entry in entries
@@ -317,15 +507,15 @@ class ObjectMap:
                            and str(entry["identity"].get("signature") or "") == object_focus["signature"]]
                 if len(matches) != 1:
                     raise AppError("This schema does not hold exactly one matching view or routine.")
-                context = self._read_table_context(object_focus["name"], object_type=kind,
-                                                   signature=object_focus["signature"])
+                context = self._table_context if same_object else self._read_table_context(
+                    object_focus["name"], object_type=kind, signature=object_focus["signature"])
                 step = {"value": context["root_id"],
                         "label": matches[0].get("label") or object_focus["name"],
                         "focus": {"object": object_focus}}
             elif table:
                 if table not in self._table_names():
                     raise AppError(f"This schema holds no table {table!r}.")
-                context = self._read_table_context(table)
+                context = self._table_context if same_object else self._read_table_context(table)
                 step = {"value": f"table:{table}", "label": table, "focus": {"table": table}}
             elif node:
                 known = next((n for n, _ in self._schema_scope()[0] if n["id"] == node), None)
@@ -333,7 +523,9 @@ class ObjectMap:
                 if known is None and previous is None:
                     raise AppError(f"This map holds no indexed node {node!r}.")
                 label = (known or previous or {}).get("label", node)
-                if node.startswith(_EXTERNAL):
+                if same_object:
+                    context = self._table_context
+                elif node.startswith(_EXTERNAL):
                     target = next((key for t in self._read.get("tables", [])
                                    for key in t.get("foreign_keys") or []
                                    if f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}" == node), None)
@@ -344,17 +536,44 @@ class ObjectMap:
                 else:
                     context = self._read_table_context(node=node)
                 step = {"value": node, "label": label, "focus": {"node": node}}
+            names = self._table_names()
+            openable = set(names) | {f"{_TABLE}{name}" for name in names}
+            if step is not None and not column:
+                openable |= {n["id"] for n in context["nodes"] if self._opens(n)}
+            unknown = sorted(set(opened) - openable)
+            if unknown:
+                raise ConfigError(f"This schema holds no table or view {unknown}.")
+            # Objects whose column or header lines are hidden (#1426): objects on
+            # this screen.
+            drawn = {f"{_TABLE}{name}" for name in names} | (
+                {n["id"] for n in context["nodes"]} if step is not None and not column else set())
+            hidden_lines: dict[str, list[str]] = {}
+            for _, key in _HIDDEN_LINES:
+                hidden = [str(one) for one in focus.get(key) or []]
+                if set(hidden) - drawn:
+                    raise ConfigError(
+                        f"This screen draws no object {sorted(set(hidden) - drawn)}.")
+                if hidden:
+                    hidden_lines[key] = hidden
             if step is not None:
                 # Keep only the visited path, not another object or transport registry.
                 at = next((i for i, s in enumerate(self._context_path)
                            if s["value"] == step["value"]), len(self._context_path))
                 self._context_path = self._context_path[:at] + [step]
-                self._table_context = context
+                if column:
+                    self._column_focus = context
+                else:
+                    self._table_context = context
             else:
                 self._context_path = []
             self._focus = {"opened": opened, **({"table": table} if table else {}),
                            **({"node": node} if node else {}),
-                           **({"object": object_focus} if object_focus is not None else {})}
+                           **({"column": column} if column else {}),
+                           **({"object": object_focus} if object_focus is not None else {}),
+                           **({"lineage": lineage} if lineage != _COLUMN_FLOW else {}),
+                           **({"hidden_generations": hidden_generations} if hidden_generations else {}),
+                           **({"hidden_object_types": hidden_types} if hidden_types else {}),
+                           **hidden_lines}
             self._edge_inspection = None
             return
         level = str(focus.get("level") or "")
@@ -538,7 +757,21 @@ class ObjectMap:
             self._edge_inspection = None
             return
         node_id = str(node_id)
-        if not self._holds[self.projection_kind](node_id) and not any(e["id"] == node_id for e, _ in self._scope()[1]):
+        if node_id.startswith(_TOGGLE) and node_id in self._lineage_ids:
+            # The header's +/- (#1426) shows or hides its object's columns; the
+            # selection stays as it was.
+            self._toggle_open(node_id[len(_TOGGLE):])
+            return
+        for prefix, key in _HIDDEN_LINES:
+            if node_id.startswith(prefix) and node_id in self._lineage_ids:
+                # The header's connections control hides or restores the object's
+                # column lines; its relationships control its header lines.
+                self._toggle_connections(node_id[len(prefix):], key)
+                return
+        # A header names its object: a click on it selects that object.
+        node_id = self._header_object(node_id)
+        if node_id not in self._lineage_ids and not self._holds[self.projection_kind](node_id) \
+                and not any(e["id"] == node_id for e, _ in self._scope()[1]):
             raise ConfigError(f"The map has no node {node_id!r}.")
         self._selected = node_id
         self._edge_inspection = None
@@ -561,9 +794,11 @@ class ObjectMap:
             ConfigError: When the node is none this map holds, or the claim names
                 no owner file.
         """
-        node_id = str(node_id or "")
-        if self.projection_kind in (SCHEMA_PROJECTION, FLOW_PROJECTION) and any(
-                edge["id"] == node_id for edge, _ in self._scope()[1]):
+        node_id = self._header_object(str(node_id or ""))
+        if self.projection_kind in (SCHEMA_PROJECTION, FLOW_PROJECTION) and (
+                node_id in self._lineage_ids
+                or any(edge["id"] == node_id for edge, _ in self._scope()[1])):
+            # A column, transform or derivation (#1426) opens nothing: it is selected.
             self.click(node_id)
             return
         if self.projection_kind == FLOW_PROJECTION:
@@ -632,9 +867,18 @@ class ObjectMap:
 
     def double_click(self, node_id: str) -> None:
         """Drill into the selected object's map context, for either projection."""
-        node_id = str(node_id or "")
-        if self.projection_kind in (SCHEMA_PROJECTION, FLOW_PROJECTION) and any(
-                edge["id"] == node_id for edge, _ in self._scope()[1]):
+        node_id = self._header_object(str(node_id or ""))
+        if self.projection_kind == SCHEMA_PROJECTION and node_id in self._column_rows:
+            # A column row (#1426): the map focuses on that column's lineage.
+            names = set(self._table_names())
+            self.focus(column=node_id,
+                       opened=[one for one in self._focus.get("opened", []) if one in names])
+            self._selected = node_id
+            self._edge_inspection = None
+            return
+        if self.projection_kind in (SCHEMA_PROJECTION, FLOW_PROJECTION) and (
+                node_id in self._lineage_ids
+                or any(edge["id"] == node_id for edge, _ in self._scope()[1])):
             self.click(node_id)
             return
         edge = self._mapped_edge(node_id)
@@ -676,7 +920,10 @@ class ObjectMap:
         selected node with the connections it highlights -- beside its subject
         identity (``subject``) and which screen it is (``projection``)."""
         screen = self._project[self.projection_kind]()
-        selected = self._marked(screen["nodes"], screen["edges"])
+        # A column-lineage selection (#1426) is marked by the schema projection
+        # itself: upstream, downstream, and everything else subdued.
+        selected = (screen.pop("selected") if screen.pop("marked", False)
+                    else self._marked(screen["nodes"], screen["edges"]))
         return {
             "subject": dict(self.subject),
             "projection": self.projection_kind,
@@ -714,6 +961,121 @@ class ObjectMap:
             "relations": [dict(relation) for relation, _ in relations],
         }
 
+    def explain_member(self, node_id: str) -> dict[str, Any] | None:
+        """The member an explain gesture names (#1399, #1426); None when the node is none.
+
+        A drawn column row, transform or line is a member of this running map
+        (#1429): it becomes the map's selection -- the state its lineage read
+        answers -- and its identity is what the BFF explains from this map
+        (``member`` beside what the map holds of it). An object -- a panel or its
+        header -- is not a member: it goes on to be opened by its owner, as before.
+        """
+        node_id = str(node_id or "")
+        if self.projection_kind != SCHEMA_PROJECTION or not node_id:
+            return None
+        if node_id in self._column_rows:
+            self.click(node_id)
+            return {"member": node_id, **self._member_identities[node_id]}
+        screen = self.projection()
+        transform = next((node for node in screen["nodes"]
+                          if node["id"] == node_id and node.get("kind") == "transform"), None)
+        line = next((edge for edge in screen["edges"] if edge["id"] == node_id), None)
+        if transform is None and line is None:
+            return None
+        self.click(node_id)
+        if transform is not None:
+            return {"member": node_id, "member_kind": "transform",
+                    "label": transform.get("label"), "expression": transform.get("expression")}
+        names = {node["id"]: node.get("label") or node["id"] for node in screen["nodes"]}
+        return {"member": node_id, "member_kind": "relationship", "relationship": line["kind"],
+                "source": names.get(line["source"], line["source"]),
+                "target": names.get(line["target"], line["target"])}
+
+    def column_lineage(self, limit: int | None = None) -> dict[str, Any]:
+        """The selected member's full lineage (#1426, #1429), for the AI: the map's
+        governed read.
+
+        ``object_map.column_lineage``: the focused-lineage read a double-click draws
+        (code.f_object_map_column_focus), with NO depth -- the full reach
+        code.f_db_reachable answers; the map's three steps are how it is drawn, not
+        how far impact goes. For a selected column or transform: every column it
+        derives from or feeds, every transform between with where it sits, its role
+        and full expression, and each derivation step with its evidence. For a
+        selected line: its relationship, ends, key columns and evidence as the map
+        holds them, and the lineage of each end that is a column. ``limit`` (the
+        calling tool's governed limit) bounds the items answered, nearest first;
+        the totals, the deepest step and whether it was truncated are always said.
+        Read only.
+
+        Raises:
+            AppError: When no column, transform or line of this map is selected, or
+                the read refuses.
+        """
+        selected = str(self._selected or "")
+        if selected.startswith("db:") and (selected in self._member_identities
+                                           or selected in self._lineage_ids):
+            return self._member_lineage(selected, limit)
+        screen = self.projection() if selected else {"nodes": [], "edges": []}
+        line = next((edge for edge in screen["edges"] if edge["id"] == selected), None)
+        if line is None:
+            raise AppError("The map has no selected column, transform or line to read the "
+                           "lineage of.")
+        names = {node["id"]: node.get("label") or node["id"] for node in screen["nodes"]}
+        ends = [one for one in (line.get("from", line["source"]), line.get("to", line["target"]))
+                if one in self._member_identities]
+        return {"line": {
+                    "id": line["id"], "relationship": line["kind"],
+                    "reference_kind": line.get("reference_kind"),
+                    "source": names.get(line["source"], line["source"]),
+                    "target": names.get(line["target"], line["target"]),
+                    "constraint": line.get("constraint"),
+                    "columns": line.get("columns"),
+                    "referenced_columns": line.get("referenced_columns"),
+                    "through": line.get("via"),
+                    "evidence": line.get("evidence") or []},
+                "ends": [self._member_lineage(one, limit) for one in ends]}
+
+    def _member_lineage(self, member: str, limit: int | None) -> dict[str, Any]:
+        """One column's or transform's full lineage, bounded by ``limit`` (#1429)."""
+        read = self._read_column_focus(member, None, _LINEAGE_MEMBERS)
+        reach = ("depth", "upstream", "downstream")
+        nodes = sorted(read["nodes"], key=lambda one: (one["depth"], one["schema"],
+                                                        one["object"], one["ordinal"] or 0))
+        columns = [{"id": one["id"], "schema": one["schema"], "object": one["object"],
+                    "object_type": one["object_type"], "column": one["name"],
+                    "data_type": one["data_type"], **{key: one[key] for key in reach}}
+                   for one in nodes if one["member_kind"] == "column"]
+        transforms = [{"id": one["id"],
+                       "label": _transform_label(one["role"], one["expression"], one["name"]),
+                       "role": one["role"], "expression": one["expression"],
+                       "schema": one["schema"], "object": one["object"],
+                       "object_type": one["object_type"], **{key: one[key] for key in reach}}
+                      for one in nodes if one["member_kind"] != "column"]
+        steps = [{"source": edge["source"], "target": edge["target"],
+                  "kind": edge["kind"], "evidence": edge.get("evidence") or []}
+                 for edge in read.get("edges") or []]
+        start = next(one for one in read["nodes"] if one["id"] == member)
+
+        def bounded(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return items if limit is None else items[:limit]
+
+        # A column keeps the identity it is answered by (#1426); any other member
+        # says what it is.
+        named = ({"column": {"id": member, **self._member_identities[member]}}
+                 if member in self._member_identities else
+                 {"member": {"id": member, "member_kind": start["member_kind"],
+                             "schema": start["schema"], "object": start["object"],
+                             "object_type": start["object_type"], "name": start["name"]}})
+        return {**named, "depth": _COLUMN_FOCUS_DEPTH,
+                "max_depth": max((one["depth"] for one in nodes), default=0),
+                "totals": {"columns": len(columns), "transforms": len(transforms),
+                           "steps": len(steps)},
+                "limit": limit,
+                "truncated": limit is not None and any(
+                    len(items) > limit for items in (columns, transforms, steps)),
+                "columns": bounded(columns), "transforms": bounded(transforms),
+                "steps": bounded(steps)}
+
     def _selection_in(self, ids: set[str]) -> str | None:
         """The selection, where it is one of ``ids`` -- the scope it belongs to -- else None."""
         return self._selected if self._selected in ids else None
@@ -735,18 +1097,56 @@ class ObjectMap:
             for edge in edges:
                 edge["highlight"] = ["focus", "first"] if edge["id"] == selected else []
             return selected
+        # An object panel's genealogy is between objects (#1426): a line ending at
+        # one of a panel's rows ends at that panel, however far it is expanded.
+        panels = {node["id"] for node in nodes if node.get("expandable")}
+        owner = {node["id"]: node["parent"] for node in nodes
+                 if node.get("parent") in panels}
+
+        def ends_of(edge: dict[str, Any]) -> set[str]:
+            return {owner.get(edge["source"], edge["source"]),
+                    owner.get(edge["target"], edge["target"])}
+
         near: dict[str, set[str]] = {}
         for edge in edges:
-            near.setdefault(edge["source"], set()).add(edge["target"])
-            near.setdefault(edge["target"], set()).add(edge["source"])
-        first = (near.get(selected, set()) - {selected}) if selected else set()
-        second = set().union(*(near.get(one, set()) for one in first)) - first - {selected}
+            source, target = (owner.get(edge["source"], edge["source"]),
+                              owner.get(edge["target"], edge["target"]))
+            near.setdefault(source, set()).add(target)
+            near.setdefault(target, set()).add(source)
+        # A transform is between the objects it joins, never a generation of its
+        # own: the objects beyond it are as near as it is, and it is marked with them.
+        between = {node["id"] for node in nodes if node.get("kind") == "transform"}
+
+        def reached(start: str) -> tuple[set[str], set[str]]:
+            found: set[str] = set()
+            passed: set[str] = set()
+            pending = list(near.get(start, set()))
+            while pending:
+                one = pending.pop()
+                if one == start or one in found or one in passed:
+                    continue
+                if one in between:
+                    passed.add(one)
+                    pending.extend(near.get(one, set()))
+                else:
+                    found.add(one)
+            return found, passed
+
+        first: set[str] = set()
+        second: set[str] = set()
+        if selected:
+            objects, passed = reached(selected)
+            first = objects | passed
+            for one in objects:
+                further, through = reached(one)
+                second |= further | through
+            second -= first | {selected}
         for node in nodes:
             node["highlight"] = (["focus", "first"] if node["id"] == selected else
                                  ["first"] if node["id"] in first else
                                  ["second"] if node["id"] in second else [])
         for edge in edges:
-            ends = {edge["source"], edge["target"]}
+            ends = ends_of(edge)
             edge["highlight"] = (["first"] if selected in ends or ends <= first else
                                  ["second"] if ends & first and ends & second else [])
         return selected
@@ -1703,6 +2103,8 @@ class ObjectMap:
 
     def _holds_schema_node(self, node_id: str) -> bool:
         """Whether this schema holds the table, or references the external table, a node names."""
+        if self._focus.get("column") and self._column_focus:
+            return any(box["id"] == node_id for box in self._focus_boxes())
         if any(self._focus.get(key) for key in ("table", "node", "object")) and self._table_context:
             return any(node["id"] == node_id for node in self._table_context["nodes"])
         if node_id.startswith(_TABLE):
@@ -1716,7 +2118,10 @@ class ObjectMap:
     def _schema_drill(self, node_id: str) -> None:
         """Focus this object's indexed neighbourhood using the existing context read."""
         target = {"table": node_id[len(_TABLE):]} if node_id.startswith(_TABLE) else {"node": node_id}
-        self.focus(**target, opened=self._focus.get("opened", []))
+        # Tables stay open by name; a node opened on the screen left behind does not
+        # follow to the next one (#1426).
+        names = set(self._table_names())
+        self.focus(**target, opened=[one for one in self._focus.get("opened", []) if one in names])
 
     def _read_table_context(self, table: str | None = None, *, node: str | None = None,
                             schema: str | None = None, alias: str | None = None,
@@ -1753,7 +2158,10 @@ class ObjectMap:
 
         A foreign key to a table outside this schema is related to that table as
         an external element. Each table and key is beside the row it maps.
+        On a column's focused lineage (#1426) the elements are its objects' boxes.
         """
+        if self._focus.get("column") and self._column_focus:
+            return [(box, None) for box in self._focus_boxes()], []
         if any(self._focus.get(key) for key in ("table", "node", "object")) and self._table_context:
             tables = {str(t["identity"]["name"]): t for t in self._read.get("tables", [])}
             return ([(dict(n), tables.get(n.get("table", ""))) for n in self._table_context["nodes"]],
@@ -1789,8 +2197,24 @@ class ObjectMap:
         A foreign key to a table outside this schema is drawn to that table as
         an external node.
         """
+        self._column_rows = set()
+        self._member_identities = {}
+        if self._focus.get("column") and self._column_focus:
+            return self._column_focus_projection()
         opened = set(self._focus.get("opened") or [])
         elements, relations = self._schema_scope()
+        # Where the index can be read (#1426), every table and view is an ER box
+        # with a +/- header; an expanded one shows its columns as rows, and
+        # #1425's derivations attach to rows or boxes as each end is expanded.
+        openable = ([element for element, _ in elements if self._opens(element)]
+                    if self._control is not None else [])
+        # Functions and procedures are the same panel (#1426 design): a function
+        # opens like a view (its inputs and outputs); a procedure is a header
+        # naming it, with no +/-.
+        panels = ([element for element, _ in elements
+                   if self._is_code_object(element) and not self._opens(element)]
+                  if self._control is not None else [])
+        with_lineage = bool(openable)
         nodes = []
         for element, table in elements:
             if table is None:
@@ -1801,10 +2225,27 @@ class ObjectMap:
                 {"name": c["name"], "type": c["type"], "nullable": c["nullable"],
                  "primary_key": c["name"] in keyed}
                 for c in sorted(table.get("columns") or [], key=lambda c: c["ordinal"])
-            ] if element["table"] in opened else []})
+            ] if element.get("table") in opened and not with_lineage else []})
         edges = [{**relation, **({"columns": list(key["columns"]),
                   "referenced_columns": list(key["referenced_columns"])} if key else {})}
                  for relation, key in relations]
+        self._lineage_ids = set()
+        toggles: dict[str, Any] = {}
+        expanded = {element["id"] for element in openable
+                    if element["id"] in opened or element.get("table") in opened}
+        self._er_headers(nodes, openable, expanded, panels)
+        if with_lineage:
+            toggles = {"toggles": [self._lineage_toggle()]}
+            if expanded:
+                rows = {element["id"]: self._schema_row(element, row) for element, row in elements}
+                lineage = self._column_lineage(nodes, edges, openable, expanded, rows)
+                if lineage is not None:
+                    shown = self._drop_hidden_objects(nodes, edges)
+                    self._drop_hidden_connections(nodes, edges)
+                    return {"nodes": nodes, "edges": edges, "path": self._path(),
+                            **toggles, **self._view_actions(
+                                [one for one in openable if one["id"] in shown],
+                                [one for one in panels if one["id"] in shown]), **lineage}
         details = None
         selected_edge = next(((edge, key) for edge, key in relations
                               if edge["id"] == self._selected), None)
@@ -1819,4 +2260,710 @@ class ObjectMap:
                              ["Columns", ", ".join(key.get("columns", []))],
                              ["Referenced columns", ", ".join(key.get("referenced_columns", []))]])
             details = {"rows": rows}
-        return {"nodes": nodes, "edges": edges, "path": self._path(), "details": details}
+        shown = self._drop_hidden_objects(nodes, edges)
+        self._drop_hidden_connections(nodes, edges)
+        return {"nodes": nodes, "edges": edges, "path": self._path(), "details": details,
+                **toggles, **self._view_actions([one for one in openable if one["id"] in shown],
+                                                [one for one in panels if one["id"] in shown])}
+
+    # -- column lineage on the schema projection (#1426) ----------------------
+
+    def _view_actions(self, openable: list[dict[str, Any]],
+                      panels: list[dict[str, Any]]) -> dict[str, Any]:
+        """The whole view's controls (#1426), as declared actions (#1151): each its role
+        and the complete command that takes it.
+
+        The visibility toggles (Map Options): each generation -- on a map focused on
+        one object -- and each object type, shown (``hide`` it) or hidden (``show``
+        it). Then, of the objects shown, only the +/- that applies now -- expand (one
+        closed) or collapse (all open); a hidden object keeps whether it is open.
+        Then hide every shown object's connections (none hidden) or show them all.
+        ``openable`` and ``panels`` are the objects shown."""
+        actions: list[dict[str, Any]] = []
+        focused = (not self._focus.get("column") and self._table_context is not None
+                   and any(self._focus.get(key) for key in ("table", "node", "object")))
+        for on, key, value in (_GENERATION_TOGGLES if focused else ()) + _TYPE_TOGGLES:
+            hidden_values = list(self._focus.get(key) or [])
+            hidden = value in hidden_values
+            values = [one for one in hidden_values if one != value] if hidden else hidden_values + [value]
+            focus = {name: held for name, held in self._focus.items() if name != key}
+            actions.append({"role": {"act": _SHOW if hidden else _HIDE, "on": on},
+                            "command": {"command": "focus", "focus": {
+                                **focus, **({key: sorted(values)} if values else {})}}})
+        if openable:
+            every = [str(element.get("table") or element["id"]) for element in openable]
+            opened = set(self._focus.get("opened") or [])
+            closed = any(element["id"] not in opened and element.get("table") not in opened
+                         for element in openable)
+            # A hidden object stays as open or closed as it was.
+            kept = [one for one in self._focus.get("opened") or []
+                    if one not in every and not any(one == element["id"] for element in openable)]
+            actions.append({"role": {"act": _EXPAND if closed else _COLLAPSE, "on": "opened"},
+                            "command": {"command": "focus", "focus": {
+                                **self._focus, "opened": (every if closed else []) + kept}}})
+        objects = [element["id"] for element in openable + panels]
+        # Column lines and header lines each hide on their own (#1426).
+        for _, on in _HIDDEN_LINES if objects else ():
+            hidden = bool(self._focus.get(on))
+            focus = {key: value for key, value in self._focus.items() if key != on}
+            actions.append({"role": {"act": _SHOW if hidden else _HIDE, "on": on},
+                            "command": {"command": "focus", "focus": {
+                                **focus, **({} if hidden else {on: objects})}}})
+        return {"actions": actions} if actions else {}
+
+    def _lineage_toggle(self) -> dict[str, Any]:
+        """The toolbar's Transforms toggle: whether it is on, and the focus a press sends."""
+        detail = self._focus.get("lineage") == _DERIVATION_DETAIL
+        return {"id": "lineage", "label": _DERIVATION_DETAIL_LABEL, "pressed": detail,
+                "focus": {**self._focus,
+                          "lineage": _COLUMN_FLOW if detail else _DERIVATION_DETAIL}}
+
+    def _er_headers(self, nodes: list[dict[str, Any]], openable: list[dict[str, Any]],
+                    expanded: set[str], panels: list[dict[str, Any]]) -> None:
+        """Every table, view and function one panel (#1426): a header row with its
+        type and fully qualified name, and on it (``beside`` the header, right to
+        left in ``ordinal`` order) a table's or view's +/- that shows or hides its
+        columns, and every panel's controls that hide or restore its column lines
+        and its header lines, each on its own."""
+        boxes = {element["id"] for element in openable}
+        code = {element["id"] for element in panels}
+        hidden = set(self._focus.get("hidden_connections") or [])
+        unrelated = set(self._focus.get("hidden_relationships") or [])
+        for node in list(nodes):
+            if node["id"] not in boxes | code:
+                continue
+            schema, name, object_type = self._opened_identity(node)
+            node["expandable"] = True
+            node["expanded"] = node["id"] in expanded
+            header = f"{_HEADER}{node['id']}"
+            nodes.append({"id": header, "kind": "header", "parent": node["id"],
+                          "label": f"{schema}.{name}", "object_type": object_type,
+                          "ordinal": 0})
+            self._lineage_ids.add(header)
+            if node["id"] in boxes:
+                nodes.append({"id": f"{_TOGGLE}{node['id']}", "kind": "toggle",
+                              "parent": node["id"], "beside": header, "label": "",
+                              "expanded": node["id"] in expanded, "ordinal": 0})
+                self._lineage_ids.add(f"{_TOGGLE}{node['id']}")
+            nodes.append({"id": f"{_LINKS}{node['id']}", "kind": "links",
+                          "parent": node["id"], "beside": header, "label": "",
+                          "hidden": node["id"] in hidden, "ordinal": 1})
+            self._lineage_ids.add(f"{_LINKS}{node['id']}")
+            nodes.append({"id": f"{_RELATIONS}{node['id']}", "kind": "relations",
+                          "parent": node["id"], "beside": header, "label": "",
+                          "hidden": node["id"] in unrelated, "ordinal": 2})
+            self._lineage_ids.add(f"{_RELATIONS}{node['id']}")
+            # The pill the header's controls sit in, one outline around them all.
+            nodes.append({"id": f"{_CONTROLS}{node['id']}", "kind": "controls",
+                          "parent": node["id"], "wraps": header, "label": ""})
+
+    @staticmethod
+    def _is_code_object(element: dict[str, Any]) -> bool:
+        """A database object on the screen that is no table or view (a function, a
+        procedure): it has an indexed object type, and is no source file."""
+        identity = element.get("identity") or {}
+        return (element.get("kind") not in _OPENABLE and element.get("role") != "file"
+                and bool(identity.get("object_type")))
+
+    @classmethod
+    def _opens(cls, element: dict[str, Any]) -> bool:
+        """Whether a drawn object opens to show its rows (#1426): a table or view
+        (its columns), or a function (its inputs and outputs)."""
+        return element.get("kind") in _OPENABLE or (
+            cls._is_code_object(element)
+            and (element.get("identity") or {}).get("object_type") in _OPENABLE_ROUTINES)
+
+    def _header_object(self, node_id: str) -> str:
+        """A header row, its +/-, or a function's group heading stands for its
+        object: right-click and drill act on the object, and a click selects it."""
+        for prefix in (_HEADER, _TOGGLE, _LINKS, _RELATIONS,
+                       *(group for group, _, _ in _PARAMETER_GROUPS)):
+            if node_id.startswith(prefix) and node_id in self._lineage_ids:
+                return node_id[len(prefix):]
+        return node_id
+
+    def _toggle_connections(self, element_id: str, key: str) -> None:
+        """Hide or restore a drawn object's lines of one kind (#1426): its column
+        lines (``hidden_connections``) or its header lines (``hidden_relationships``)."""
+        hidden = list(self._focus.get(key) or [])
+        if element_id in hidden:
+            hidden.remove(element_id)
+        else:
+            hidden.append(element_id)
+        self._focus = {one: value for one, value in self._focus.items() if one != key}
+        if hidden:
+            self._focus[key] = hidden
+
+    def _drop_hidden_objects(self, nodes: list[dict[str, Any]],
+                             edges: list[dict[str, Any]]) -> set[str]:
+        """Take out the objects the Map Options hide (#1426): those of a hidden
+        generation -- on a map focused on one object -- or of a hidden type, never
+        the focused object itself; with them their rows, every line with an end
+        among them, and every transform that lost a line. Filters what this map
+        holds; reads nothing. Returns the ids of the objects still shown."""
+        objects = [node for node in nodes if not node.get("parent") and node.get("kind") != "transform"]
+        generations = set(self._focus.get("hidden_generations") or [])
+        types = set(self._focus.get("hidden_object_types") or [])
+        focused = (not self._focus.get("column") and self._table_context is not None
+                   and any(self._focus.get(key) for key in ("table", "node", "object")))
+        root = self._table_context["root_id"] if focused else None
+        hidden = set() if self._focus.get("column") else {
+            node["id"] for node in objects if node["id"] != root and (
+                (focused and node.get("depth") in generations)
+                or _object_type_of(node) in types)}
+        if hidden:
+            nodes[:] = [node for node in nodes
+                        if node["id"] not in hidden and node.get("parent") not in hidden]
+            transforms = {node["id"] for node in nodes if node.get("kind") == "transform"}
+            gone = set(hidden)
+            while True:
+                kept = {node["id"] for node in nodes}
+                lost = [edge for edge in edges
+                        if edge["source"] not in kept or edge["target"] not in kept]
+                if not lost:
+                    break
+                edges[:] = [edge for edge in edges if edge not in lost]
+                # A transform with a line gone shows a derivation it no longer completes.
+                broken = {end for edge in lost for end in (edge["source"], edge["target"])
+                          if end in transforms and end not in gone}
+                gone |= broken
+                nodes[:] = [node for node in nodes if node["id"] not in broken]
+        return {node["id"] for node in objects if node["id"] not in hidden}
+
+    def _drop_hidden_connections(self, nodes: list[dict[str, Any]],
+                                 edges: list[dict[str, Any]]) -> None:
+        """Take out the hidden lines (#1426), each kind on its own: a header line
+        (object to object) of an object whose relationships are hidden, and a
+        column line (with a row or transform at an end) of an object whose
+        connections are hidden. The objects, their rows and every other line stay."""
+        hidden = set(self._focus.get("hidden_connections") or [])
+        unrelated = set(self._focus.get("hidden_relationships") or [])
+        if not hidden and not unrelated:
+            return
+        owner = {node["id"]: node.get("parent") or node["id"] for node in nodes}
+        objects = {node["id"] for node in nodes
+                   if not node.get("parent") and node.get("kind") != "transform"}
+
+        def shown(edge: dict[str, Any]) -> bool:
+            """Whether a line stays: no end's object hides lines of its kind."""
+            header_line = edge["source"] in objects and edge["target"] in objects
+            off = unrelated if header_line else hidden
+            return (owner.get(edge["source"], edge["source"]) not in off
+                    and owner.get(edge["target"], edge["target"]) not in off)
+
+        edges[:] = [edge for edge in edges if shown(edge)]
+
+    def _toggle_open(self, element_id: str) -> None:
+        """Show or hide a drawn table's or view's columns: tables by name, others by node."""
+        element = next(n for n, _ in self._schema_scope()[0] if n["id"] == element_id)
+        name = str(element.get("table") or element_id)
+        opened = [one for one in self._focus.get("opened") or [] if one not in (name, element_id)]
+        if len(opened) == len(self._focus.get("opened") or []):
+            opened.append(name)
+        self._focus["opened"] = opened
+
+    def _schema_row(self, element: dict[str, Any], row: Any) -> dict[str, Any] | None:
+        """The schema read's table for a table in the map's schema: its keys are known there.
+
+        A table outside the map's schema, and every view, has none here.
+        """
+        if row is not None:
+            return row
+        identity = element.get("identity") or {}
+        if (identity.get("schema") != self.subject["schema"]
+                or identity.get("object_type") != "table"):
+            return None
+        return next((t for t in self._read.get("tables", [])
+                     if str(t["identity"]["name"]) == str(identity.get("name"))), None)
+
+    @staticmethod
+    def _column_keys(row: dict[str, Any] | None) -> dict[str, set[str]]:
+        """Which of a table's columns are primary key, foreign key and unique, from its read."""
+        if row is None:
+            return {"primary_key": set(), "foreign_key": set(), "unique": set()}
+        unique = {column for index in row.get("indexes") or [] if index.get("unique")
+                  for column in index.get("columns") or []}
+        unique |= {column for constraint in row.get("constraints") or []
+                   if constraint.get("kind") == DatabaseConstraint.UNIQUE
+                   for column in constraint.get("columns") or []}
+        return {"primary_key": set((row.get("primary_key") or {}).get("columns") or []),
+                "foreign_key": {column for key in row.get("foreign_keys") or []
+                                for column in key.get("columns") or []},
+                "unique": unique}
+
+    def _column_lineage(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]],
+                        openable: list[dict[str, Any]], expanded: set[str],
+                        rows: dict[str, Any]) -> dict[str, Any] | None:
+        """Draw the expanded tables' and views' column rows, and the edges that reach them.
+
+        Read once per projection through the governed read
+        (``code.f_object_map_column_lineage``) for every drawn table and view, and
+        never kept. Each #1425 derivation path from a column to the next column
+        is drawn when either end is expanded; each end attaches to its row, or to
+        its object's box when that object is collapsed. Level 1 (column flow)
+        hides the transforms between, level 2 (derivation detail) draws them, and
+        a transform inside a collapsed object stays hidden. Foreign keys are drawn
+        per column pair the same way. A selected row, transform or edge is
+        marked -- upstream, downstream, the rest subdued -- and described in the
+        details; the answer is None when the selection is none of these.
+        """
+        identities = {element["id"]: self._opened_identity(element) for element in openable}
+        selected_member = (int(self._selected[3:]) if self._selected
+                           and self._selected.startswith("db:")
+                           and self._selected[3:].isdigit() else None)
+        read = self._control.object_map_column_lineage(
+            self.subject["catalog"], self._database_provider,
+            list(identities.values()), selected_member)
+        owner_of = {identity: element_id for element_id, identity in identities.items()}
+        # Database objects only: a source file on the screen has no schema identity.
+        drawn_owner = {self._opened_identity(n): n["id"] for n in nodes
+                       if (n.get("identity") or {}).get("object_type")}
+        columns: dict[str, dict[str, Any]] = {}
+        display: dict[str, str] = {}
+        member_of: dict[tuple[str, str], str] = {}
+        names: dict[str, str] = {}
+        for column in read.get("columns") or []:
+            owner = owner_of.get((column["schema"], column["name"], column["object_type"]))
+            if owner is None:
+                continue
+            member_of[(owner, column["column"])] = column["id"]
+            names[column["id"]] = f"{column['schema']}.{column['name']}.{column['column']}"
+            display[column["id"]] = column["id"] if owner in expanded else owner
+            if owner not in expanded:
+                continue
+            keys = self._column_keys(rows.get(owner))
+            columns[column["id"]] = {
+                "id": column["id"], "kind": "column", "parent": owner,
+                "label": column["column"],
+                "column": column["column"], "data_type": column["data_type"],
+                "type_category": data_type_category(column["data_type"]),
+                "ordinal": column["ordinal"],
+                **({"mode": column["mode"]} if column.get("mode") else {}),
+                **{key: column["column"] in held for key, held in keys.items()},
+            }
+            self._member_identities[column["id"]] = {
+                "schema": column["schema"], "object": column["name"],
+                "object_type": column["object_type"], "column": column["column"]}
+        groups = self._parameter_groups(columns, identities)
+        detail = self._focus.get("lineage") == _DERIVATION_DETAIL
+        transforms = {
+            one["id"]: {
+                "id": one["id"], "kind": "transform", "role": one["role"],
+                "label": _transform_label(one["role"], one["expression"], one["key"]),
+                "expression": one["expression"], "key": one["key"],
+                "owner": f"{one['schema']}.{one['name']}",
+                "within": drawn_owner.get((one["schema"], one["name"], one["object_type"])),
+            } for one in read.get("transforms") or []
+        }
+        shown = {key for key, one in transforms.items()
+                 if detail and (one["within"] is None or one["within"] in expanded)
+                 and _transforms_anything(one["role"], one["expression"])}
+        drawn_edges = self._derivation_edges(read.get("edges") or [], display, columns,
+                                             transforms, shown)
+        drawn_edges.update(self._foreign_key_edges(edges, rows, identities, expanded,
+                                                   display, member_of))
+        used = {end for edge in drawn_edges.values() for end in (edge["from"], edge["to"])}
+        drawn_transforms = [{k: v for k, v in one.items() if k != "within"}
+                            for key, one in transforms.items() if key in shown and key in used]
+        nodes.extend(groups)
+        nodes.extend(columns.values())
+        nodes.extend(drawn_transforms)
+        edges.extend(drawn_edges.values())
+        names.update({one["id"]: one["expression"] for one in drawn_transforms})
+        self._lineage_ids |= (set(columns) | {one["id"] for one in drawn_transforms}
+                              | set(drawn_edges) | {one["id"] for one in groups})
+        self._column_rows = set(columns)
+        if self._selected not in self._lineage_ids:
+            return None
+        upstream = {one["id"] for one in read.get("upstream") or []}
+        downstream = {one["id"] for one in read.get("downstream") or []}
+        self._lineage_marks(nodes, edges, upstream, downstream, display)
+        return {"details": self._lineage_details(read, columns, transforms, drawn_edges,
+                                                 set(display) | used, names),
+                "marked": True, "selected": self._selected}
+
+    @staticmethod
+    def _parameter_groups(columns: dict[str, dict[str, Any]],
+                          identities: dict[str, tuple[str, str, str]]) -> list[dict[str, Any]]:
+        """An opened function's rows in their groups (#1426): its inputs under an
+        Inputs heading at the top, then its outputs under an Outputs heading.
+
+        The group is the parameter's mode (``parameter_role``), never its name or
+        type. Each function's rows are numbered in that order, in their call order
+        within a group; a group with no parameters has no heading. Returns the
+        heading rows; the parameter rows are renumbered in place.
+        """
+        headings: list[dict[str, Any]] = []
+        functions = {owner for owner, (_, _, kind) in identities.items()
+                     if kind in _OPENABLE_ROUTINES}
+        for owner in sorted(functions):
+            held = sorted((one for one in columns.values() if one["parent"] == owner),
+                          key=lambda one: one["ordinal"])
+            ordinal = 0
+            for prefix, label, roles in _PARAMETER_GROUPS:
+                members = [one for one in held if parameter_role(one.get("mode")) in roles]
+                if not members:
+                    continue
+                ordinal += 1
+                headings.append({"id": f"{prefix}{owner}", "kind": "group", "parent": owner,
+                                 "label": label, "ordinal": ordinal})
+                for one in members:
+                    ordinal += 1
+                    one["ordinal"] = ordinal
+        return headings
+
+    # -- a column's focused lineage (#1426) ------------------------------------
+
+    def _read_column_focus(self, column: str, depth: int | None = _COLUMN_FOCUS_DEPTH,
+                           kinds: tuple[str, ...] = ("column",)) -> dict[str, Any]:
+        """A member's lineage to ``depth`` -- the map's depth unless given, all of it
+        for None (#1429) -- by the governed read; with its label.
+
+        Raises:
+            AppError: When the map cannot read the index, or the node is no
+                indexed member of ``kinds``.
+        """
+        member = column[len("db:"):] if column.startswith("db:") else ""
+        if self._control is None or not member.isdigit():
+            raise AppError("This map can focus only an indexed column's lineage.")
+        read = dict(self._control.object_map_column_focus(int(member), depth))
+        start = next((one for one in read.get("nodes") or [] if one["id"] == column), None)
+        if start is None or start["member_kind"] not in kinds:
+            raise AppError("The index holds no column for this node.")
+        read["label"] = f"{start['schema']}.{start['object']}.{start['name']}"
+        return read
+
+    def _focus_boxes(self) -> list[dict[str, Any]]:
+        """The objects holding the focused lineage's columns, one ER box each."""
+        boxes: dict[str, dict[str, Any]] = {}
+        for one in (self._column_focus or {}).get("nodes") or []:
+            if one["member_kind"] != "column" or one["object_id"] in boxes:
+                continue
+            boxes[one["object_id"]] = {
+                "id": one["object_id"],
+                "kind": one["object_type"] if one["object_type"] in _OPENABLE else "code",
+                "label": f"{one['schema']}.{one['object']}",
+                "identity": {"schema": one["schema"], "name": one["object"],
+                             "object_type": one["object_type"],
+                             "signature": one.get("signature") or ""}}
+        return list(boxes.values())
+
+    def _column_focus_projection(self) -> dict[str, Any]:
+        """A double-clicked column's lineage within the map's depth (#1426).
+
+        The approved visual: each object holding a participating column is an
+        ER box of its name and those columns only; the transforms on the paths
+        between those columns are small nodes along the lines, labelled by role
+        and what they apply; arrows show the flow, left to right. A transform
+        on no path between two drawn columns is not drawn. Right-click (the
+        details) states a transform's or line's full expression and evidence.
+        Depth is the read's own. A row double-clicked here focuses that column
+        in turn; the path leads back.
+        """
+        read = self._column_focus or {}
+        boxes = self._focus_boxes()
+        nodes: list[dict[str, Any]] = []
+        for box in boxes:
+            nodes.append({**box, "expandable": True})
+            nodes.append({"id": f"{_HEADER}{box['id']}", "kind": "header",
+                          "parent": box["id"], "label": box["label"],
+                          "object_type": box["identity"]["object_type"], "ordinal": 0})
+        columns: dict[str, dict[str, Any]] = {}
+        transforms: dict[str, dict[str, Any]] = {}
+        for one in read.get("nodes") or []:
+            reach = {"depth": one["depth"], "upstream": one["upstream"],
+                     "downstream": one["downstream"],
+                     "owner": f"{one['schema']}.{one['object']}"}
+            if one["member_kind"] != "column":
+                transforms[one["id"]] = {
+                    "id": one["id"], "kind": "transform", "role": one["role"],
+                    "label": _transform_label(one["role"], one["expression"], one["name"]),
+                    "expression": one["expression"], **reach}
+                continue
+            box = next(b for b in boxes if b["id"] == one["object_id"])
+            keys = self._column_keys(self._schema_row(box, None))
+            columns[one["id"]] = {
+                "id": one["id"], "kind": "column", "parent": one["object_id"],
+                "label": one["name"], "column": one["name"],
+                "data_type": one["data_type"], "ordinal": one["ordinal"],
+                **{key: one["name"] in held for key, held in keys.items()}, **reach}
+            self._member_identities[one["id"]] = {
+                "schema": one["schema"], "object": one["object"],
+                "object_type": one["object_type"], "column": one["name"]}
+        raw = read.get("edges") or []
+        # Every path between two drawn columns, its transforms shown -- but for one
+        # that only carries a column forward: there the line runs column to column.
+        drawn = self._derivation_edges(raw, {key: key for key in columns}, columns,
+                                       transforms, {key for key, one in transforms.items()
+                                                    if _transforms_anything(one["role"],
+                                                                            one["expression"])})
+        edges = [{key: value for key, value in edge.items() if key not in ("from", "to")}
+                 for edge in drawn.values()]
+        used = {end for edge in edges for end in (edge["source"], edge["target"])}
+        nodes.extend(columns.values())
+        nodes.extend(one for key, one in transforms.items() if key in used)
+        self._column_rows = set(columns)
+        self._lineage_ids = ({f"{_HEADER}{box['id']}" for box in boxes} | set(columns)
+                             | (set(transforms) & used) | {edge["id"] for edge in edges})
+        held = self._lineage_ids | {box["id"] for box in boxes}
+        selected = self._selected if self._selected in held else self._focus["column"]
+        self._focus_marks(nodes, edges, selected)
+        return {"nodes": nodes, "edges": edges, "path": self._path(),
+                "details": self._focus_details(selected, columns, transforms, edges),
+                "marked": True, "selected": selected,
+                "direction": _COLUMN_FOCUS_DIRECTION, "legend": _COLUMN_FOCUS_LEGEND}
+
+    def _focus_marks(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]],
+                     selected: str) -> None:
+        """The selection in focus; every member and line upstream or downstream of the column."""
+        column = self._focus["column"]
+        upstream = {node["id"] for node in nodes if node.get("upstream")}
+        downstream = {node["id"] for node in nodes if node.get("downstream")}
+        # A selected line's columns read as selected columns (#1426).
+        joined = _line_columns(nodes, next((edge for edge in edges if edge["id"] == selected), None),
+                               {})
+        lit: set[str] = set()
+        for node in nodes:
+            node["highlight"] = (["focus"] if node["id"] == selected or node["id"] in joined else
+                                 ["upstream"] if node["id"] in upstream else
+                                 ["downstream"] if node["id"] in downstream else [])
+            if node["highlight"] and node.get("parent"):
+                lit.add(node["parent"])
+        _mark_holding_objects(nodes, lit, selected)
+        for edge in edges:
+            edge["highlight"] = (
+                ["focus"] if edge["id"] == selected else
+                ["upstream"] if edge["source"] in upstream
+                and edge["target"] in upstream | {column} else
+                ["downstream"] if edge["target"] in downstream
+                and edge["source"] in downstream | {column} else [])
+
+    def _focus_details(self, selected: str, columns: dict[str, dict[str, Any]],
+                       transforms: dict[str, dict[str, Any]],
+                       edges: list[dict[str, Any]]) -> dict[str, Any]:
+        """What is selected on the focused lineage: a transform or line states its
+        full expression and evidence."""
+        names = {**{key: f"{one['owner']}.{one['column']}" for key, one in columns.items()},
+                 **{key: one["label"] for key, one in transforms.items()}}
+        edge = next((e for e in edges if e["id"] == selected), None)
+        if selected in columns:
+            column = columns[selected]
+            rows: list[list[Any]] = [["Column", column["column"]], ["Type", column["data_type"]],
+                                     ["Object", column["owner"]], ["Depth", column["depth"]]]
+        elif selected in transforms:
+            one = transforms[selected]
+            rows = [["Transform", one["label"]], ["Expression", one["expression"]],
+                    ["Object", one["owner"]], ["Depth", one["depth"]]]
+            for line in edges:
+                if selected in (line["source"], line["target"]):
+                    rows.extend(_evidence_rows(line))
+        elif edge is not None:
+            rows = [["Relationship", edge.get("reference_kind") or edge["kind"]],
+                    ["Source", names.get(edge["source"], edge["source"])],
+                    ["Target", names.get(edge["target"], edge["target"])]]
+            rows.extend(["Expression", transforms[end]["expression"]]
+                        for end in (edge["source"], edge["target"]) if end in transforms)
+            rows.extend(_evidence_rows(edge))
+        else:
+            box = next((b for b in self._focus_boxes() if b["id"] == selected), {})
+            rows = [["Object", box.get("label", selected)]]
+        rows.append(["Lineage", f"{sum(1 for c in columns.values() if c['upstream'])} upstream, "
+                                f"{sum(1 for c in columns.values() if c['downstream'])} downstream "
+                                "columns in its lineage"])
+        return {"rows": rows}
+
+    def _opened_identity(self, element: dict[str, Any]) -> tuple[str, str, str]:
+        """(schema, name, object_type) of a drawn table or view, as the index names it."""
+        identity = element.get("identity") or {}
+        if identity:
+            return (str(identity["schema"]), str(identity["name"]), str(identity["object_type"]))
+        return (self.subject["schema"], str(element.get("table") or element["label"]),
+                str(element["kind"]))
+
+    @staticmethod
+    def _derivation_edges(raw: list[dict[str, Any]], display: dict[str, str],
+                          columns: dict[str, Any], transforms: dict[str, Any],
+                          shown: set[str]) -> dict[str, dict[str, Any]]:
+        """Each derivation path between two columns, its ends where they are drawn.
+
+        Computed from the read, never stored: from every column follow
+        derivations through transforms to the first column reached. A path is
+        drawn when either end column is a row; its ends attach to their rows or
+        their objects' boxes, its shown transforms stay, and the hidden ones are
+        kept as what it runs through. An edge is named by the underlying pair it
+        joins, so edges converging on one collapsed box stay distinct.
+        """
+        onward: dict[str, list[dict[str, Any]]] = {}
+        for edge in raw:
+            onward.setdefault(edge["source"], []).append(edge)
+        drawn: dict[str, dict[str, Any]] = {}
+        for start in display:
+            stack: list[tuple[str, tuple[str, ...], tuple[dict[str, Any], ...]]] = [
+                (start, (start,), ())]
+            while stack:
+                node, path, hops = stack.pop()
+                for edge in onward.get(node, ()):
+                    target = edge["target"]
+                    if target in display:
+                        if start in columns or target in columns:
+                            ObjectMap._path_segments(drawn, path + (target,), hops + (edge,),
+                                                     display, shown)
+                    elif target in transforms and target not in path:
+                        stack.append((target, path + (target,), hops + (edge,)))
+        return drawn
+
+    @staticmethod
+    def _path_segments(drawn: dict[str, dict[str, Any]], path: tuple[str, ...],
+                       hops: tuple[dict[str, Any], ...], display: dict[str, str],
+                       shown: set[str]) -> None:
+        """One derivation path's edges: between its two ends and the transforms shown on it.
+
+        Two neighbours on the path keep their own derivation (and its evidence);
+        a gap over hidden transforms is a column flow through them.
+        """
+        kept = [at for at, node in enumerate(path)
+                if at in (0, len(path) - 1) or node in shown]
+        for first, second in zip(kept, kept[1:]):
+            start, end = path[first], path[second]
+            source, target = display.get(start, start), display.get(end, end)
+            if source == target:
+                continue
+            if second == first + 1:
+                hop = hops[first]
+                drawn.setdefault(hop["id"], {**hop, "kind": "derivation",
+                                             "reference_kind": hop["kind"], "source": source,
+                                             "target": target, "from": start, "to": end})
+                continue
+            edge_id = f"{_COLUMN_FLOW_EDGE}{start}:{end}"
+            flow = drawn.setdefault(edge_id, {"id": edge_id, "kind": "derivation",
+                                              "source": source, "target": target,
+                                              "from": start, "to": end, "via": []})
+            flow["via"] = sorted(set(flow["via"]) | set(path[first + 1:second]))
+
+    @staticmethod
+    def _foreign_key_edges(edges: list[dict[str, Any]], rows: dict[str, Any],
+                           identities: dict[str, tuple[str, str, str]], expanded: set[str],
+                           display: dict[str, str],
+                           member_of: dict[tuple[str, str], str]) -> dict[str, dict[str, Any]]:
+        """A foreign key with an expanded end, drawn per column pair instead of per object.
+
+        Only keys the schema read holds (tables in the map's schema) are known by
+        column; each end attaches to its row, or to its object's box when that
+        object is collapsed. Both ends collapsed: the object-level key stays.
+        """
+        by_identity = {identity: element_id for element_id, identity in identities.items()}
+        ends = {edge["id"] for edge in edges}
+        drawn: dict[str, dict[str, Any]] = {}
+        replaced: set[tuple[str, str]] = set()
+        for source, row in rows.items():
+            if row is None or source not in identities:
+                continue
+            for index, key in enumerate(row.get("foreign_keys") or []):
+                target = by_identity.get(
+                    (key["referenced_schema"], key["referenced_table"], "table"))
+                if target is None:
+                    outside = f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}"
+                    target = outside if any(edge["target"] == outside for edge in edges) else None
+                if target is None or (source not in expanded and target not in expanded):
+                    continue
+                replaced |= {(source, target), (target, source)}
+                for pair, (column, referenced) in enumerate(
+                        zip(key.get("columns") or [], key.get("referenced_columns") or [])):
+                    start = member_of.get((source, column), source)
+                    end = member_of.get((target, referenced), target)
+                    edge_id = f"{_FK_COLUMN_EDGE}{source}:{key['name']}:{index}:{pair}"
+                    if edge_id in ends:
+                        continue
+                    drawn[edge_id] = {
+                        "id": edge_id, "kind": "foreign_key",
+                        "source": display.get(start, start), "target": display.get(end, end),
+                        "from": start, "to": end, "constraint": key["name"],
+                        "columns": [column], "referenced_columns": [referenced]}
+        edges[:] = [edge for edge in edges if not (
+            edge["kind"] == "foreign_key" and (edge["source"], edge["target"]) in replaced)]
+        return drawn
+
+    def _lineage_marks(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]],
+                       upstream: set[str], downstream: set[str],
+                       display: dict[str, str]) -> None:
+        """Upstream and downstream of the selection marked; everything else subdued.
+
+        A collapsed box is marked for the columns it holds; an edge by the
+        underlying pair it joins.
+        """
+        selected = self._selected
+        chosen_edge = next((edge for edge in edges if edge["id"] == selected), None)
+        if chosen_edge is not None:
+            # An edge selected: what its source derives from, and what its target feeds.
+            upstream = upstream | {chosen_edge.get("from", chosen_edge["source"])}
+            downstream = downstream | {chosen_edge.get("to", chosen_edge["target"])}
+        before = upstream | {selected}
+        after = downstream | {selected}
+        shown_up = {display.get(one, one) for one in upstream}
+        shown_down = {display.get(one, one) for one in downstream}
+        # A selected line's columns read as selected columns (#1426).
+        joined = _line_columns(nodes, chosen_edge, display)
+        lit: set[str] = set()
+        for node in nodes:
+            if node["kind"] in _BOX_PARTS:
+                node["highlight"] = []
+                continue
+            node["highlight"] = (["focus"] if node["id"] == selected or node["id"] in joined else
+                                 ["upstream"] if node["id"] in shown_up else
+                                 ["downstream"] if node["id"] in shown_down else [])
+            if node["highlight"] and node.get("parent"):
+                lit.add(node["parent"])
+        _mark_holding_objects(nodes, lit, selected)
+        for node in nodes:
+            # An object holding a lit column is not subdued: its rows would be too.
+            if not node["highlight"] and node["kind"] not in _BOX_PARTS and node["id"] not in lit:
+                node["highlight"] = ["subdued"]
+        for edge in edges:
+            start = edge.get("from", edge["source"])
+            end = edge.get("to", edge["target"])
+            edge["highlight"] = (["focus"] if edge["id"] == selected else
+                                 ["upstream"] if start in upstream and end in before else
+                                 ["downstream"] if start in after and end in downstream
+                                 else ["subdued"])
+
+    def _lineage_details(self, read: dict[str, Any], columns: dict[str, Any],
+                         transforms: dict[str, Any], drawn_edges: dict[str, dict[str, Any]],
+                         drawn: set[str], names: dict[str, str]) -> dict[str, Any]:
+        """What is selected, and how much of its lineage lies beyond the map (decision (e))."""
+        selected = self._selected
+        if selected in columns:
+            column = columns[selected]
+            rows: list[list[Any]] = [["Column", column["column"]], ["Type", column["data_type"]]]
+            keys = [key.replace("_", " ") for key in ("primary_key", "foreign_key", "unique")
+                    if column.get(key)]
+            if keys:
+                rows.append(["Keys", ", ".join(keys)])
+        elif selected in transforms:
+            one = transforms[selected]
+            rows = [["Transform", one["key"]], ["Role", one["role"]],
+                    ["Expression", one["expression"]], ["Object", one["owner"]]]
+        else:
+            edge = drawn_edges[selected]
+            relationship = (edge["kind"] if edge["kind"] == "foreign_key"
+                            else edge.get("reference_kind") or "column flow")
+            rows = [["Relationship", relationship],
+                    ["Source", names.get(edge["from"], edge["from"])],
+                    ["Target", names.get(edge["to"], edge["to"])]]
+            if edge["kind"] == "foreign_key":
+                rows.append(["Constraint", edge["constraint"]])
+                return {"rows": rows}
+            if edge.get("via"):
+                rows.append(["Through", "; ".join(transforms[one]["expression"]
+                                                  for one in edge["via"] if one in transforms)])
+            for evidence in edge.get("evidence") or []:
+                rows.append(["Evidence", f"{evidence['fact_source']} · {evidence['resolution']}"
+                                         f" · {evidence['evidence']}"])
+        for direction in ("upstream", "downstream"):
+            reached = read.get(direction) or []
+            beyond = [one for one in reached
+                      if one["member_kind"] == "column" and one["id"] not in drawn]
+            objects = {(one["schema"], one["name"]) for one in beyond}
+            rows.append([direction.capitalize(),
+                         f"{sum(1 for one in reached if one['id'] in drawn)} on the map; "
+                         f"{len(beyond)} columns in {len(objects)} objects beyond it"])
+        return {"rows": rows}

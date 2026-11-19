@@ -61,6 +61,8 @@ __all__ = [
     "DatabaseTrigger",
     "DatabaseUserDefinedType",
     "DatabaseView",
+    "data_type_category",
+    "parameter_role",
     "schema_and_table",
     "supported_object_kinds",
 ]
@@ -325,6 +327,22 @@ def _kind_of(value: str) -> str:
     return raw
 
 
+def inventory_kind(kind: str) -> str:
+    """The inventory's word for a canonical kind -- ``table`` for ``tables`` (#1429).
+
+    The same vocabulary ``_KIND_ALIASES`` states, read the other way: the word a
+    provider's inventory, and the database index built from it, call that kind.
+
+    Raises:
+        ConfigError: When the kind is no canonical kind with an inventory word.
+    """
+    canonical = _kind_of(kind)
+    words = [word for word, of in _KIND_ALIASES.items() if of == canonical and word != of]
+    if not words:
+        raise ConfigError(f"'{kind}' is not a database object kind with an inventory word.")
+    return words[0]
+
+
 class _ReadDdl:
     """``read_ddl``: asked of a type with an address, or of an object for its own (723).
 
@@ -446,6 +464,62 @@ _PARAMETER_ROLES: dict[str, str] = {
 }
 
 
+def parameter_role(mode: str | None) -> str:
+    """What a parameter mode means to a caller: input, output or input_output (747).
+
+    The one reading of a provider's mode spelling; an unknown or missing mode
+    is an input, as a parameter with no stated mode is.
+    """
+    return _PARAMETER_ROLES.get(str(mode or "").upper(), "input")
+
+
+#: Each data-type category (#1426) and the type names that are of it, as a
+#: database reports a column's or parameter's type: lower case, without its
+#: bounds. A type is matched whole first, then by its first word ("timestamp
+#: with time zone", "character varying").
+_TYPE_CATEGORIES: dict[str, frozenset[str]] = {
+    "text": frozenset({
+        "text", "character", "char", "varchar", "bpchar", "citext", "name", "string",
+        "nchar", "nvarchar", "ntext", "tinytext", "mediumtext", "longtext", "clob",
+    }),
+    "number": frozenset({
+        "smallint", "integer", "int", "int2", "int4", "int8", "bigint", "tinyint",
+        "mediumint", "decimal", "numeric", "real", "double", "double precision",
+        "float", "float4", "float8", "money", "smallmoney", "smallserial", "serial",
+        "bigserial", "hugeint", "ubigint", "uinteger", "usmallint", "utinyint",
+    }),
+    "temporal": frozenset({
+        "date", "time", "timetz", "timestamp", "timestamptz", "interval", "datetime",
+        "datetime2", "smalldatetime", "datetimeoffset", "year",
+    }),
+    "boolean": frozenset({"boolean", "bool", "bit"}),
+    "json": frozenset({"json", "jsonb"}),
+    "identifier": frozenset({"uuid", "uniqueidentifier"}),
+}
+#: The category of a type no category names (#1426).
+_OTHER_TYPE_CATEGORY = "other"
+
+
+def data_type_category(data_type: str | None) -> str:
+    """The category of a reported data type (#1426): text, number, temporal,
+    boolean, json, identifier, or other.
+
+    Read from the type name alone -- its bounds ("(10,2)") dropped, matched
+    whole and then by its first word. An array, and any type no category
+    names, is ``other``; nothing is guessed from a column's name or values.
+    """
+    spelled = str(data_type or "").strip().lower()
+    if spelled.endswith("]"):
+        return _OTHER_TYPE_CATEGORY
+    base = spelled.split("(", 1)[0].strip()
+    words = base.split()
+    for candidate in (base, words[0] if words else ""):
+        for category, names in _TYPE_CATEGORIES.items():
+            if candidate in names:
+                return category
+    return _OTHER_TYPE_CATEGORY
+
+
 @dataclass(frozen=True)
 class DatabaseParameter:
     """One routine parameter, in the position its provider reported it (backlog 747).
@@ -468,7 +542,7 @@ class DatabaseParameter:
     @property
     def role(self) -> str:
         """input, output or input_output, from the mode."""
-        return _PARAMETER_ROLES.get(self.mode, "input")
+        return parameter_role(self.mode)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -765,6 +839,8 @@ class DatabaseConstraint:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "constraints"
+    #: The kind a unique constraint carries (#1426: the map marks its columns).
+    UNIQUE: ClassVar[str] = "unique"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
     identify = classmethod(_identify)
@@ -3110,7 +3186,7 @@ def _constraint(
     return DatabaseConstraint(
         name=name, table=table,
         columns=_names(read.get("column_names")),
-        kind="unique",
+        kind=DatabaseConstraint.UNIQUE,
         ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name, database_name),
     )
 

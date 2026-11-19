@@ -1443,6 +1443,56 @@ class Control:
             "object_type": object_type, "signature": signature,
         }, required=True)]
 
+    def object_map_column_lineage(self, catalog: str, provider: str,
+                                  opened: list[tuple[str, str, str]],
+                                  selected: Optional[int]) -> dict[str, Any]:
+        """The derivations joining the opened tables' and views' columns (#1426).
+
+        ``opened`` is (schema, name, object_type) per object open on the map;
+        ``selected`` the index node of a selected member, or None. Answers
+        ``columns``, ``transforms``, ``edges``, ``upstream`` and ``downstream``:
+        code.f_object_map_column_lineage over #1425's graph. Reads only.
+        """
+        rows = self._call_rows("get_object_map_column_lineage", {
+            "catalog": catalog, "provider": provider,
+            "schemas": [one[0] for one in opened], "names": [one[1] for one in opened],
+            "object_types": [one[2] for one in opened], "selected": selected,
+        }, required=True)
+        return dict(rows[0]) if rows else {
+            "columns": [], "transforms": [], "edges": [], "upstream": [], "downstream": []}
+
+    def object_map_column_focus(self, selected: int, depth: int | None) -> dict[str, Any]:
+        """One column's lineage within ``depth`` graph edges, both ways (#1426); all
+        of it where ``depth`` is None.
+
+        code.f_object_map_column_focus: the members code.f_db_reachable reaches
+        from ``selected`` over #1425's derivation edges at depth <= ``depth``
+        (its own depth), or at any depth, and those edges with their evidence.
+        Reads only.
+        """
+        rows = self._call_rows("get_object_map_column_focus", {
+            "selected": selected, "depth": depth}, required=True)
+        return dict(rows[0]) if rows else {"nodes": [], "edges": []}
+
+    def database_object_reach(self, catalog: str, provider: str, schema: str, name: str,
+                              object_type: str, signature: str,
+                              limit: int | None) -> dict[str, Any] | None:
+        """An indexed database object's full dependencies and dependents (#1429).
+
+        code.f_database_object_reach: code.f_db_reachable over the object-level
+        reference kinds, a member counting as its object. Answers ``object`` (with
+        its reference analysis status), ``upstream`` (what it depends on) and
+        ``downstream`` (what depends on it) -- each its total, deepest generation,
+        how many objects are not completely analysed, whether it was truncated, and
+        at most ``limit`` objects. None where the index holds no such object.
+        Reads only.
+        """
+        rows = self._call_rows("get_database_object_reach", {
+            "catalog": catalog, "provider": provider, "schema": schema, "name": name,
+            "object_type": object_type, "signature": signature, "limit": limit,
+        }, required=True)
+        return dict(rows[0]) if rows else None
+
     def update_workflow(self, workflow_id: int, definition: dict[str, Any],
                         required: bool = True) -> dict[str, list[int]]:
         """Save a Workflow's complete definition; answer the saved ids in order (#1325).
