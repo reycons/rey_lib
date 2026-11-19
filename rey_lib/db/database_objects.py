@@ -5,9 +5,11 @@ or view carrying its own identity, what it is made of, the SQL that created it
 and the statement that opens it. Everything downstream consumes the object
 instead of rediscovering what it describes.
 
-Concrete classes, no base class and no marker types. A table is a
-``DatabaseTable`` and a view is a ``DatabaseView`` -- the class says which, so
-nothing carries a type discriminator for other code to branch on.
+Concrete classes and no marker types. A table is a ``DatabaseTable`` and a
+view is a ``DatabaseView`` -- the class says which, so nothing carries a type
+discriminator for other code to branch on. What every object with an identity
+shares -- its identity, reference and listing -- is ``DatabaseObject``'s (#1439),
+the one base; nothing else is.
 ``DatabaseObjectIdentity`` is a field these objects have rather than something
 they are: a table *has* an identity, it is not one.
 
@@ -26,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha1
 from types import MethodType
-from typing import Any, ClassVar, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Iterable, Mapping
 
 from rey_lib.config.applications import allowed_values
 from rey_lib.data.logical_type import LogicalType
@@ -47,12 +49,14 @@ __all__ = [
     "DatabaseConstraint",
     "DatabaseForeignKey",
     "DatabaseIndex",
+    "DatabaseObject",
     "DatabaseObjectIdentity",
     "DatabaseObjectListing",
     "DatabaseObjectReference",
     "DatabaseParameter",
     "DatabasePrimaryKey",
     "DatabaseProcedure",
+    "DatabaseRoutine",
     "DatabaseRoutineIdentity",
     "DatabaseSchema",
     "DatabaseSchemaIdentity",
@@ -394,6 +398,38 @@ def _reference(obj: Any) -> DatabaseObjectReference:
 
 
 @dataclass(frozen=True)
+class DatabaseObject:
+    """What every database object with an identity shares (#1439), and nothing else.
+
+    Its type's ``KIND`` and ``IDENTITY`` -- stated by each type -- and the behaviour
+    that follows from them alone: building its identity from named parts, reading
+    the object an identity names, its canonical reference, and listing every one
+    the database holds. What an object is made of, how it reads itself, its DDL
+    and its serialization stay with its own type. It carries no type
+    discriminator: the class says which object it is.
+    """
+
+    #: Its kind in the canonical vocabulary (backlog 723). Stated by each type.
+    KIND: ClassVar[str]
+    #: Which identity it has (#1141): what identify builds and read_identified takes.
+    IDENTITY: ClassVar[type]
+    #: Which of its fields holds what it contains (#1440): ``columns`` or
+    #: ``parameters``; None for an object that contains no members. What it holds,
+    #: never whether anything shows it.
+    MEMBERS: ClassVar[str | None] = None
+    identify = classmethod(_identify)
+    read_identified = classmethod(_read_identified)
+    reference = property(_reference)
+
+    @classmethod
+    def list(
+        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
+    ) -> tuple[Any, ...]:
+        """Every object of this type the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, connection, database, adapter)
+
+
+@dataclass(frozen=True)
 class DatabaseColumn:
     """One column, in the position the provider reported it.
 
@@ -557,7 +593,7 @@ class DatabaseParameter:
 
 
 @dataclass(frozen=True)
-class DatabasePrimaryKey:
+class DatabasePrimaryKey(DatabaseObject):
     """A relation's primary key. Its columns are ordered and that order means something."""
 
     name: str
@@ -572,21 +608,11 @@ class DatabasePrimaryKey:
     KIND: ClassVar[str] = "primary_keys"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
 
     @staticmethod
     def _owns_constraint(kind: str) -> bool:
         """Which constraint kinds are this type's: the one partition, to list and to write."""
         return kind == "primary_key"
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabasePrimaryKey", ...]:
-        """Every primary key the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -635,7 +661,7 @@ class DatabasePrimaryKey:
 
 
 @dataclass(frozen=True)
-class DatabaseForeignKey:
+class DatabaseForeignKey(DatabaseObject):
     """One foreign key: local columns, and what they point at.
 
     The target is named the same way anything else is -- by schema and name --
@@ -658,21 +684,11 @@ class DatabaseForeignKey:
     KIND: ClassVar[str] = "foreign_keys"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
 
     @staticmethod
     def _owns_constraint(kind: str) -> bool:
         """Which constraint kinds are this type's: the one partition, to list and to write."""
         return kind == "foreign_key"
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseForeignKey", ...]:
-        """Every foreign key the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -725,7 +741,7 @@ class DatabaseForeignKey:
 
 
 @dataclass(frozen=True)
-class DatabaseIndex:
+class DatabaseIndex(DatabaseObject):
     """One index, and whether it enforces uniqueness."""
 
     name: str
@@ -740,16 +756,6 @@ class DatabaseIndex:
     KIND: ClassVar[str] = "indexes"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseIndex", ...]:
-        """Every index the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -826,7 +832,7 @@ class DatabaseIndex:
 
 
 @dataclass(frozen=True)
-class DatabaseConstraint:
+class DatabaseConstraint(DatabaseObject):
     """One constraint, in the provider's own word for what kind it is."""
 
     name: str
@@ -843,21 +849,11 @@ class DatabaseConstraint:
     UNIQUE: ClassVar[str] = "unique"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
 
     @staticmethod
     def _owns_constraint(kind: str) -> bool:
         """Which constraint kinds are this type's: the one partition, to list and to write."""
         return kind not in ("primary_key", "foreign_key")
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseConstraint", ...]:
-        """Every unique or check constraint the database holds, unread (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -910,7 +906,7 @@ class DatabaseConstraint:
 
 
 @dataclass(frozen=True)
-class DatabaseSequence:
+class DatabaseSequence(DatabaseObject):
     """One sequence, named within its schema (backlog 695).
 
     Its identity is schema and name -- never a name with the schema folded
@@ -925,16 +921,6 @@ class DatabaseSequence:
     KIND: ClassVar[str] = "sequences"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseSequence", ...]:
-        """Every sequence the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -1001,7 +987,7 @@ class DatabaseSequence:
 
 
 @dataclass(frozen=True)
-class DatabaseUserDefinedType:
+class DatabaseUserDefinedType(DatabaseObject):
     """One user-defined type: a schema-scoped database object (backlog 695).
 
     ``kind`` is its variant -- ``enum`` or ``domain`` (PostgreSQL), ``alias``
@@ -1018,16 +1004,6 @@ class DatabaseUserDefinedType:
     KIND: ClassVar[str] = "types"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseUserDefinedType", ...]:
-        """Every user-defined type the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -1094,7 +1070,7 @@ class DatabaseUserDefinedType:
 
 
 @dataclass(frozen=True)
-class DatabaseTrigger:
+class DatabaseTrigger(DatabaseObject):
     """One trigger, named within the table it fires on (backlog 695).
 
     A trigger name is not unique on its own; its identity is its table's
@@ -1112,16 +1088,6 @@ class DatabaseTrigger:
     KIND: ClassVar[str] = "triggers"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseChildIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseTrigger", ...]:
-        """Every trigger the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def read(
@@ -1169,7 +1135,7 @@ class DatabaseTrigger:
 
 
 @dataclass(frozen=True)
-class DatabaseTable:
+class DatabaseTable(DatabaseObject):
     """One table: what it is, what it is made of, and how it opens.
 
     ``ddl`` and ``initial_select`` are written when the object is constructed,
@@ -1191,16 +1157,8 @@ class DatabaseTable:
     KIND: ClassVar[str] = "tables"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseTable", ...]:
-        """Every table the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
+    #: It contains its columns (#1440).
+    MEMBERS: ClassVar[str | None] = "columns"
 
     @classmethod
     def _from_inventory(
@@ -1793,6 +1751,21 @@ class DatabaseTable:
         )
         return f"CREATE TABLE {qualified} (\n{listed}\n);" + _BATCH_END.get(provider, "")
 
+    def column_keys(self) -> dict[str, frozenset[str]]:
+        """Which of its columns are a primary key, a foreign key and unique (#1440).
+
+        From its own primary key, foreign keys, unique indexes and unique
+        constraints. Each answer is the columns' names; empty where it has none.
+        """
+        unique = {column for index in self.indexes if index.unique for column in index.columns}
+        unique |= {column for constraint in self.constraints
+                   if constraint.kind == DatabaseConstraint.UNIQUE for column in constraint.columns}
+        return {
+            "primary_key": frozenset(self.primary_key.columns if self.primary_key else ()),
+            "foreign_key": frozenset(column for key in self.foreign_keys for column in key.columns),
+            "unique": frozenset(unique),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
@@ -1807,7 +1780,7 @@ class DatabaseTable:
 
 
 @dataclass(frozen=True)
-class DatabaseView:
+class DatabaseView(DatabaseObject):
     """One view: its columns, its definition, and how it opens.
 
     A view is columns and a definition. It carries no keys, indexes or
@@ -1824,16 +1797,8 @@ class DatabaseView:
     KIND: ClassVar[str] = "views"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseObjectIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseView", ...]:
-        """Every view the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
+    #: It contains its columns (#1440).
+    MEMBERS: ClassVar[str | None] = "columns"
 
     @classmethod
     def read(
@@ -1909,8 +1874,43 @@ class DatabaseView:
         }
 
 
+class DatabaseRoutine(DatabaseObject):
+    """What a procedure and a function share as routines (#1440): their parameters.
+
+    Each routine states its own fields -- ``parameters`` among them, in call order,
+    None where no source reported them -- so this holds no field of its own: only
+    the contract that a routine contains its parameters, and how they divide by
+    what they mean to a caller (``parameter_role``). Nothing a procedure or a
+    function does differently is here.
+    """
+
+    if TYPE_CHECKING:
+        parameters: tuple["DatabaseParameter", ...] | None
+
+    #: It contains its parameters (#1440).
+    MEMBERS: ClassVar[str | None] = "parameters"
+
+    @property
+    def inputs(self) -> tuple["DatabaseParameter", ...]:
+        """The parameters a caller supplies -- IN, VARIADIC and INOUT -- in call order.
+
+        Empty where no source reported the parameters.
+        """
+        return tuple(one for one in self.parameters or ()
+                     if one.role in ("input", "input_output"))
+
+    @property
+    def outputs(self) -> tuple["DatabaseParameter", ...]:
+        """The parameters a call gives back -- OUT, TABLE and INOUT -- in call order.
+
+        Empty where no source reported the parameters.
+        """
+        return tuple(one for one in self.parameters or ()
+                     if one.role in ("output", "input_output"))
+
+
 @dataclass(frozen=True)
-class DatabaseProcedure:
+class DatabaseProcedure(DatabaseRoutine):
     """One procedure: which one it is, the SQL that created it, and the call.
 
     What a call looks like is still not this object's to decide -- it carries
@@ -1940,16 +1940,6 @@ class DatabaseProcedure:
     KIND: ClassVar[str] = "procedures"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseProcedure", ...]:
-        """Every procedure the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def _from_inventory(
@@ -2043,7 +2033,7 @@ class DatabaseProcedure:
 
 
 @dataclass(frozen=True)
-class DatabaseFunction:
+class DatabaseFunction(DatabaseRoutine):
     """One function, identified as a procedure is: by name and arguments.
 
     Carries its provider's rendered call for the same reason, and on the same
@@ -2071,16 +2061,6 @@ class DatabaseFunction:
     KIND: ClassVar[str] = "functions"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseRoutineIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
-
-    @classmethod
-    def list(
-        cls, conn: Any, connection: str, database: str | None = None, adapter: Any = None,
-    ) -> tuple["DatabaseFunction", ...]:
-        """Every function the database holds, unread, from its inventory (backlog 723)."""
-        return _listed(cls, conn, connection, database, adapter)
 
     @classmethod
     def _from_inventory(
@@ -2175,7 +2155,7 @@ class DatabaseFunction:
 
 
 @dataclass(frozen=True)
-class DatabaseSchema:
+class DatabaseSchema(DatabaseObject):
     """One schema, as the objects it holds.
 
     The unit a read answers with: a schema is opened once and everything under
@@ -2197,9 +2177,6 @@ class DatabaseSchema:
     KIND: ClassVar[str] = "schemas"
     #: Which identity it has (#1141): what identify builds and read_identified takes.
     IDENTITY: ClassVar[type] = DatabaseSchemaIdentity
-    identify = classmethod(_identify)
-    read_identified = classmethod(_read_identified)
-    reference = property(_reference)
 
     @classmethod
     def _from_inventory(
@@ -2313,6 +2290,10 @@ class DatabaseSchema:
             )),
             ddl=_schema_ddl(adapter, conn, schema),
         )
+
+    def table(self, name: str) -> "DatabaseTable | None":
+        """Its table of that name (#1440); None when it holds none by that name."""
+        return next((table for table in self.tables if table.identity.name == name), None)
 
     def to_dict(self) -> dict[str, Any]:
         return {

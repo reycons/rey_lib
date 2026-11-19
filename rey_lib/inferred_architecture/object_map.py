@@ -2208,9 +2208,8 @@ class ObjectMap:
         # #1425's derivations attach to rows or boxes as each end is expanded.
         openable = ([element for element, _ in elements if self._opens(element)]
                     if self._control is not None else [])
-        # Functions and procedures are the same panel (#1426 design): a function
-        # opens like a view (its inputs and outputs); a procedure is a header
-        # naming it, with no +/-.
+        # Functions and procedures are the same panel (#1426 design): each opens
+        # like a view, to its parameters -- IN, OUT and INOUT (#1440).
         panels = ([element for element, _ in elements
                    if self._is_code_object(element) and not self._opens(element)]
                   if self._control is not None else [])
