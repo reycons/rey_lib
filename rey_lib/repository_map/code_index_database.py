@@ -31,10 +31,11 @@ from typing import Any
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
+from rey_lib.errors.error_utils import StateError
 from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.code_index import IndexedRepository
 
-__all__ = ["CodeIndexDatabaseWriter"]
+__all__ = ["CodeIndexDatabaseWriter", "require_parent_batch_step"]
 
 logger = AppLogger(__name__)
 
@@ -153,12 +154,20 @@ class CodeIndexDatabaseWriter:
         self._ctx = ctx
         self._run_log = run_log
 
-    def replace_index(self, indexed: list[IndexedRepository]) -> None:
+    def replace_index(self, indexed: list[IndexedRepository],
+                      parent_batch_step_id: Any) -> None:
         """Stage every repository, then promote them as one replacement.
 
         Args:
             indexed: Every repository the scan observed.
+            parent_batch_step_id: The run's batch step. **Required** (#270):
+                ``code.p_publish`` records its own step beneath it, and a
+                governed routine never creates a batch.
+
+        Raises:
+            StateError: No parent step was supplied; nothing is staged.
         """
+        require_parent_batch_step(parent_batch_step_id, "publishing the code index")
         self._clear_staging()
 
         repositories = [dict(entry.header) for entry in indexed]
@@ -283,16 +292,25 @@ class CodeIndexDatabaseWriter:
         )
         # The scan only. Nothing authored is staged or resolved here: a
         # declaration cannot refuse the publication of current facts.
-        self._call(_PUBLISH, {"scan": True})
+        self._call(_PUBLISH, {"scan": True, "batch_step_id": parent_batch_step_id})
         logger.info("Promoted the staged scan to the live index")
 
-    def clear(self) -> None:
+    def clear(self, parent_batch_step_id: Any) -> None:
         """Empty the index and its staging.
 
         Administrative, not part of indexing: the normal path replaces, so
         nothing has to run between a wipe and a repopulate.
+
+        Args:
+            parent_batch_step_id: The run's batch step. **Required** (#270), as
+                for :meth:`replace_index`: ``code.p_index_clear`` records its own
+                step beneath it.
+
+        Raises:
+            StateError: No parent step was supplied.
         """
-        self._call(_CLEAR, {})
+        require_parent_batch_step(parent_batch_step_id, "clearing the code index")
+        self._call(_CLEAR, {"batch_step_id": parent_batch_step_id})
 
     def _clear_staging(self) -> None:
         """Empty staging before filling it.
@@ -353,3 +371,26 @@ class CodeIndexDatabaseWriter:
         ProcedureMap.resolve(
             self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
         ).call(self._connection, values, self._run_log)
+
+
+def require_parent_batch_step(parent_batch_step_id: Any, publication: str) -> None:
+    """Refuse a publication with no parent step, before anything is staged (#270).
+
+    Each promotion routine records its own batch step beneath the parent, and
+    ``control.f_batch_step_begin`` refuses when given neither a batch nor a
+    parent -- "a governed routine never creates a batch". Saying so here beats a
+    database error naming a control function the caller never invoked.
+
+    Args:
+        parent_batch_step_id: What the caller supplied.
+        publication: What was being published, for the message.
+
+    Raises:
+        StateError: When no parent was supplied.
+    """
+    if parent_batch_step_id is None:
+        raise StateError(
+            f"{publication} needs the batch step it hangs beneath: the routine "
+            "records its own step, and a governed routine never creates a batch. "
+            "Run it as a workflow step, or pass the step the run already opened."
+        )

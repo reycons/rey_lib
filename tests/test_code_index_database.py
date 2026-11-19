@@ -11,14 +11,18 @@ from typing import Any
 
 import pytest
 
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import DatabaseError, StateError
 from rey_lib.repository_map.code_index import CodeIndexWriter, IndexedRepository
 from rey_lib.repository_map import code_index_database as module
 from rey_lib.repository_map.code_index_database import CodeIndexDatabaseWriter
 
+#: The run's batch step the promotion records its own step beneath (#270).
+_PARENT = 41
+
 #: The one promotion, as the recording map below writes it (#541): through the code
-#: procedure map, by its binding, never a CALL assembled in Python.
-_PUBLISHED = "MAP code.publish_code_index [('scan', True)]"
+#: procedure map, by its binding, never a CALL assembled in Python -- carrying the
+#: parent step (#270).
+_PUBLISHED = "MAP code.publish_code_index [('batch_step_id', 41), ('scan', True)]"
 
 
 @pytest.fixture(autouse=True)
@@ -137,7 +141,7 @@ class TestTheWriteBoundary:
     def test_storage_is_never_written_to_directly(self) -> None:
         """The writer holds no privilege on storage; it must not try to use one."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
         assert staged <= {
@@ -156,7 +160,7 @@ class TestTheWriteBoundary:
     def test_the_replacement_is_one_call(self) -> None:
         """Atomicity is the schema's, so exactly one promotion is issued."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         calls = [s for s in adapter.statements if s.startswith("MAP")]
         assert calls == [_PUBLISHED]
@@ -166,7 +170,7 @@ class TestTheWriteBoundary:
     def test_it_promotes_the_scan_and_never_the_architecture(self) -> None:
         """Facts only (backlog 639): nothing authored is staged beside the scan."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         assert _PUBLISHED in adapter.statements
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
@@ -179,7 +183,7 @@ class TestTheWriteBoundary:
         Otherwise the next promotion would publish a mixture of two scans.
         """
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
@@ -212,7 +216,7 @@ class TestTheWriteBoundary:
         identity for itself.
         """
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         minted = {
             "repository_id", "code_file_id", "code_symbol_id", "code_edge_id",
@@ -223,6 +227,36 @@ class TestTheWriteBoundary:
         assert columns["edge_stage"][:2] == ["repository_key", "relative_path"]
         for staged in columns.values():
             assert not minted.intersection(staged)
+
+
+class TestTheParentStep:
+    """Each routine records its own step beneath the run's (#270)."""
+
+    def test_a_publication_without_a_parent_is_refused_before_staging(self) -> None:
+        """No parent, no publication: nothing is emptied, staged or called."""
+        adapter = _Adapter()
+
+        with pytest.raises(StateError):
+            CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), None)
+
+        assert adapter.statements == []
+        assert adapter.inserts == []
+
+    def test_clear_passes_the_parent(self) -> None:
+        """The administrative clear takes the parent like every other publisher."""
+        adapter = _Adapter()
+        CodeIndexDatabaseWriter(adapter, adapter, object()).clear(_PARENT)
+
+        assert adapter.statements == ["MAP code.clear_code_index [('batch_step_id', 41)]"]
+
+    def test_clear_without_a_parent_is_refused(self) -> None:
+        """No parent is invented for an administrative clear."""
+        adapter = _Adapter()
+
+        with pytest.raises(StateError):
+            CodeIndexDatabaseWriter(adapter, adapter, object()).clear(None)
+
+        assert adapter.statements == []
 
 
 class _FailingAdapter(_Adapter):
@@ -261,14 +295,14 @@ class TestPublicationIsAllOrNothing:
         adapter = _FailingAdapter(fails_on)
 
         with pytest.raises(DatabaseError):
-            CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+            CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         assert not [s for s in adapter.statements if s.startswith("MAP")]
 
     def test_every_staging_set_is_loaded_before_the_call(self) -> None:
         """All three, in dependency order, and the call comes last."""
         adapter = _Adapter()
-        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed())
+        CodeIndexDatabaseWriter(adapter, adapter, object()).replace_index(_indexed(), _PARENT)
 
         assert [table for _s, table, _c, _cols in adapter.inserts] == [
             "repository_stage",

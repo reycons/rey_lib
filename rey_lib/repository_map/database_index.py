@@ -24,6 +24,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.logs.app_logger import AppLogger
+from rey_lib.repository_map.code_index_database import require_parent_batch_step
 
 __all__ = ["DatabaseIndexWriter"]
 
@@ -108,6 +109,7 @@ class DatabaseIndexWriter:
         objects: list[dict[str, Any]],
         members: list[dict[str, Any]],
         observations: list[dict[str, Any]],
+        parent_batch_step_id: Any,
     ) -> None:
         """Replace the published database index with this inspection.
 
@@ -119,12 +121,16 @@ class DatabaseIndexWriter:
             objects: Normalized objects, without their source key.
             members: Normalized members, without their source key.
             observations: Reference observations, without their source keys.
+            parent_batch_step_id: The run's batch step. **Required** (#270):
+                ``code.p_publish_database`` records its own step beneath it.
 
         Raises:
+            StateError: No parent step was supplied; nothing is staged.
             DatabaseError: If staging or promotion fails. The published index is
                 untouched in that case, which is the schema's guarantee and not
                 this writer's.
         """
+        require_parent_batch_step(parent_batch_step_id, "publishing the database index")
         self._clear_staging()
 
         self._stage("db_source_stage", [{
@@ -168,7 +174,7 @@ class DatabaseIndexWriter:
             "Staged %d objects, %d members, %d observations for %s",
             len(objects), len(members), len(observations), source_key,
         )
-        self._call(_PUBLISH)
+        self._call(_PUBLISH, parent_batch_step_id)
 
     def _clear_staging(self) -> None:
         """Empty every staging table, deepest dependency first."""
@@ -199,12 +205,13 @@ class DatabaseIndexWriter:
             self._adapter,
         )
 
-    def _call(self, binding: str) -> None:
+    def _call(self, binding: str, parent_batch_step_id: Any) -> None:
         """Invoke the promotion through the ``code`` map (#541): governed, logged, indexed.
 
         Args:
             binding: The binding's name in the ``code`` map.
+            parent_batch_step_id: The step the routine records its own beneath (#270).
         """
         ProcedureMap.resolve(
             self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
-        ).call(self._connection, {}, self._run_log)
+        ).call(self._connection, {"batch_step_id": parent_batch_step_id}, self._run_log)

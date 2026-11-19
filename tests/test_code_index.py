@@ -20,9 +20,12 @@ class _Recorder:
 
     def __init__(self) -> None:
         self.calls: list[list[IndexedRepository]] = []
+        self.parents: list[object] = []
 
-    def replace_index(self, indexed: list[IndexedRepository]) -> None:
+    def replace_index(self, indexed: list[IndexedRepository],
+                      parent_batch_step_id: object) -> None:
         self.calls.append(indexed)
+        self.parents.append(parent_batch_step_id)
 
     @property
     def replaced(self) -> list[IndexedRepository]:
@@ -105,6 +108,7 @@ class TestTheRowsADestinationReceives:
                 [_file("app.py"), _file("db.py"), _symbol("db.py", "connect")]
             ),
             recorder,
+            41,
         )
 
         files = {entry["relative_path"]: entry for entry in recorder.replaced[0].files}
@@ -114,7 +118,7 @@ class TestTheRowsADestinationReceives:
     def test_the_header_becomes_the_observed_state(self) -> None:
         """Revision, branch and status travel together or not at all."""
         recorder = _Recorder()
-        index(_snapshot([_file("app.py")]), recorder)
+        index(_snapshot([_file("app.py")]), recorder, 41)
 
         assert recorder.replaced[0].header == {
             "repository_key": "data_engine",
@@ -129,7 +133,7 @@ class TestTheRowsADestinationReceives:
     def test_a_symbol_naming_an_uninventoried_file_is_dropped(self) -> None:
         """A generator defect is reported, never written under an invented file."""
         recorder = _Recorder()
-        index(_snapshot([_file("app.py"), _symbol("ghost.py", "vanished")]), recorder)
+        index(_snapshot([_file("app.py"), _symbol("ghost.py", "vanished")]), recorder, 41)
 
         paths = [entry["relative_path"] for entry in recorder.replaced[0].files]
         assert paths == ["app.py"]
@@ -148,15 +152,22 @@ class TestTheRowsADestinationReceives:
         from the index.
         """
         recorder = _Recorder()
-        index(_snapshot([_file("app.py")]), recorder)
+        index(_snapshot([_file("app.py")]), recorder, 41)
 
         assert len(recorder.calls) == 1
         assert [entry.repository for entry in recorder.calls[0]] == ["data_engine"]
 
+    def test_the_parent_step_reaches_the_destination(self) -> None:
+        """The run's batch step is handed over with the index, unchanged (#270)."""
+        recorder = _Recorder()
+        index(_snapshot([_file("app.py")]), recorder, 41)
+
+        assert recorder.parents == [41]
+
     def test_position_is_carried_but_is_not_identity(self) -> None:
         """Line and column describe a symbol; nothing addresses one by them."""
         recorder = _Recorder()
-        index(_snapshot([_file("db.py"), _symbol("db.py", "connect")]), recorder)
+        index(_snapshot([_file("db.py"), _symbol("db.py", "connect")]), recorder, 41)
 
         symbol = recorder.replaced[0].files[0]["symbols"][0]
         assert symbol["start_line"] == 10

@@ -32,6 +32,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.logs.app_logger import AppLogger
+from rey_lib.repository_map.code_index_database import require_parent_batch_step
 
 __all__ = [
     "BRIDGE_SCHEMA_VERSION",
@@ -526,16 +527,21 @@ class BridgeIndexWriter:
         self._ctx = ctx
         self._run_log = run_log
 
-    def replace_index(self, inspected: dict[str, list[dict[str, Any]]]) -> None:
+    def replace_index(self, inspected: dict[str, list[dict[str, Any]]],
+                      parent_batch_step_id: Any) -> None:
         """Replace the published bridge with this inspection.
 
         Args:
             inspected: What :func:`inspect_bridge` returned.
+            parent_batch_step_id: The run's batch step. **Required** (#270):
+                ``code.p_publish_bridge`` records its own step beneath it.
 
         Raises:
+            StateError: No parent step was supplied; nothing is staged.
             DatabaseError: If staging or promotion fails, leaving the published
                 bridge as it was -- the schema's guarantee, not this writer's.
         """
+        require_parent_batch_step(parent_batch_step_id, "publishing the bridge")
         self._clear_staging()
         self._stage("db_code_reference_stage", inspected["code"], _CODE_COLUMNS)
         self._stage("db_binding_stage", inspected["bindings"], _BINDING_COLUMNS)
@@ -547,7 +553,7 @@ class BridgeIndexWriter:
         self._stage(
             "db_bridge_coverage_stage", inspected["coverage"], _COVERAGE_COLUMNS,
         )
-        self._call(_PUBLISH)
+        self._call(_PUBLISH, parent_batch_step_id)
 
     def _clear_staging(self) -> None:
         """Empty staging, so a run that staged and failed cannot be published."""
@@ -572,8 +578,11 @@ class BridgeIndexWriter:
             self._adapter,
         )
 
-    def _call(self, binding: str) -> None:
-        """Invoke the promotion through the ``code`` map (#541): governed, logged, indexed."""
+    def _call(self, binding: str, parent_batch_step_id: Any) -> None:
+        """Invoke the promotion through the ``code`` map (#541): governed, logged, indexed.
+
+        The routine records its own batch step beneath ``parent_batch_step_id`` (#270).
+        """
         ProcedureMap.resolve(
             self._connection, get_procedure_map(self._ctx, _MAP), _MAP, binding,
-        ).call(self._connection, {}, self._run_log)
+        ).call(self._connection, {"batch_step_id": parent_batch_step_id}, self._run_log)

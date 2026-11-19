@@ -173,7 +173,7 @@ def test_flow_facts_survive_the_existing_scan_to_staging_pipeline(tmp_path, monk
     assert indexed.control_flow_nodes and indexed.control_flow_edges
     assert indexed.control_flow_coverage[0]['owner_qualified_name']=='run'
     adapter=_Adapter()
-    CodeIndexDatabaseWriter(adapter,adapter,object()).replace_index([indexed])
+    CodeIndexDatabaseWriter(adapter,adapter,object()).replace_index([indexed], 41)
     tables={table: count for schema,table,count,cols in adapter.inserts}
     assert tables['control_flow_node_stage']==len(indexed.control_flow_nodes)
     assert tables['control_flow_edge_stage']==len(indexed.control_flow_edges)

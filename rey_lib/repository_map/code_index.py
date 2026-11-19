@@ -62,12 +62,15 @@ class CodeIndexWriter(Protocol):
     is, which driver is underneath -- is behind it.
     """
 
-    def replace_index(self, indexed: list["IndexedRepository"]) -> None:
+    def replace_index(self, indexed: list["IndexedRepository"],
+                      parent_batch_step_id: Any) -> None:
         """Replace the whole index, all or nothing.
 
         Args:
             indexed: Every repository the scan observed. Not a delta and not a
                 subset: what is absent here is absent from the index.
+            parent_batch_step_id: The run's batch step the publication records
+                its own step beneath (#270).
         """
 
 
@@ -165,12 +168,15 @@ class IndexedRepository:
         self.reference_evidence = reference_evidence if reference_evidence is not None else []
 
 
-def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
+def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter,
+          parent_batch_step_id: Any) -> int:
     """Write one snapshot to one destination, as one replacement.
 
     Args:
         snapshot: What to write.
         writer: Where to write it.
+        parent_batch_step_id: The run's batch step the publication records its
+            own step beneath (#270).
 
     Returns:
         How many repositories were handed over.
@@ -179,7 +185,7 @@ def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
         _indexed(repository, repository_map)
         for repository, repository_map in snapshot.maps.items()
     ]
-    writer.replace_index(indexed)
+    writer.replace_index(indexed, parent_batch_step_id)
     logger.info("Indexed %d repositories", len(indexed))
     return len(indexed)
 
