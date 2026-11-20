@@ -133,6 +133,18 @@ def test_a_lines_routing_is_layout_saved_and_restored_with_the_positions():
     assert workflow.map_layout_projection()["geometry"] == routed
 
 
+def test_a_panels_width_is_layout_saved_and_restored_with_the_positions() -> None:
+    """A panel the reader widened (#1459) is geometry: its width saved with the layout,
+    read back; a layout without one is unchanged."""
+    store = Store()
+    held = mapped(store)
+    scope = held.layout_projection()["actions"][0]["command"]["scope"]
+    widened = {**GEOMETRY, "widths": {"table:run": 420.5}}
+    held.edit_layout(widened, scope)
+    held.save(scope)
+    assert mapped(store).layout_projection()["geometry"] == widened
+
+
 def test_workflow_layout_save_keeps_its_live_definition_and_is_recovered():
     store = Store()
     def workflow():

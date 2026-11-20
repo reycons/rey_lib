@@ -425,8 +425,10 @@ class ObjectMap:
             raise ConfigError("This map has no layout persistence connection.")
         if not isinstance(geometry, dict) or not {"elements", "positions", "pan", "zoom"} <= geometry.keys():
             raise ConfigError("A map layout edit requires its graph geometry.")
-        # ``routes``: the reader's routing of the lines they moved (#1426), by line id.
-        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport", "routes"}:
+        # ``routes``: the reader's routing of the lines they moved (#1426), by line id --
+        # held by layouts saved before #1456, read and ignored. ``widths``: the width
+        # the reader dragged a panel to (#1459), by panel id.
+        if geometry.keys() - {"elements", "positions", "pan", "zoom", "viewport", "routes", "widths"}:
             raise ConfigError("A map layout contains geometry only.")
         try:
             copied = json.loads(json.dumps(geometry, allow_nan=False))
