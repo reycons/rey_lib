@@ -226,6 +226,14 @@ def _evidence_rows(edge: dict[str, Any]) -> list[list[Any]]:
 _OPENABLE: Final = frozenset({"table", "view"})
 
 
+def _column_type(table: DatabaseTable | None, column: str, indexed: str) -> str:
+    """A drawn column's type (#1454): its catalog column's (``DatabaseColumn.type``)
+    where the map holds its table, otherwise the index's. Only the type: the row's
+    ordinal stays the index's attribute number, which its lineage is ordered by."""
+    held = next((one for one in table.columns if one.name == column), None) if table else None
+    return held.type if held is not None else indexed
+
+
 def _members_of(object_type: str | None) -> str | None:
     """What a database object of this type contains -- ``columns`` or ``parameters`` --
     as its type declares it (DatabaseObject.MEMBERS, #1442); None for a type that
@@ -2557,11 +2565,12 @@ class ObjectMap:
             # catalog read of -- outside the schema, or a view -- knows none.
             table = rows.get(owner)
             keys = table.column_keys() if table is not None else _NO_COLUMN_KEYS
+            data_type = _column_type(table, column["column"], column["data_type"])
             columns[column["id"]] = {
                 "id": column["id"], "kind": "column", "parent": owner,
                 "label": column["column"],
-                "column": column["column"], "data_type": column["data_type"],
-                "type_category": data_type_category(column["data_type"]),
+                "column": column["column"], "data_type": data_type,
+                "type_category": data_type_category(data_type),
                 "ordinal": column["ordinal"],
                 **({"mode": column["mode"]} if column.get("mode") else {}),
                 **{key: column["column"] in held for key, held in keys.items()},
@@ -2725,7 +2734,8 @@ class ObjectMap:
             columns[one["id"]] = {
                 "id": one["id"], "kind": "column", "parent": one["object_id"],
                 "label": one["name"], "column": one["name"],
-                "data_type": one["data_type"], "ordinal": one["ordinal"],
+                "data_type": _column_type(table, one["name"], one["data_type"]),
+                "ordinal": one["ordinal"],
                 **{key: one["name"] in held for key, held in keys.items()}, **reach}
             self._member_identities[one["id"]] = {
                 "schema": one["schema"], "object": one["object"],
