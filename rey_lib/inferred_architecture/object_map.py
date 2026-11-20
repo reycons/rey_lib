@@ -41,7 +41,7 @@ from typing import Any, Callable, Final
 
 from rey_lib.db.database_objects import (
     DatabaseChildIdentity, DatabaseConstraint, DatabaseObjectListing, DatabaseSchema,
-    data_type_category, parameter_role,
+    DatabaseTable, data_type_category, parameter_role,
 )
 from rey_lib.db.postgres_references import (
     VALUE, carries_forward, derivation_place, expression_head,
@@ -127,6 +127,10 @@ _CONTROLS: Final = "controls:"
 _BOX_PARTS: Final = frozenset({"header", "toggle", "links", "relations", "controls", "group"})
 #: One column pair of a foreign key drawn between rows or boxes (#1426).
 _FK_COLUMN_EDGE: Final = "fk_column:"
+#: The column keys of an object the map holds no catalog read of (#1441): none known --
+#: the same three DatabaseTable.column_keys answers, each empty.
+_NO_COLUMN_KEYS: Final = {"primary_key": frozenset(), "foreign_key": frozenset(),
+                          "unique": frozenset()}
 
 #: Column lineage levels on an opened table or view (#1426). Both draw the same
 #: #1425 relationships: column flow hides the transforms between two columns,
@@ -240,11 +244,20 @@ class ObjectMap:
     """
 
     def __init__(self, subject: dict[str, Any], projection_kind: str,
-                 read: dict[str, Any]) -> None:
-        """Hold what was read. Use ``for_architecture`` or ``for_schema``."""
+                 read: dict[str, Any] | DatabaseSchema) -> None:
+        """Hold what was read. Use ``for_architecture`` or ``for_schema``.
+
+        A schema map's read is the ``DatabaseSchema`` itself (#1441): its tables,
+        views and routines as the database domain's own objects, never their
+        serialization. Every other reading's read is its governed reads' rows.
+        """
         self.subject = dict(subject)
         self.projection_kind = projection_kind
-        self._read = read
+        self._schema: DatabaseSchema | None = (
+            read if projection_kind == SCHEMA_PROJECTION and isinstance(read, DatabaseSchema) else None)
+        if projection_kind == SCHEMA_PROJECTION and self._schema is None:
+            raise ConfigError("A schema map reads its schema as a DatabaseSchema.")
+        self._read: dict[str, Any] = read if isinstance(read, dict) else {}
         #: The readings this one object holds (#1304): the active one is
         #: ``projection_kind``; ``focus(reading=...)`` moves between them. An
         #: architecture map read with its flows holds the flow reading too.
@@ -295,6 +308,17 @@ class ObjectMap:
         #: last drew for its opened tables and views (#1426). Selectable; they
         #: never open or drill.
         self._lineage_ids: set[str] = set()
+
+    @property
+    def _database(self) -> DatabaseSchema:
+        """The schema this map reads (#1441); a map of no schema has none to give.
+
+        Raises:
+            ConfigError: When this map reads no database schema.
+        """
+        if self._schema is None:
+            raise ConfigError("This map reads no database schema.")
+        return self._schema
 
     def bind_layout(self, control: Any) -> None:
         """Use the existing Control for this map's geometry, without replacing the map."""
@@ -431,7 +455,7 @@ class ObjectMap:
             catalog: The schema's catalog, as the subject names it.
             schema: The schema.
         """
-        read = DatabaseSchema.read(connection.handle(), connection.name, catalog, schema).to_dict()
+        read = DatabaseSchema.read(connection.handle(), connection.name, catalog, schema)
         held = cls({"kind": "database_schema", "connection": connection.name,
                     "catalog": catalog, "schema": schema}, SCHEMA_PROJECTION, read)
         held._index_connection = index_connection
@@ -501,16 +525,18 @@ class ObjectMap:
                 if not isinstance(object_focus, dict):
                     raise ConfigError("A database-object focus must be an identity.")
                 kind = object_focus["object_type"]
-                entries = self._read.get(kind + "s", []) if kind in ("view", "function", "procedure") else []
+                held = self._database
+                entries = {"view": held.views, "function": held.functions,
+                           "procedure": held.procedures}.get(kind, ())
                 matches = [entry for entry in entries
-                           if entry["identity"]["name"] == object_focus["name"]
-                           and str(entry["identity"].get("signature") or "") == object_focus["signature"]]
+                           if entry.identity.name == object_focus["name"]
+                           and str(getattr(entry.identity, "signature", "") or "") == object_focus["signature"]]
                 if len(matches) != 1:
                     raise AppError("This schema does not hold exactly one matching view or routine.")
                 context = self._table_context if same_object else self._read_table_context(
                     object_focus["name"], object_type=kind, signature=object_focus["signature"])
-                step = {"value": context["root_id"],
-                        "label": matches[0].get("label") or object_focus["name"],
+                # Its displayed name is its identity's name -- the name it matched by.
+                step = {"value": context["root_id"], "label": matches[0].identity.name,
                         "focus": {"object": object_focus}}
             elif table:
                 if table not in self._table_names():
@@ -526,13 +552,13 @@ class ObjectMap:
                 if same_object:
                     context = self._table_context
                 elif node.startswith(_EXTERNAL):
-                    target = next((key for t in self._read.get("tables", [])
-                                   for key in t.get("foreign_keys") or []
-                                   if f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}" == node), None)
+                    target = next((key for t in self._database.tables for key in t.foreign_keys
+                                   if f"{_EXTERNAL}{key.referenced_schema}.{key.referenced_table}" == node),
+                                  None)
                     if target is None:
                         raise AppError(f"This map holds no external table {node!r}.")
-                    context = self._read_table_context(target["referenced_table"],
-                                                       schema=target["referenced_schema"], alias=node)
+                    context = self._read_table_context(target.referenced_table,
+                                                       schema=target.referenced_schema, alias=node)
                 else:
                     context = self._read_table_context(node=node)
                 step = {"value": node, "label": label, "focus": {"node": node}}
@@ -820,11 +846,11 @@ class ObjectMap:
             raise ConfigError(f"The map has no node {node_id!r}.")
         if self.projection_kind == SCHEMA_PROJECTION:
             element, entry = next((n, row) for n, row in self._schema_scope()[0] if n["id"] == node_id)
-            identity = dict(element.get("identity") or (entry or {}).get("identity") or {})
+            identity = dict(element.get("identity") or (entry.identity.to_dict() if entry else {}))
             if element["kind"] == "external":
-                key = next(k for t in self._read.get("tables", []) for k in t.get("foreign_keys") or []
-                           if f"{_EXTERNAL}{k['referenced_schema']}.{k['referenced_table']}" == node_id)
-                identity = {"schema": key["referenced_schema"], "name": key["referenced_table"],
+                key = next(k for t in self._database.tables for k in t.foreign_keys
+                           if f"{_EXTERNAL}{k.referenced_schema}.{k.referenced_table}" == node_id)
+                identity = {"schema": key.referenced_schema, "name": key.referenced_table,
                             "object_type": "table"}
             if not identity:
                 raise AppError("This map node carries no declared opening identity.")
@@ -2099,7 +2125,7 @@ class ObjectMap:
     # -- the schema projection -------------------------------------------------
 
     def _table_names(self) -> list[str]:
-        return [str(t["identity"]["name"]) for t in self._read.get("tables", [])]
+        return [table.identity.name for table in self._database.tables]
 
     def _holds_schema_node(self, node_id: str) -> bool:
         """Whether this schema holds the table, or references the external table, a node names."""
@@ -2110,9 +2136,8 @@ class ObjectMap:
         if node_id.startswith(_TABLE):
             return node_id[len(_TABLE):] in self._table_names()
         if node_id.startswith(_EXTERNAL):
-            return any(f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}" == node_id
-                       for table in self._read.get("tables", [])
-                       for key in table.get("foreign_keys") or [])
+            return any(f"{_EXTERNAL}{key.referenced_schema}.{key.referenced_table}" == node_id
+                       for table in self._database.tables for key in table.foreign_keys)
         return False
 
     def _schema_drill(self, node_id: str) -> None:
@@ -2162,31 +2187,30 @@ class ObjectMap:
         """
         if self._focus.get("column") and self._column_focus:
             return [(box, None) for box in self._focus_boxes()], []
+        held = self._database
         if any(self._focus.get(key) for key in ("table", "node", "object")) and self._table_context:
-            tables = {str(t["identity"]["name"]): t for t in self._read.get("tables", [])}
-            return ([(dict(n), tables.get(n.get("table", ""))) for n in self._table_context["nodes"]],
+            return ([(dict(n), held.table(str(n.get("table", "")))) for n in self._table_context["nodes"]],
                     [(dict(e), None) for e in self._table_context["edges"]])
         schema = self.subject["schema"]
-        tables = self._read.get("tables", [])
         here = set(self._table_names())
         elements: dict[str, _Mapped] = {}
-        for table in tables:
-            name = str(table["identity"]["name"])
+        for table in held.tables:
+            name = table.identity.name
             elements[f"{_TABLE}{name}"] = ({"id": f"{_TABLE}{name}", "kind": "table",
                                             "table": name, "label": name}, table)
         relations: list[_Mapped] = []
-        for table in tables:
-            name = str(table["identity"]["name"])
-            for index, key in enumerate(table.get("foreign_keys") or []):
-                inside = key["referenced_schema"] == schema and key["referenced_table"] in here
-                target = (f"{_TABLE}{key['referenced_table']}" if inside else
-                          f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}")
+        for table in held.tables:
+            name = table.identity.name
+            for index, key in enumerate(table.foreign_keys):
+                inside = key.referenced_schema == schema and key.referenced_table in here
+                target = (f"{_TABLE}{key.referenced_table}" if inside else
+                          f"{_EXTERNAL}{key.referenced_schema}.{key.referenced_table}")
                 if not inside and target not in elements:
                     elements[target] = ({"id": target, "kind": "external",
-                                         "label": f"{key['referenced_schema']}."
-                                                  f"{key['referenced_table']}"}, None)
+                                         "label": f"{key.referenced_schema}.{key.referenced_table}"},
+                                        None)
                 relations.append(({
-                    "id": f"fk:{name}:{key['name']}:{index}", "kind": "foreign_key",
+                    "id": f"fk:{name}:{key.name}:{index}", "kind": "foreign_key",
                     "source": f"{_TABLE}{name}", "target": target,
                 }, key))
         return list(elements.values()), relations
@@ -2219,14 +2243,14 @@ class ObjectMap:
             if table is None:
                 nodes.append(element)
                 continue
-            keyed = set((table.get("primary_key") or {}).get("columns") or [])
+            keyed = table.column_keys()["primary_key"]
             nodes.append({**element, "columns": [
-                {"name": c["name"], "type": c["type"], "nullable": c["nullable"],
-                 "primary_key": c["name"] in keyed}
-                for c in sorted(table.get("columns") or [], key=lambda c: c["ordinal"])
+                {"name": c.name, "type": c.type, "nullable": c.nullable,
+                 "primary_key": c.name in keyed}
+                for c in sorted(table.columns, key=lambda c: c.ordinal)
             ] if element.get("table") in opened and not with_lineage else []})
-        edges = [{**relation, **({"columns": list(key["columns"]),
-                  "referenced_columns": list(key["referenced_columns"])} if key else {})}
+        edges = [{**relation, **({"columns": list(key.columns),
+                  "referenced_columns": list(key.referenced_columns)} if key else {})}
                  for relation, key in relations]
         self._lineage_ids = set()
         toggles: dict[str, Any] = {}
@@ -2255,9 +2279,9 @@ class ObjectMap:
                     ["Source", names.get(edge["source"], edge["source"])],
                     ["Target", names.get(edge["target"], edge["target"])]]
             if key and edge["kind"] == "foreign_key":
-                rows.extend([["Constraint", key.get("name", "")],
-                             ["Columns", ", ".join(key.get("columns", []))],
-                             ["Referenced columns", ", ".join(key.get("referenced_columns", []))]])
+                rows.extend([["Constraint", key.name],
+                             ["Columns", ", ".join(key.columns)],
+                             ["Referenced columns", ", ".join(key.referenced_columns)]])
             details = {"rows": rows}
         shown = self._drop_hidden_objects(nodes, edges)
         self._drop_hidden_connections(nodes, edges)
@@ -2461,7 +2485,7 @@ class ObjectMap:
             opened.append(name)
         self._focus["opened"] = opened
 
-    def _schema_row(self, element: dict[str, Any], row: Any) -> dict[str, Any] | None:
+    def _schema_row(self, element: dict[str, Any], row: Any) -> DatabaseTable | None:
         """The schema read's table for a table in the map's schema: its keys are known there.
 
         A table outside the map's schema, and every view, has none here.
@@ -2472,8 +2496,7 @@ class ObjectMap:
         if (identity.get("schema") != self.subject["schema"]
                 or identity.get("object_type") != "table"):
             return None
-        return next((t for t in self._read.get("tables", [])
-                     if str(t["identity"]["name"]) == str(identity.get("name"))), None)
+        return self._database.table(str(identity.get("name")))
 
     @staticmethod
     def _column_keys(row: dict[str, Any] | None) -> dict[str, set[str]]:
@@ -2530,7 +2553,10 @@ class ObjectMap:
             display[column["id"]] = column["id"] if owner in expanded else owner
             if owner not in expanded:
                 continue
-            keys = self._column_keys(rows.get(owner))
+            # Its keys are its table's own answer (#1441); a table this map holds no
+            # catalog read of -- outside the schema, or a view -- knows none.
+            table = rows.get(owner)
+            keys = table.column_keys() if table is not None else _NO_COLUMN_KEYS
             columns[column["id"]] = {
                 "id": column["id"], "kind": "column", "parent": owner,
                 "label": column["column"],
@@ -2680,7 +2706,8 @@ class ObjectMap:
                     "expression": one["expression"], **reach}
                 continue
             box = next(b for b in boxes if b["id"] == one["object_id"])
-            keys = self._column_keys(self._schema_row(box, None))
+            table = self._schema_row(box, None)
+            keys = table.column_keys() if table is not None else _NO_COLUMN_KEYS
             columns[one["id"]] = {
                 "id": one["id"], "kind": "column", "parent": one["object_id"],
                 "label": one["name"], "column": one["name"],
@@ -2857,26 +2884,24 @@ class ObjectMap:
         for source, row in rows.items():
             if row is None or source not in identities:
                 continue
-            for index, key in enumerate(row.get("foreign_keys") or []):
-                target = by_identity.get(
-                    (key["referenced_schema"], key["referenced_table"], "table"))
+            for index, key in enumerate(row.foreign_keys):
+                target = by_identity.get((key.referenced_schema, key.referenced_table, "table"))
                 if target is None:
-                    outside = f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}"
+                    outside = f"{_EXTERNAL}{key.referenced_schema}.{key.referenced_table}"
                     target = outside if any(edge["target"] == outside for edge in edges) else None
                 if target is None or (source not in expanded and target not in expanded):
                     continue
                 replaced |= {(source, target), (target, source)}
-                for pair, (column, referenced) in enumerate(
-                        zip(key.get("columns") or [], key.get("referenced_columns") or [])):
+                for pair, (column, referenced) in enumerate(zip(key.columns, key.referenced_columns)):
                     start = member_of.get((source, column), source)
                     end = member_of.get((target, referenced), target)
-                    edge_id = f"{_FK_COLUMN_EDGE}{source}:{key['name']}:{index}:{pair}"
+                    edge_id = f"{_FK_COLUMN_EDGE}{source}:{key.name}:{index}:{pair}"
                     if edge_id in ends:
                         continue
                     drawn[edge_id] = {
                         "id": edge_id, "kind": "foreign_key",
                         "source": display.get(start, start), "target": display.get(end, end),
-                        "from": start, "to": end, "constraint": key["name"],
+                        "from": start, "to": end, "constraint": key.name,
                         "columns": [column], "referenced_columns": [referenced]}
         edges[:] = [edge for edge in edges if not (
             edge["kind"] == "foreign_key" and (edge["source"], edge["target"]) in replaced)]

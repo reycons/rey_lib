@@ -22,6 +22,7 @@ from rey_lib.inferred_architecture import (
     SCHEMA_PROJECTION,
     ObjectMap,
 )
+from tests.schema_objects import schema_objects
 
 
 def _claim(claim_id: int, name: str, outcome: str | None = "supported") -> dict[str, Any]:
@@ -108,10 +109,11 @@ def test_a_schema_map_reads_the_schema_as_the_database_domains_objects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asked: list[tuple[Any, ...]] = []
+    read_schema = module.DatabaseSchema(connection="rey apps", catalog="rey_apps", schema="control")
 
     def read(handle: Any, connection: str, catalog: str, schema: str) -> Any:
         asked.append((handle, connection, catalog, schema))
-        return SimpleNamespace(to_dict=lambda: {"tables": []})
+        return read_schema
 
     monkeypatch.setattr(module.DatabaseSchema, "read", read)
     connection = SimpleNamespace(handle=lambda: "handle", name="rey apps")
@@ -119,6 +121,8 @@ def test_a_schema_map_reads_the_schema_as_the_database_domains_objects(
     held = ObjectMap.for_schema(connection, "rey_apps", "control")
 
     assert asked == [("handle", "rey apps", "rey_apps", "control")]
+    # Held as the domain's object (#1441), never its serialization.
+    assert held._schema is read_schema
     assert held.subject == {"kind": "database_schema", "connection": "rey apps",
                             "catalog": "rey_apps", "schema": "control"}
     assert held.projection_kind == SCHEMA_PROJECTION
@@ -347,7 +351,9 @@ SCHEMA_READ = {"tables": [
 def _schema() -> ObjectMap:
     return ObjectMap({"kind": "database_schema", "connection": "rey apps",
                       "catalog": "rey_apps", "schema": "control"},
-                     SCHEMA_PROJECTION, SCHEMA_READ)
+                     SCHEMA_PROJECTION,
+                     schema_objects(SCHEMA_READ, connection="rey apps", catalog="rey_apps",
+                                    schema="control"))
 
 
 def test_a_schema_projects_its_tables_and_foreign_keys_closed() -> None:

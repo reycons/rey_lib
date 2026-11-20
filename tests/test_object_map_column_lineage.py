@@ -15,6 +15,7 @@ import pytest
 from rey_lib.control.control import Control
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.inferred_architecture.object_map import SCHEMA_PROJECTION, ObjectMap
+from tests.schema_objects import schema_objects
 
 SCHEMA_READ = {"tables": [
     {"identity": {"schema": "risk", "name": "trades", "object_type": "table"},
@@ -153,7 +154,9 @@ class _Control:
 
 def _map() -> tuple[ObjectMap, _Control]:
     held = ObjectMap({"kind": "database_schema", "connection": "rey apps",
-                      "catalog": "rey_apps", "schema": "risk"}, SCHEMA_PROJECTION, SCHEMA_READ)
+                      "catalog": "rey_apps", "schema": "risk"}, SCHEMA_PROJECTION,
+                     schema_objects(SCHEMA_READ, connection="rey apps", catalog="rey_apps",
+                                    schema="risk"))
     control = _Control()
     held._control = control
     held._index_installation = "admin"

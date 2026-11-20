@@ -1,11 +1,30 @@
 """A table context changes the same live map; no selection opens another panel."""
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+from rey_lib.db.database_objects import (
+    DatabaseFunction,
+    DatabaseObjectIdentity,
+    DatabaseProcedure,
+    DatabaseRoutineIdentity,
+    DatabaseView,
+)
 from rey_lib.errors.error_utils import AppError
 from rey_lib.inferred_architecture import object_map as module
 from tests.test_object_map import _schema
+
+
+def _holding(schema, kind, signatures, name="named_object"):
+    """The schema, also holding a view, or a routine in each of ``signatures`` (#1441)."""
+    def identity(signature):
+        parts = {"connection": schema.connection, "catalog": schema.catalog,
+                 "schema": schema.schema, "name": name}
+        return (DatabaseObjectIdentity(**parts) if kind == "view"
+                else DatabaseRoutineIdentity(**parts, signature=signature))
+    made = {"view": DatabaseView, "function": DatabaseFunction, "procedure": DatabaseProcedure}[kind]
+    return replace(schema, **{kind + "s": tuple(made(identity=identity(one)) for one in signatures)})
 
 
 def _index(monkeypatch, rows):
@@ -90,10 +109,9 @@ def test_initial_view_or_routine_focus_uses_exact_identity_and_existing_breadcru
     rows = [_graph("db:80", [("db:80", "view" if kind == "view" else "code"), ("symbol:4", "code")])]
     held, calls = _index(monkeypatch, rows)
     identity = {"name": "named_object", "object_type": kind, "signature": signature}
-    held._read = {**held._read, kind + "s": [
-        {"identity": {"name": "named_object", "signature": signature}},
-        {"identity": {"name": "named_object", "signature": "text"}},
-    ]}
+    # The schema holds the object, and -- for a routine -- an overload of it (#1441). A
+    # view has no signature, so it has no overload to tell apart.
+    held._schema = _holding(held._schema, kind, [signature] if kind == "view" else [signature, "text"])
 
     held.focus(object=identity)
     projected = held.projection()
@@ -115,7 +133,7 @@ def test_initial_view_or_routine_focus_uses_exact_identity_and_existing_breadcru
 
 def test_an_unknown_routine_overload_refuses_before_reading_or_changing_focus(monkeypatch):
     held, calls = _index(monkeypatch, [])
-    held._read = {**held._read, "functions": [{"identity": {"name": "rate", "signature": "integer"}}]}
+    held._schema = _holding(held._schema, "function", ["integer"], name="rate")
     before = held.projection()
     with pytest.raises(AppError, match="matching view or routine"):
         held.focus(object={"name": "rate", "object_type": "function", "signature": "text"})
