@@ -55,6 +55,10 @@ class _Core:
         self.total = total
         self.executed: list[str] = []
 
+    def execution_options(self, *, no_parameters: bool) -> "_Core":
+        assert no_parameters is True
+        return self
+
     @contextlib.contextmanager
     def begin(self):
         yield
