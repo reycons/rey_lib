@@ -40,13 +40,13 @@ import json
 from typing import Any, Callable, Final
 
 from rey_lib.db.database_objects import (
-    DatabaseChildIdentity, DatabaseConstraint, DatabaseObjectListing, DatabaseSchema,
+    DatabaseChildIdentity, DatabaseObjectListing, DatabaseSchema,
     DatabaseTable, data_type_category, parameter_role,
 )
 from rey_lib.db.postgres_references import (
     VALUE, carries_forward, derivation_place, expression_head,
 )
-from rey_lib.errors.error_utils import AppError, ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.repository_map.indexed_database_object import IndexedDatabaseObject
 
 __all__ = ["CLAIM_NODE_TYPE", "FLOW_PROJECTION", "OBJECT_PROJECTION", "SCHEMA_PROJECTION",
@@ -220,11 +220,21 @@ def _evidence_rows(edge: dict[str, Any]) -> list[list[Any]]:
     return [["Evidence", f"{evidence['fact_source']} · {evidence['resolution']}"
                          f" · {evidence['evidence']}"]
             for evidence in edge.get("evidence") or []]
-#: What may be opened to show its columns (decision (d): tables and views).
+#: The node kinds drawn as a table's or view's box (decision (d)); any other drawn
+#: database object is a code object. Whether a box opens is its type's own answer
+#: (``_members_of``), not this.
 _OPENABLE: Final = frozenset({"table", "view"})
-#: The database routines that open like a view (#1426): a function or procedure
-#: shows its parameters, its inputs and its outputs, as a view shows its columns.
-_OPENABLE_ROUTINES: Final = frozenset({"function", "procedure"})
+
+
+def _members_of(object_type: str | None) -> str | None:
+    """What a database object of this type contains -- ``columns`` or ``parameters`` --
+    as its type declares it (DatabaseObject.MEMBERS, #1442); None for a type that
+    contains none, and for a word that names no database object type (an external
+    table, a source file)."""
+    try:
+        return DatabaseObjectListing.object_type(f"{object_type or ''}s").MEMBERS
+    except DatabaseError:
+        return None
 #: A function's parameter groups (#1426), in panel order: each group's heading
 #: and the parameter roles it holds (``parameter_role`` of the member's mode).
 _PARAMETER_GROUPS: Final = (("inputs:", "Inputs", frozenset({"input"})),
@@ -2390,11 +2400,12 @@ class ObjectMap:
 
     @classmethod
     def _opens(cls, element: dict[str, Any]) -> bool:
-        """Whether a drawn object opens to show its rows (#1426): a table or view
-        (its columns), or a function (its inputs and outputs)."""
-        return element.get("kind") in _OPENABLE or (
-            cls._is_code_object(element)
-            and (element.get("identity") or {}).get("object_type") in _OPENABLE_ROUTINES)
+        """Whether a drawn object opens to show its rows (#1426): its type contains
+        members (#1442) -- a table's or view's columns, a routine's parameters."""
+        if element.get("kind") in _OPENABLE:
+            return _members_of(element["kind"]) is not None
+        return cls._is_code_object(element) and _members_of(
+            (element.get("identity") or {}).get("object_type")) is not None
 
     def _header_object(self, node_id: str) -> str:
         """A header row, its +/-, or a function's group heading stands for its
@@ -2497,21 +2508,6 @@ class ObjectMap:
                 or identity.get("object_type") != "table"):
             return None
         return self._database.table(str(identity.get("name")))
-
-    @staticmethod
-    def _column_keys(row: dict[str, Any] | None) -> dict[str, set[str]]:
-        """Which of a table's columns are primary key, foreign key and unique, from its read."""
-        if row is None:
-            return {"primary_key": set(), "foreign_key": set(), "unique": set()}
-        unique = {column for index in row.get("indexes") or [] if index.get("unique")
-                  for column in index.get("columns") or []}
-        unique |= {column for constraint in row.get("constraints") or []
-                   if constraint.get("kind") == DatabaseConstraint.UNIQUE
-                   for column in constraint.get("columns") or []}
-        return {"primary_key": set((row.get("primary_key") or {}).get("columns") or []),
-                "foreign_key": {column for key in row.get("foreign_keys") or []
-                                for column in key.get("columns") or []},
-                "unique": unique}
 
     def _column_lineage(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]],
                         openable: list[dict[str, Any]], expanded: set[str],
@@ -2620,7 +2616,7 @@ class ObjectMap:
         """
         headings: list[dict[str, Any]] = []
         functions = {owner for owner, (_, _, kind) in identities.items()
-                     if kind in _OPENABLE_ROUTINES}
+                     if _members_of(kind) == "parameters"}
         for owner in sorted(functions):
             held = sorted((one for one in columns.values() if one["parent"] == owner),
                           key=lambda one: one["ordinal"])

@@ -125,11 +125,9 @@ class TestATablesKeys:
         assert DatabaseTable(identity=_TABLE).column_keys() == {
             "primary_key": frozenset(), "foreign_key": frozenset(), "unique": frozenset()}
 
-    def test_the_same_answer_the_map_derives_from_the_tables_dictionary(self) -> None:
-        """Parity: the moved behaviour answers as ObjectMap's copy does, before the map switches."""
-        table = _table()
-        derived = ObjectMap._column_keys(table.to_dict())
-        assert {key: set(held) for key, held in table.column_keys().items()} == derived
+    def test_the_map_keeps_no_copy_of_its_own(self) -> None:
+        """#1442: ObjectMap's dictionary copy is deleted; the table's answer is the only one."""
+        assert not hasattr(ObjectMap, "_column_keys")
 
 
 class TestASchemasTables:
