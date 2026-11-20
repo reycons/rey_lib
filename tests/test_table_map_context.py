@@ -82,6 +82,27 @@ def test_context_projects_the_index_graph_and_returns_to_the_same_schema(monkeyp
     assert {n["kind"] for n in held.projection()["nodes"]} <= {"table", "external"}
 
 
+def test_a_table_map_states_its_centre_and_an_overview_none(monkeypatch) -> None:  # #1457
+    held, _ = _index(monkeypatch, [{
+        "root_count": 1, "root_id": "db:1",
+        "nodes": [
+            {"id": "db:1", "kind": "table", "label": "control.run", "depth": 0},
+            {"id": "db:2", "kind": "table", "label": "control.run_log", "depth": 1},
+            {"id": "db:3", "kind": "view", "label": "control.run_vw", "depth": 2},
+        ],
+        "edges": [{"id": "fk:1", "kind": "foreign_key", "source": "db:2", "target": "db:1"},
+                  {"id": "dep:1", "kind": "dependency", "source": "db:2", "target": "db:3"}],
+    }])
+    assert "center" not in held.projection()
+    held.double_click("table:run")
+    projected = held.projection()
+    by_id = {n["id"]: n for n in projected["nodes"]}
+    # The centre is the subject as drawn (its alias), generation 0; the rest keep theirs.
+    assert projected["center"] == "table:run"
+    assert by_id["table:run"]["depth"] == 0
+    assert (by_id["db:2"]["depth"], by_id["db:3"]["depth"]) == (1, 2)
+
+
 @pytest.mark.parametrize("count", [0, 2])
 def test_an_absent_or_ambiguous_index_root_refuses_without_changing_focus(monkeypatch, count):
     held, _ = _index(monkeypatch, [{"root_count": count}])

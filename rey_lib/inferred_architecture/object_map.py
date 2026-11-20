@@ -2365,7 +2365,7 @@ class ObjectMap:
                     shown = self._drop_hidden_objects(nodes, edges)
                     self._drop_hidden_connections(nodes, edges)
                     return {"nodes": nodes, "edges": edges, "path": self._path(),
-                            **toggles, **self._view_actions(
+                            **self._center(), **toggles, **self._view_actions(
                                 [one for one in openable if one["id"] in shown],
                                 [one for one in panels if one["id"] in shown]), **lineage}
         details = None
@@ -2385,8 +2385,9 @@ class ObjectMap:
         shown = self._drop_hidden_objects(nodes, edges)
         self._drop_hidden_connections(nodes, edges)
         return {"nodes": nodes, "edges": edges, "path": self._path(), "details": details,
-                **toggles, **self._view_actions([one for one in openable if one["id"] in shown],
-                                                [one for one in panels if one["id"] in shown])}
+                **self._center(), **toggles,
+                **self._view_actions([one for one in openable if one["id"] in shown],
+                                     [one for one in panels if one["id"] in shown])}
 
     # -- column lineage on the schema projection (#1426) ----------------------
 
@@ -2517,6 +2518,18 @@ class ObjectMap:
         if hidden:
             self._focus[key] = hidden
 
+    def _center(self) -> dict[str, str]:
+        """The map's centre (#1457): the object a focused map is about, where there is one."""
+        subject = self._subject_id()
+        return {"center": subject} if subject is not None else {}
+
+    def _subject_id(self) -> str | None:
+        """The drawn id of the object a map focused on one object is about (#1457):
+        its table context's root -- generation 0 -- or None (an overview, a column)."""
+        focused = (not self._focus.get("column") and self._table_context is not None
+                   and any(self._focus.get(key) for key in ("table", "node", "object")))
+        return self._table_context["root_id"] if focused else None
+
     def _drop_hidden_objects(self, nodes: list[dict[str, Any]],
                              edges: list[dict[str, Any]]) -> set[str]:
         """Take out the objects the Map Options hide (#1426): those of a hidden
@@ -2527,12 +2540,10 @@ class ObjectMap:
         objects = [node for node in nodes if not node.get("parent") and node.get("kind") != "transform"]
         generations = set(self._focus.get("hidden_generations") or [])
         types = set(self._focus.get("hidden_object_types") or [])
-        focused = (not self._focus.get("column") and self._table_context is not None
-                   and any(self._focus.get(key) for key in ("table", "node", "object")))
-        root = self._table_context["root_id"] if focused else None
+        root = self._subject_id()
         hidden = set() if self._focus.get("column") else {
             node["id"] for node in objects if node["id"] != root and (
-                (focused and node.get("depth") in generations)
+                (root is not None and node.get("depth") in generations)
                 or _object_type_of(node) in types)}
         if hidden:
             nodes[:] = [node for node in nodes
