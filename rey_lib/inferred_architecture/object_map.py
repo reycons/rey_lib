@@ -237,8 +237,9 @@ def _members_of(object_type: str | None) -> str | None:
         return None
 #: A function's parameter groups (#1426), in panel order: each group's heading
 #: and the parameter roles it holds (``parameter_role`` of the member's mode).
-_PARAMETER_GROUPS: Final = (("inputs:", "Inputs", frozenset({"input"})),
-                            ("outputs:", "Outputs", frozenset({"output"})))
+#: An INOUT parameter (``input_output``) is in both groups (#1451).
+_PARAMETER_GROUPS: Final = (("inputs:", "Inputs", frozenset({"input", "input_output"})),
+                            ("outputs:", "Outputs", frozenset({"output", "input_output"})))
 
 #: A claim's owner file is a configured file beneath the apps root: its
 #: ``owner_subject_id`` is the path relative to it (#1218).
@@ -1009,6 +1010,9 @@ class ObjectMap:
         node_id = str(node_id or "")
         if self.projection_kind != SCHEMA_PROJECTION or not node_id:
             return None
+        # A row standing for another -- an INOUT parameter's Outputs row (#1451) --
+        # explains what it stands for, as every other gesture acts on it.
+        node_id = self._header_object(node_id)
         if node_id in self._column_rows:
             self.click(node_id)
             return {"member": node_id, **self._member_identities[node_id]}
@@ -2613,6 +2617,14 @@ class ObjectMap:
         type. Each function's rows are numbered in that order, in their call order
         within a group; a group with no parameters has no heading. Returns the
         heading rows; the parameter rows are renumbered in place.
+
+        An INOUT parameter is in both groups (#1451): its own row under Inputs
+        keeps its identity and its lines; under Outputs it is a display row whose
+        id is the group's prefix and its own (``outputs:<member>``) and whose
+        ``member`` is its own id -- a presentation identifier, never a second
+        parameter. ``_header_object`` resolves it to the parameter, as it resolves
+        a heading to its function, so every gesture acts on the one parameter.
+        Display rows are returned with the headings.
         """
         headings: list[dict[str, Any]] = []
         functions = {owner for owner, (_, _, kind) in identities.items()
@@ -2621,6 +2633,7 @@ class ObjectMap:
             held = sorted((one for one in columns.values() if one["parent"] == owner),
                           key=lambda one: one["ordinal"])
             ordinal = 0
+            placed: set[str] = set()
             for prefix, label, roles in _PARAMETER_GROUPS:
                 members = [one for one in held if parameter_role(one.get("mode")) in roles]
                 if not members:
@@ -2630,6 +2643,11 @@ class ObjectMap:
                                  "label": label, "ordinal": ordinal})
                 for one in members:
                     ordinal += 1
+                    if one["id"] in placed:
+                        headings.append({**one, "id": f"{prefix}{one['id']}", "member": one["id"],
+                                         "ordinal": ordinal})
+                        continue
+                    placed.add(one["id"])
                     one["ordinal"] = ordinal
         return headings
 
@@ -2928,9 +2946,11 @@ class ObjectMap:
             if node["kind"] in _BOX_PARTS:
                 node["highlight"] = []
                 continue
-            node["highlight"] = (["focus"] if node["id"] == selected or node["id"] in joined else
-                                 ["upstream"] if node["id"] in shown_up else
-                                 ["downstream"] if node["id"] in shown_down else [])
+            # A display row is marked as the parameter it stands for (#1451).
+            own = node.get("member", node["id"])
+            node["highlight"] = (["focus"] if own == selected or own in joined else
+                                 ["upstream"] if own in shown_up else
+                                 ["downstream"] if own in shown_down else [])
             if node["highlight"] and node.get("parent"):
                 lit.add(node["parent"])
         _mark_holding_objects(nodes, lit, selected)
