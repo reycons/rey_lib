@@ -86,6 +86,13 @@ _FLOW: Final = "flow:"
 _APPLICATION: Final = "application:"
 _SYMBOL: Final = "symbol:"
 _BOUNDARY: Final = "boundary:"
+#: A flow's entry and exits as the flow chart names them (#1453).
+_FLOW_START: Final = "Start"
+_FLOW_FAILED: Final = "Failed / refused"
+_FLOW_COMPLETE: Final = "Complete / return"
+_FLOW_AWAIT: Final = "Await next request"
+#: A refusal on the process route (#1453).
+_FLOW_REFUSED: Final = "Refused"
 #: A level-1 column flow (#1426): input column -> output column, its transforms hidden.
 _COLUMN_FLOW_EDGE: Final = "column_flow:"
 #: A table's or view's header row (#1426): it names the object; a click selects it.
@@ -190,6 +197,44 @@ def _mark_holding_objects(nodes: list[dict[str, Any]], holding: set[str],
     for node in nodes:
         if node["id"] in holding and not node.get("highlight"):
             node["highlight"] = ["focus"] if node["id"] == owner else ["first"]
+
+
+def _flow_chart_nodes(nodes: list[dict[str, Any]],
+                      process: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """A flow screen's nodes as the chart reads them (#1453).
+
+    Every screen: the entry is the start, an exit a failure, a wait for the next
+    request, or a completion; each node states whether it has a resolved callee
+    (never the entry) and whether its details can open. On the process route a
+    refusal is named so, a step grouped on an input carries the input's label
+    and stands on its own -- the input groups are not drawn there.
+    """
+    groups = {node["id"]: node.get("label") or "" for node in nodes
+              if node["kind"] == "participant"}
+    roles = (process or {}).get("nodes") or {}
+    shown: list[dict[str, Any]] = []
+    for node in nodes:
+        if process is not None and node["kind"] == "participant":
+            continue
+        label = node.get("label")
+        if node["kind"] == "activity_entry":
+            label = _FLOW_START
+        elif node["kind"] == "activity_exit":
+            label = (_FLOW_FAILED if roles.get(node["id"]) == "failure"
+                     else label if label == _FLOW_AWAIT else _FLOW_COMPLETE)
+        elif process is not None and node["kind"] == "raise":
+            label = _FLOW_REFUSED
+        elif process is not None and node.get("parent"):
+            label = f"{groups.get(node['parent'], '')}\n{label or ''}"
+        one = {**node, "label": label,
+               "has_callee": bool(node.get("target_symbol_id"))
+               and node["kind"] != "activity_entry",
+               "can_open_details": bool(node.get("target_symbol_id")
+                                        or node.get("expand_symbol_id"))}
+        if process is not None:
+            one.pop("parent", None)
+        shown.append(one)
+    return shown
 
 
 def _line_columns(nodes: list[dict[str, Any]], edge: dict[str, Any] | None,
@@ -2073,6 +2118,7 @@ class ObjectMap:
         coverage = [row for _, row in elements if row and row.get("coverage_status")]
         partial = [row for row in coverage if row["coverage_status"] == "partial"]
         process = self._process_reading(elements, relations) if self._focus.get("flow") and not self._focus.get("detail") else None
+        nodes = _flow_chart_nodes(nodes, process)
         path = self._path()
         scope_key = lambda focus: json.dumps([self.subject, focus], sort_keys=True, separators=(",", ":"))
         current = scope_key(self._focus)

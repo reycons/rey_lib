@@ -762,12 +762,13 @@ def test_object_interactions_are_the_overview_and_cfg_is_explicit_detail():
     held._read["flow_steps"] = rows
     held.focus(reading="flow",flow="example")
     projection=held.projection()
-    assert [n["label"] for n in projection["nodes"] if n["kind"]=="activity"] == ["Source.resolve","Transform.resolve","Target.resolve"]
+    # On the process route (#1453) each step carries its input's label and stands
+    # on its own: the input groups are not drawn there.
+    assert [n["label"] for n in projection["nodes"] if n["kind"]=="activity"] == [
+        "source: Source\nSource.resolve", "transform: Transform\nTransform.resolve",
+        "target: Target\nTarget.resolve"]
     assert len(projection["edges"])==4
-    assert {n["label"] for n in projection["nodes"] if n["kind"]=="participant"} == {
-        "source: Source", "transform: Transform", "target: Target"}
-    assert all(n.get("parent", "").startswith("participant:100:")
-               for n in projection["nodes"] if n["kind"]=="activity")
+    assert not any(n["kind"]=="participant" or n.get("parent") for n in projection["nodes"])
     held.double_click("control:100:entry")
     assert held.projection()["focus"]["detail"] is True
     assert {n["kind"] for n in held.projection()["nodes"]}=={"entry","call","exit"}
@@ -858,8 +859,11 @@ def test_overview_retains_construction_decision_and_explicit_refusal():
     projection = held.projection()
     labels = {n["id"]:n["label"] for n in projection["nodes"]}
     assert labels["control:100:create"] == "Create domain.Request"
-    assert labels["control:100:refuse"] == "raise AppError('No selection')"
-    assert labels["control:100:error"] == "Failure / refusal to caller"
+    # A refusal on the process route is named so (#1453); its code stays in its details.
+    assert labels["control:100:refuse"] == "Refused"
+    held.click("control:100:refuse")
+    assert ["Code", "raise AppError('No selection')"] in held.projection()["details"]["rows"]
+    assert labels["control:100:error"] == "Failed / refused"
     assert {(e["label"], e["target"]) for e in projection["edges"]
             if e["source"]=="control:100:test"} == {
                 ("true","control:100:refuse"), ("false","control:100:exit")}
@@ -975,6 +979,26 @@ def test_process_backbone_keeps_alternatives_and_never_claims_run_frequencies():
     assert process['alternative_count'] > 0
     assert set(process['edges']) == {e['id'] for e in projection['edges']}
     assert all(role in ('primary','alternative','failure') for role in process['edges'].values())
+
+
+def test_the_flow_chart_states_its_labels_callees_and_details(  # #1453
+) -> None:
+    held = _with_flows()
+    held.focus(reading='flow', flow='example')
+    nodes = {n['id']: n for n in held.projection()['nodes']}
+    assert (nodes['control:100:entry']['label'], nodes['control:100:exit']['label']) == (
+        'Start', 'Complete / return')
+    # A resolved callee: the call has one; the entry never shows one, but opens its detail.
+    assert [nodes[k]['has_callee'] for k in ('control:100:entry', 'control:100:call')] == [
+        False, True]
+    assert {k for k, n in nodes.items() if n['can_open_details']} == {
+        'control:100:entry', 'control:100:call'}
+    # Off the process route the steps keep their own labels; a callee is still stated.
+    held.focus(reading='flow', flow='example', detail=True)
+    nodes = {n['id']: n for n in held.projection()['nodes']}
+    assert nodes['control:100:entry']['label'] == 'run'
+    assert (nodes['control:100:call']['has_callee'], nodes['control:100:call']['can_open_details']) == (
+        True, True)
 
 
 def test_failure_paths_are_revealable_without_changing_the_successful_route():
