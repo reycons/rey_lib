@@ -981,6 +981,43 @@ def test_process_backbone_keeps_alternatives_and_never_claims_run_frequencies():
     assert all(role in ('primary','alternative','failure') for role in process['edges'].values())
 
 
+def test_each_flow_screen_states_its_notice() -> None:  # #1438
+    held = _with_flows()
+    held.focus(reading='flow', flow='example')
+    # A process route: read from the code; the fixture's rows are partially covered.
+    assert held.projection()['notice'] == (
+        'Static process route · no recorded run selected'
+        ' · Partial coverage: context-manager exit/suppression')
+    # Nothing to draw: why, by what the screen is focused on.
+    empty = {'nodes': [], 'edges': []}
+    held._focus = {'flow': 'example', 'request_id': 'execute'}
+    assert held._notice(empty) == 'No flow steps are available for this input.'
+    held._focus = {'flow': None, 'application': 'example'}
+    assert held._notice(empty) == 'No indexed inputs are available for this application.'
+    held._read['flows'] = []
+    held.focus(reading='flow', flow=None)
+    assert held.projection()['nodes'] == []
+    assert held.projection()['notice'] == 'No application entries are indexed.'
+
+
+def test_an_empty_object_screen_says_nothing_is_published_and_a_drawn_one_nothing() -> None:  # #1438
+    held = _with_flows()
+    assert held.projection()['notice'] == ('' if held.projection()['nodes']
+                                           else 'No inferred-architecture areas are published.')
+    held._read = {key: [] if isinstance(value, list) else value for key, value in held._read.items()}
+    held.focus(level='estate')
+    assert held.projection()['nodes'] == []
+    assert held.projection()['notice'] == 'No inferred-architecture areas are published.'
+
+
+def test_the_map_declares_what_each_of_its_readings_reads_as() -> None:  # #1438
+    held = _with_flows()
+    projection = held.projection()
+    assert projection['readings'] == [OBJECT_PROJECTION, FLOW_PROJECTION]
+    assert projection['reading_labels'] == {OBJECT_PROJECTION: 'Object Map',
+                                            FLOW_PROJECTION: 'Flow Charts'}
+
+
 def test_the_flow_chart_states_its_labels_callees_and_details(  # #1453
 ) -> None:
     held = _with_flows()

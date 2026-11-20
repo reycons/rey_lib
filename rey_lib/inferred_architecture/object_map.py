@@ -93,6 +93,21 @@ _FLOW_COMPLETE: Final = "Complete / return"
 _FLOW_AWAIT: Final = "Await next request"
 #: A refusal on the process route (#1453).
 _FLOW_REFUSED: Final = "Refused"
+#: What each reading reads as where a map offers several (#1304, #1438): its tab.
+_READING_LABELS: Final = {OBJECT_PROJECTION: "Object Map", FLOW_PROJECTION: "Flow Charts"}
+#: What a screen with nothing to draw says, by reading (#1438).
+_NOTHING_PUBLISHED: Final = {OBJECT_PROJECTION: "No inferred-architecture areas are published.",
+                             SCHEMA_PROJECTION: "No objects are available for this map."}
+#: A flow screen with nothing to draw (#1438): an input's steps, an application's
+#: inputs, or the applications themselves.
+_NO_FLOW_STEPS: Final = "No flow steps are available for this input."
+_NO_FLOW_INPUTS: Final = "No indexed inputs are available for this application."
+_NO_FLOW_ENTRIES: Final = "No application entries are indexed."
+#: A process route is read from the code, never from a run (#1438).
+_STATIC_ROUTE: Final = "Static process route · no recorded run selected"
+#: A partially covered flow (#1438), and why where its rows say.
+_PARTIAL_COVERAGE: Final = "Partial coverage: {reason}"
+_UNSUPPORTED_CONSTRUCTS: Final = "unsupported constructs"
 #: A level-1 column flow (#1426): input column -> output column, its transforms hidden.
 _COLUMN_FLOW_EDGE: Final = "column_flow:"
 #: A table's or view's header row (#1426): it names the object; a click selects it.
@@ -1020,10 +1035,26 @@ class ObjectMap:
             **({"layout": self.layout_projection()} if self._layout_control is not None else {}),
             # Every reading this one object holds (#1304); the active one is ``projection``.
             "readings": list(self._readings),
+            "reading_labels": {one: _READING_LABELS.get(one, one) for one in self._readings},
             "focus": dict(self._focus),
             "selected": selected,
+            "notice": self._notice(screen),
             **screen,
         }
+
+    def _notice(self, screen: dict[str, Any]) -> str:
+        """What the screen says beside its drawing (#1438): why it is empty, or --
+        a flow -- that its route is static and where its coverage is partial."""
+        if self.projection_kind != FLOW_PROJECTION:
+            return "" if screen["nodes"] else _NOTHING_PUBLISHED[self.projection_kind]
+        if not screen["nodes"]:
+            return (_NO_FLOW_STEPS if self._focus.get("flow")
+                    else _NO_FLOW_INPUTS if self._focus.get("application") else _NO_FLOW_ENTRIES)
+        partial = screen.get("coverage_status") == "partial"
+        return " · ".join(
+            ([_STATIC_ROUTE] if screen.get("process") else [])
+            + ([_PARTIAL_COVERAGE.format(reason=screen.get("coverage_reason")
+                                         or _UNSUPPORTED_CONSTRUCTS)] if partial else []))
 
     def inspect(self) -> dict[str, Any]:
         """What this map is, where it is focused, and the map structure there (#1199 S4).
